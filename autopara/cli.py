@@ -8,7 +8,6 @@ import signal
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from time import sleep
 from zoneinfo import ZoneInfo
 
 from .config import Config, ConfigError, load_config
@@ -132,9 +131,9 @@ def cmd_join(args, config: Config) -> None:
     lesson = Lesson(now.date(), now.time(), leave_at.time(), "Тестовий вхід")
     visit = Visit(args.url, platform_of(args.url), [lesson], now, leave_at)
     logging.getLogger("autopara.ears").setLevel(logging.DEBUG)  # показувати розпізнану мову
-    with assistant_stack(config, clock) as (assistant, sink):
-        joiner = Joiner(config.join, config.profile_dir, audio_sink=sink)
-        runner = Runner(config, _client(config), joiner, clock=clock, assistant=assistant)
+    with assistant_stack(config, clock) as stack:
+        joiner = Joiner(config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames)
+        runner = Runner(config, _client(config), joiner, clock=clock, assistant=stack.assistant)
         runner.plan = Plan(visits=[visit])
         runner.next_refresh = leave_at + timedelta(days=1)  # розклад не потрібен
         print("Заходжу. Ctrl+C — вийти.")
@@ -151,7 +150,7 @@ def cmd_join(args, config: Config) -> None:
                         print(f"👥 Бачу учасників: {shown} — розумний вихід працює.")
                     else:
                         print("👥 Не бачу лічильника учасників — з такої зустрічі виходитиму за розкладом.")
-                sleep(5)
+                joiner.idle(5)
         except KeyboardInterrupt:
             pass
         finally:
@@ -165,10 +164,10 @@ def cmd_run(args, config: Config) -> None:
     # і зняти заборону сну.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     clock = _clock(config)
-    with assistant_stack(config, clock) as (assistant, sink):
-        joiner = Joiner(config.join, config.profile_dir, audio_sink=sink)
+    with assistant_stack(config, clock) as stack:
+        joiner = Joiner(config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames)
         try:
-            Runner(config, _client(config), joiner, clock=clock, assistant=assistant).run_forever()
+            Runner(config, _client(config), joiner, clock=clock, assistant=stack.assistant).run_forever()
         except KeyboardInterrupt:
             log.info("Зупинено")
         finally:
@@ -229,6 +228,9 @@ def cmd_check(args, config: Config) -> None:
     line(config.profile_dir.exists(), f"профіль браузера: {config.profile_dir} (якщо немає — `autopara login`)")
     if config.join.zoom_mode == "app":
         line(bool(shutil.which("zoom")), "Zoom-клієнт" + ("" if shutil.which("zoom") else ": не знайдено (yay -S zoom)"))
+    if config.telegram.clips:
+        has_ffmpeg = bool(shutil.which("ffmpeg"))
+        line(has_ffmpeg, "ffmpeg для відеовирізок" + ("" if has_ffmpeg else ": не знайдено (sudo pacman -S ffmpeg)"))
     if config.telegram.token and config.telegram.chat_id:
         try:
             TelegramBot(config.telegram.token, config.telegram.chat_id).send("✓ autopara check")

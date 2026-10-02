@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -474,6 +476,15 @@ class Browser:
     def new_page(self) -> Page:
         return self.context().new_page()
 
+    def any_page(self) -> Page | None:
+        """Будь-яка відкрита вкладка, не запускаючи браузер."""
+        if self._context is None:
+            return None
+        try:
+            return next((page for page in self._context.pages if not page.is_closed()), None)
+        except PlaywrightError:
+            return None
+
     def _launch(self) -> BrowserContext:
         if self._playwright is None:
             self._playwright = sync_playwright().start()
@@ -531,8 +542,10 @@ class Joiner:
         headless: bool = False,
         opener=open_uri,
         audio_sink: str = "",
+        frames=None,
     ):
         self.settings = settings
+        self.frames = frames  # FrameBuffer для відеовирізок, або None
         self.browser = Browser(
             profile_dir, settings.browser_channel, settings.mute_sound, headless, settings.browser_path, audio_sink
         )
@@ -557,7 +570,41 @@ class Joiner:
         except PlaywrightError as e:
             self._discard(page)
             raise JoinError(f"помилка браузера: {str(e).splitlines()[0]}") from e
+        self._screencast(page)
         return Session(visit, visit.leave_at, page)
+
+    def _screencast(self, page: Page) -> None:
+        """Кадри сторінки — у буфер для відеовирізок. Трансляція живе, поки відкрита вкладка."""
+        if self.frames is None:
+            return
+        try:
+            cdp = page.context.new_cdp_session(page)
+
+            def on_frame(params: dict) -> None:
+                try:
+                    cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
+                except PlaywrightError:
+                    return
+                self.frames.add(base64.b64decode(params["data"]))
+
+            cdp.on("Page.screencastFrame", on_frame)
+            cdp.send(
+                "Page.startScreencast",
+                {"format": "jpeg", "quality": 55, "maxWidth": 1280, "maxHeight": 800, "everyNthFrame": 6},
+            )
+        except PlaywrightError as e:
+            log.warning("Не вдалося увімкнути запис кадрів для вирізок: %s", e)
+
+    def idle(self, seconds: float) -> None:
+        """Чекає, але дає браузеру доставляти події (кадри для вирізок). time.sleep їх би затримав."""
+        page = self.browser.any_page()
+        if page is not None:
+            try:
+                page.wait_for_timeout(seconds * 1000)
+                return
+            except PlaywrightError:
+                pass
+        time.sleep(seconds)
 
     def observe(self, session: Session) -> Observation:
         """Що зараз у зустрічі. Якщо щось пішло не так — «нічого не відомо», і ніхто нікуди не виходить."""
@@ -590,6 +637,15 @@ class Joiner:
         except PlaywrightError as e:
             log.warning("Не вдалося написати в чат: %s", e)
             return False
+
+    def screenshot(self, session: Session) -> bytes | None:
+        if session.page is None:
+            return None
+        try:
+            return session.page.screenshot(type="jpeg", quality=70)
+        except PlaywrightError as e:
+            log.warning("Не вдалося зробити скріншот: %s", e)
+            return None
 
     def alive(self, session: Session) -> bool:
         return session.page is None or not session.page.is_closed()

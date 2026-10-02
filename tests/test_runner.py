@@ -53,6 +53,9 @@ class FakeJoiner:
         self.written.append(text)
         return True
 
+    def screenshot(self, session):
+        return b"jpeg"
+
     def join(self, visit):
         if self.errors:
             raise self.errors.pop(0)
@@ -239,10 +242,11 @@ def test_assistant_mirrors_plus_through_the_browser():
     joiner.chat = [ChatMessage("0", "Іван Коваль", "Всім привіт")]
     runner.tick(at("09:28"))
     assert inbox == ["✅ Зайшов на «Бази даних», мікрофон і камера вимкнені"]
+    joiner.chat += [ChatMessage("t", "Петренко П.П.", "Перекличка, поставте +")]
     joiner.chat += [ChatMessage(str(i), name, "+") for i, name in enumerate(["Іван Коваль", "Олена Бойко", "Марко Лис"], 1)]
     runner.tick(at("10:00"))
     assert joiner.written == ["+"]
-    assert inbox[-1] == "💬 Написав «+» у чат «Бази даних» (Група пише «+» у чат)"
+    assert inbox[-1] == "💬 Написав «+» у чат «Бази даних» (Група ставить «+» у чат — це перекличка)"
 
 
 def test_leave_command_from_telegram():
@@ -261,3 +265,18 @@ def test_failed_join_is_reported_with_the_link():
     joiner.errors = [JoinError("потрібно увійти в Google-акаунт", retry=False)]
     runner.tick(at("09:28"))
     assert inbox == [f"❌ Не вдалося зайти на «Бази даних»: потрібно увійти в Google-акаунт. Зайди сам: {MEET}"]
+
+
+def test_screenshot_reaches_telegram():
+    runner, joiner, inbox = make_assisted_runner([make_lesson()])
+    photos = []
+
+    class Media:
+        def photo(self, content, caption):
+            photos.append((content, caption))
+
+    runner.assistant.media = Media()
+    runner.tick(at("09:28"))
+    runner.assistant.on_command("екран", at("09:40"))
+    runner.tick(at("09:40"))
+    assert photos == [(b"jpeg", "🖥 «Бази даних», 09:40")]

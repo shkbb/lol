@@ -69,3 +69,26 @@ def test_null_sink_cleans_up_stale_one(monkeypatch):
     sink.close()
     assert ["pactl", "unload-module", "7"] in calls and ["pactl", "unload-module", "8"] not in calls
     assert calls[-1] == ["pactl", "unload-module", "42"]
+
+
+def test_loopback_lets_you_hear_the_class_too(monkeypatch):
+    loaded, unloaded = [], []
+
+    class Result:
+        def __init__(self, stdout=""):
+            self.stdout, self.returncode, self.stderr = stdout, 0, ""
+
+    def run(args, **kwargs):
+        if args[:2] == ["pactl", "load-module"]:
+            loaded.append(args[2:])
+            return Result(f"{len(loaded)}\n")
+        if args[:2] == ["pactl", "unload-module"]:
+            unloaded.append(args[2])
+        return Result()
+
+    monkeypatch.setattr(ears.subprocess, "run", run)
+    sink = ears.NullSink(loopback=True)
+    sink.create()
+    assert loaded[1] == ["module-loopback", "source=autopara.monitor", "latency_msec=60"]
+    sink.close()
+    assert unloaded == ["2", "1"]  # спершу дубль, потім сам вихід

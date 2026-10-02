@@ -1,10 +1,11 @@
-"""Збирає помічника відповідно до конфіга: сповіщення, команди з Telegram, мозок і вуха."""
+"""Збирає помічника відповідно до конфіга: сповіщення, команди з Telegram, мозок, вуха, вирізки й звіти."""
 
 from __future__ import annotations
 
 import logging
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterator
 
@@ -12,14 +13,22 @@ from .assistant import Assistant
 from .brain import BrainWorker, OllamaBrain
 from .config import Config
 from .ears import Ears, EarsError, NullSink, WhisperTranscriber, ears_available
+from .media import AudioBuffer, Clipper, FrameBuffer
+from .report import Reporter
 from .telegram import Notifier, TelegramBot
 
 log = logging.getLogger(__name__)
 
 
+@dataclass
+class Stack:
+    assistant: Assistant
+    audio_sink: str = ""  # куди браузер віддає звук (для вух), або ""
+    frames: FrameBuffer | None = None  # кадри сторінки для відеовирізок, або None
+
+
 @contextmanager
-def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[tuple[Assistant, str]]:
-    """Повертає (помічник, назва аудіовиходу для браузера або "")."""
+def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[Stack]:
     stoppers: list[Callable[[], None]] = []
     bot = None
     if config.telegram.token and config.telegram.chat_id:
@@ -28,7 +37,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[t
         log.warning("Telegram: немає chat_id — запусти `autopara telegram`")
     notifier = Notifier(bot)
 
-    worker = None
+    brain = worker = None
     if config.brain.enabled:
         brain = OllamaBrain(config.brain.url, config.brain.model)
         if problem := brain.check():
@@ -36,26 +45,35 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[t
         worker = BrainWorker(brain, clock)
         stoppers.append(worker.stop)
 
-    assistant = Assistant(config.me, notifier, worker.wake if worker else None)
+    assistant = Assistant(config.me, notifier, worker.wake if worker else None, media=notifier)
     if worker:
         worker.assistant = assistant
         worker.start()
         log.info("Мозок: модель %s", config.brain.model)
+    stack = Stack(assistant)
 
     if bot:
         stop = threading.Event()
         listener = threading.Thread(
-            target=bot.listen, args=(lambda text: assistant.on_command(text, clock()), stop), name="telegram", daemon=True
+            target=bot.listen,
+            args=(lambda text, is_reply: assistant.on_command(text, clock(), is_reply), stop),
+            name="telegram",
+            daemon=True,
         )
         listener.start()
         stoppers.append(stop.set)
 
-    sink_name = ""
+    audio = None
+    clips = bot is not None and config.telegram.clips
+    if clips:
+        stack.frames = FrameBuffer()
+        audio = AudioBuffer() if config.ears.enabled else None
+
     if config.ears.enabled:
         if problem := ears_available():
             log.warning("Вуха вимкнено: %s", problem)
         else:
-            sink = NullSink()
+            sink = NullSink(loopback=not config.join.mute_sound)
             try:
                 sink.create()
                 transcriber = WhisperTranscriber(config.ears.model, config.ears.language)
@@ -63,14 +81,26 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[t
                 sink.close()
                 log.warning("Вуха вимкнено: %s", e)
             else:
-                ears = Ears(transcriber, lambda text: assistant.on_heard(text, clock()), sink.monitor)
+                ears = Ears(
+                    transcriber,
+                    lambda text: assistant.on_heard(text, clock()),
+                    sink.monitor,
+                    on_audio=audio.add if audio else None,
+                )
                 ears.start()
                 stoppers += [sink.close, ears.stop]
-                sink_name = sink.name
+                stack.audio_sink = sink.name
                 log.info("Вуха: слухаю пари (модель %s)", config.ears.model)
 
+    if clips:
+        assistant.on_moment = Clipper(stack.frames, audio, notifier, assistant.quote).capture
+
+    reporter = Reporter(notifier, brain, worker, config.data_dir / "transcripts")
+    assistant.on_chunk = reporter.chunk
+    assistant.on_finished = reporter.finish
+
     try:
-        yield assistant, sink_name
+        yield stack
     finally:
         for stop_one in reversed(stoppers):
             stop_one()

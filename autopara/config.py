@@ -58,6 +58,7 @@ class MeSettings:
 class TelegramSettings:
     token: str = ""
     chat_id: int = 0
+    clips: bool = True  # відеовирізка моменту, коли тебе згадали (потрібен ffmpeg; звук — якщо ввімкнені вуха)
 
 
 @dataclass

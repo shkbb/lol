@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from time import sleep
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -160,7 +159,7 @@ class Runner:
         self.active.pop(key, None)
         self.last_seen.pop(key, None)
         if self.assistant is not None:
-            self.assistant.detach(key)
+            self.assistant.detach(key, self.clock())
 
     def _act(self, action: Action, now: datetime) -> None:
         """Руки: виконуємо дії помічника тут, у головному потоці, — браузером керує лише він."""
@@ -172,6 +171,11 @@ class Runner:
             self.assistant.chat_done(action.key, action.text, ok, now, action.reason)
         elif action.kind == "leave":
             self._leave(action.key, action.reason)
+        elif action.kind == "screenshot":
+            if shot := self.joiner.screenshot(session):
+                self.assistant.photo(shot, f"🖥 «{session.visit.title}», {now:%H:%M}")
+            else:
+                self.notify("Не вдалося зробити скріншот")
 
     def _lessons_left_today(self, now: datetime) -> bool:
         if self.active:
@@ -199,7 +203,7 @@ class Runner:
                 if session.decider is not None:
                     session.decider.next_lesson(*self._window(visit))
                 if self.assistant is not None:
-                    self.assistant.next_lesson(session.visit.key, visit.title, *self._window(visit))
+                    self.assistant.next_lesson(session.visit.key, visit.title, *self._window(visit), now=now)
                 self.finished.add(visit.key)
                 log.info("Лишаюсь у тій самій зустрічі на «%s»", visit.title)
                 return
@@ -229,7 +233,7 @@ class Runner:
                 session.decider = LeaveDecider(*self._window(visit), self.config.join)
             if self.assistant is not None:
                 start, end = self._window(visit)
-                self.assistant.attach(visit.key, visit.title, visit.lessons[0].teacher, start, end)
+                self.assistant.attach(visit.key, visit.title, visit.lessons[0].teacher, start, end, now=now)
         self.finished.add(visit.key)
         self.active[visit.key] = session
         # Одразу дивимось у зустріч: те, що вже є в чаті, — історія, а все наступне — нове.
@@ -240,6 +244,6 @@ class Runner:
         try:
             while True:
                 self.tick()
-                sleep(poll_seconds)
+                self.joiner.idle(poll_seconds)
         finally:
             self.sleep_guard.release()

@@ -229,6 +229,7 @@ def test_whole_chain_group_plus_is_mirrored(joiner):
     runner.tick()
     page = runner.active[meeting.key].page
     try:
+        page.evaluate("([a, t]) => incoming(a, t)", ["Петренко П.П.", "Відмітьтесь плюсом, хто на парі"])
         for author in ("Іван Коваль", "Олена Бойко", "Марко Лис"):
             page.evaluate("([a, t]) => incoming(a, t)", [author, "+"])
         runner.tick()
@@ -236,3 +237,18 @@ def test_whole_chain_group_plus_is_mirrored(joiner):
         assert inbox[-1].startswith("💬 Написав «+» у чат")
     finally:
         joiner.leave(runner.active[meeting.key])
+
+
+def test_frames_flow_while_idle(joiner):
+    from autopara.media import FrameBuffer
+
+    joiner.frames = FrameBuffer()  # у програмі буфер передається при створенні Joiner
+    try:
+        session = joiner.join(visit("normal"))
+        session.page.evaluate("setInterval(() => { document.body.style.background = `hsl(${Date.now() % 360},50%,50%)`; }, 50)")
+        joiner.idle(3)
+        got = joiner.frames.window(0, float("inf"))
+        assert len(got) >= 3 and all(jpeg.startswith(b"\xff\xd8") for _, jpeg in got)
+        joiner.leave(session)
+    finally:
+        joiner.frames = None

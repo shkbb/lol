@@ -21,7 +21,7 @@ use_schedule_links = true # якщо для пари немає правила �
 minutes_before = 2        # за скільки хвилин до початку заходити
 mute_microphone = true
 camera_off = true
-mute_sound = true         # браузер без звуку (Zoom-клієнт — див. README)
+mute_sound = true         # у динаміках тиша; false — чуєш пару і ти (Zoom-клієнт — див. README)
 auto_leave = true         # виходити з пари самому
 
 # Виходити разом з групою, а не рівно за розкладом: якщо пару відпустили раніше —
@@ -58,6 +58,7 @@ present = "Присутній"     # що писати, коли група ві
 
 [telegram]
 # token і chat_id — у config.local.toml (він не потрапляє в git); `autopara telegram` допоможе.
+clips = true              # відеовирізка моменту, коли тебе згадали (потрібен ffmpeg)
 
 [ears]                    # слухати пару (Linux + PipeWire, локальне розпізнавання мови)
 enabled = false

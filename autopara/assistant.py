@@ -49,6 +49,19 @@ ECHO_GROUPS = [
 ]
 # Що в мові викладача схоже на перекличку.
 ROLL_CALL_RE = re.compile(r"плюс|перекличк|відміч|відміт|присутн|хто (є|тут|зараз)", re.I)
+# Масовий «+» буває не лише на перекличці: ним записуються на проєкти, голосують, кажуть «зрозуміло».
+# Тож перш ніж ставити «+», дивимось, що саме просили.
+ATTENDANCE_RE = re.compile(r"перекличк|відміт|відміч|присутн|хто (є|тут|зараз)|хто на пар|чи всі (є|тут)|attendance", re.I)
+NOT_ATTENDANCE_RE = re.compile(
+    r"хто (хоче|бажає|готов|може|зможе|згод|за\b|проти|візьм|піде|поїде|братиме)|бажаюч|охоч|добровол|запиш|"
+    r"запис|візьм|додатков|проєкт|проект|доповід|реферат|презентац|конференц|олімпіад|конкурс|хакатон|участь|"
+    r"голосу|згодні|хочете|зрозуміл|якщо (так|згодні|ок)",
+    re.I,
+)
+PLUS_REQUEST_RE = re.compile(r"плюс|\+", re.I)
+NAME_REQUEST_RE = re.compile(r"прізвищ|ім'я|імена|піб", re.I)
+BRAIN_ANSWER_TIMEOUT = timedelta(seconds=90)
+CHUNK_CHARS = 2500  # скільки розшифровки віддавати мозку на конспект за раз
 # Що варто показати «мозку»: прохання до всіх щось зробити.
 ATTENTION_RE = re.compile(
     r"плюс|перекличк|відміч|відміт|присутн|хто (є|тут|зараз)|напишіть|поставте|відпишіть|"
@@ -59,12 +72,19 @@ ME_AUTHOR_RE = re.compile(r"^(you|ви|вы)$", re.I)
 
 HELP = (
     "Я пишу, коли щось відбувається на парі. Що можна відповісти:\n"
+    "статус — що зараз на парі\n"
+    "чат — показати чат зустрічі\n"
+    "екран — скріншот зустрічі\n"
     "так / ні — на моє питання «написати в чат?»\n"
     "+ — написати «+» у чат\n"
     "напиши <текст> — написати твій текст у чат\n"
-    "статус — що зараз на парі\n"
+    "↩️ відповідь на будь-яке моє повідомлення — теж піде в чат пари\n"
     "вийди — вийти з пари"
 )
+COMMANDS = {
+    "/start", "/help", "help", "допомога", "?", "/status", "статус", "так", "yes", "ок", "ok", "давай", "+",
+    "ні", "no", "не треба", "не пиши", "вийди", "/leave", "чат", "/chat", "екран", "скрін", "скріншот", "/screen",
+}
 
 
 @dataclass(frozen=True)
@@ -92,20 +112,57 @@ class Decision:
 
 
 @dataclass
+class LessonRecord:
+    """Усе про одну пару — для звіту після неї."""
+
+    report_id: str
+    title: str
+    teacher: str
+    start: datetime
+    end: datetime
+    joined: datetime
+    left: datetime
+    transcript: list[tuple[datetime, str]]
+    chat: list[tuple[datetime, ChatMessage]]
+    mentions: list[tuple[datetime, str]]
+    sent: list[tuple[datetime, str]]
+    peak: int
+    rest: str  # хвіст розшифровки, який мозок ще не конспектував
+
+
+@dataclass
 class Meeting:
     key: str
     title: str
     teacher: str
     start: datetime
     end: datetime
+    joined: datetime | None = None
+    report_id: str = ""
+    lesson_number: int = 0
+    chunk: list[str] = field(default_factory=list)  # розшифровка, ще не віддана на конспект
     chat: deque = field(default_factory=lambda: deque(maxlen=300))  # (час, ChatMessage)
     seen: set[str] = field(default_factory=set)
     chat_primed: bool = False
-    heard: deque = field(default_factory=lambda: deque(maxlen=80))  # (час, текст)
+    history: list[ChatMessage] = field(default_factory=list)  # чат до нашого приходу — лише для показу
+    heard: deque = field(default_factory=lambda: deque(maxlen=80))  # (час, текст) — свіже, для мозку
+    transcript: list[tuple[datetime, str]] = field(default_factory=list)  # уся пара — для звіту й цитат
+    mentions: list[tuple[datetime, str]] = field(default_factory=list)
+    peak: int = 0
     participants: int | None = None
     sent: list[tuple[datetime, str]] = field(default_factory=list)
     reacted: set[str] = field(default_factory=set)  # на що вже відреагували, щоб не повторюватись
     pending: tuple[str, datetime, str] | None = None  # (текст, до коли чекаємо, чому) — режим "ask"
+    awaiting: Awaiting | None = None  # хвиля «+», щодо якої питаємо мозок
+
+
+@dataclass
+class Awaiting:
+    reply: str
+    mark: str
+    what: str
+    context: str
+    since: datetime
 
 
 def _norm(text: str) -> str:
@@ -132,9 +189,19 @@ def name_patterns(name: str) -> list[tuple[re.Pattern, bool]]:
 
 
 class Assistant:
-    def __init__(self, me: MeSettings, notify: Callable[..., None], wake_brain: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        me: MeSettings,
+        notify: Callable[..., None],
+        wake_brain: Callable[[str], None] | None = None,
+        media=None,
+    ):
         self.me = me
         self.notify = notify  # notify(text, urgent=False)
+        self.media = media  # Notifier з photo/video/voice/document, або None
+        self.on_moment: Callable[[str, str, datetime], None] | None = None  # (ключ, заголовок, коли) → вирізка
+        self.on_chunk: Callable[[str, str], None] | None = None  # (звіт, шматок розшифровки) → конспект
+        self.on_finished: Callable[[LessonRecord], None] | None = None  # пара скінчилась → звіт
         self.wake_brain = wake_brain  # None — «мозок» вимкнено, працюють лише рефлекси
         self.meetings: dict[str, Meeting] = {}
         self._order: list[str] = []
@@ -146,24 +213,55 @@ class Assistant:
 
     # --- Життєвий цикл зустрічі ------------------------------------------------
 
-    def attach(self, key: str, title: str, teacher: str, start: datetime, end: datetime) -> None:
+    def attach(
+        self, key: str, title: str, teacher: str, start: datetime, end: datetime, now: datetime | None = None
+    ) -> None:
         with self._lock:
-            self.meetings[key] = Meeting(key, title, teacher, start, end)
+            meeting = Meeting(key, title, teacher, start, end, joined=now or start, report_id=f"{key}#1")
+            self.meetings[key] = meeting
             self._order.append(key)
 
-    def next_lesson(self, key: str, title: str, start: datetime, end: datetime) -> None:
-        """Наступна пара в тій самій зустрічі."""
+    def next_lesson(self, key: str, title: str, start: datetime, end: datetime, now: datetime | None = None) -> None:
+        """Наступна пара в тій самій зустрічі: звіт про попередню і чистий аркуш."""
         with self._lock:
-            if meeting := self.meetings.get(key):
-                meeting.title, meeting.start, meeting.end = title, start, end
-                meeting.reacted.clear()
-                meeting.sent.clear()
+            meeting = self.meetings.get(key)
+            if meeting is None:
+                return
+            self._finish(meeting, now or start)
+            number = meeting.lesson_number + 1
+            fresh = Meeting(key, title, meeting.teacher, start, end, joined=now or start, report_id=f"{key}#{number + 1}")
+            fresh.lesson_number = number
+            fresh.seen, fresh.chat_primed = meeting.seen, True
+            self.meetings[key] = fresh
 
-    def detach(self, key: str) -> None:
+    def detach(self, key: str, now: datetime | None = None) -> None:
         with self._lock:
-            self.meetings.pop(key, None)
+            meeting = self.meetings.pop(key, None)
             if key in self._order:
                 self._order.remove(key)
+            if meeting is not None:
+                self._finish(meeting, now or datetime.now(meeting.start.tzinfo))
+
+    def _finish(self, meeting: Meeting, now: datetime) -> None:
+        if self.on_finished is None:
+            return
+        self.on_finished(
+            LessonRecord(
+                report_id=meeting.report_id,
+                title=meeting.title,
+                teacher=meeting.teacher,
+                start=meeting.start,
+                end=meeting.end,
+                joined=meeting.joined or meeting.start,
+                left=now,
+                transcript=list(meeting.transcript),
+                chat=list(meeting.chat),
+                mentions=list(meeting.mentions),
+                sent=list(meeting.sent),
+                peak=meeting.peak,
+                rest=" ".join(meeting.chunk),
+            )
+        )
 
     def current(self) -> Meeting | None:
         with self._lock:
@@ -175,6 +273,7 @@ class Assistant:
         with self._lock:
             if meeting := self.meetings.get(key):
                 meeting.participants = count
+                meeting.peak = max(meeting.peak, count or 0)
 
     def on_chat(self, key: str, messages: list[ChatMessage], now: datetime) -> None:
         with self._lock:
@@ -186,6 +285,7 @@ class Assistant:
             if not meeting.chat_primed:
                 # Перше читання — це історія чату до нашого приходу: на неї не реагуємо.
                 meeting.chat_primed = True
+                meeting.history = new[-50:]
                 return
             for message in new:
                 meeting.chat.append((now, message))
@@ -205,6 +305,11 @@ class Assistant:
             if meeting is None or not text:
                 return
             meeting.heard.append((now, text))
+            meeting.transcript.append((now, text))
+            meeting.chunk.append(text)
+            if self.on_chunk and sum(len(part) for part in meeting.chunk) >= CHUNK_CHARS:
+                self.on_chunk(meeting.report_id, " ".join(meeting.chunk))
+                meeting.chunk = []
             mentioned = self._check_mention(meeting, text, now, "на парі")
             if not mentioned and ATTENTION_RE.search(text):
                 if self.wake_brain:
@@ -229,45 +334,133 @@ class Assistant:
         hits = [is_surname for pattern, is_surname in self._patterns if pattern.search(text)]
         if not hits:
             return False
+        meeting.mentions.append((now, text))
         if self._cooled(self._last_mention, now, MENTION_COOLDOWN):
             self._last_mention = now
             lead = "🚨 Тебе кличуть" if any(hits) else "❗ Можливо, звертаються до тебе"
             self.notify(f"{lead} {where} на «{meeting.title}»: «{_snippet(text)}»", urgent=True)
             if self.wake_brain:
                 self.wake_brain(meeting.key)
+            if self.on_moment:
+                self.on_moment(meeting.key, f"🎬 Момент з «{meeting.title}», {now:%H:%M}", now)
         return True
 
-    def _recent_chat(self, meeting: Meeting, now: datetime) -> list[ChatMessage]:
-        return [m for t, m in meeting.chat if now - t <= BURST_WINDOW and not self._is_me(m.author)]
+    def quote(self, key: str, start: datetime, end: datetime, limit: int = 1500) -> str:
+        """Що казали й писали між start і end — детальна цитата для вирізки."""
+        with self._lock:
+            meeting = self.meetings.get(key)
+            if meeting is None:
+                return ""
+            lines = [(t, text) for t, text in meeting.transcript if start <= t <= end]
+            lines += [(t, f"💬 {m.author or '?'}: {m.text}") for t, m in meeting.chat if start <= t <= end]
+        text = "\n".join(line for _, line in sorted(lines, key=lambda item: item[0]))
+        return text if len(text) <= limit else "…" + text[-limit:]
 
     def _chat_reflexes(self, meeting: Meeting, now: datetime) -> None:
-        recent = self._recent_chat(meeting, now)
-        # 1. Кілька людей пишуть одне й те саме («+», «присутній», «дякую») — дублюємо.
+        recent = [(t, m) for t, m in meeting.chat if now - t <= BURST_WINDOW and not self._is_me(m.author)]
+        # 1. Кілька людей пишуть одне й те саме («+», «присутній», «дякую»).
         authors: dict[int, set[str]] = {}
         sample: dict[int, str] = {}
-        for message in recent:
+        first: dict[int, datetime] = {}
+        ids: dict[int, set[str]] = {}
+        for t, message in recent:
             text = _norm(message.text)
             for group, (pattern, _) in enumerate(ECHO_GROUPS):
                 if pattern.match(text):
                     authors.setdefault(group, set()).add(message.author or message.id)
                     sample.setdefault(group, message.text.strip())
+                    first.setdefault(group, t)
+                    ids.setdefault(group, set()).add(message.id)
                     break
         for group, who in sorted(authors.items(), key=lambda item: -len(item[1])):
             mark = f"echo:{group}"
-            if len(who) >= BURST_MIN_AUTHORS and mark not in meeting.reacted:
-                reply = ECHO_GROUPS[group][1] or self.me.present
+            if len(who) < BURST_MIN_AUTHORS or mark in meeting.reacted:
+                continue
+            reply = ECHO_GROUPS[group][1] or self.me.present
+            if group == 0:
+                # «+» може означати що завгодно — дивимось, на що його ставлять.
+                self._consider(meeting, reply, mark, "Група ставить «+» у чат", first[group], ids[group], PLUS_REQUEST_RE, now)
+            else:
+                # «Присутній», «дякую», «добрий день» ні на що не підписують.
                 self.propose_chat(meeting, reply, f"Група пише «{sample[group]}» у чат", now, mark=mark)
-                return
-        # 2. Люди відмічаються прізвищами — пишемо своє.
-        by_name = {
-            message.author
-            for message in recent
-            if message.author
-            and len(message.text) <= 60
-            and any(word[:-1] in message.text.casefold() for word in message.author.casefold().split() if len(word) > 3)
-        }
-        if len(by_name) >= BURST_MIN_AUTHORS and self.me.name and "__name__" not in meeting.reacted:
-            self.propose_chat(meeting, self.me.name, "Група відмічається в чаті прізвищами", now, mark="__name__")
+            return
+        # 2. Люди пишуть у чат свої прізвища — теж дивимось навіщо.
+        by_name = [
+            (t, m)
+            for t, m in recent
+            if m.author
+            and len(m.text) <= 60
+            and any(word[:-1] in m.text.casefold() for word in m.author.casefold().split() if len(word) > 3)
+        ]
+        if len({m.author for _, m in by_name}) >= BURST_MIN_AUTHORS and self.me.name and "__name__" not in meeting.reacted:
+            since = min(t for t, _ in by_name)
+            self._consider(
+                meeting, self.me.name, "__name__", "Група пише в чат прізвища", since, {m.id for _, m in by_name},
+                NAME_REQUEST_RE, now,
+            )
+
+    def _intent(self, meeting: Meeting, since: datetime, wave: set[str], request: re.Pattern) -> tuple[str, str]:
+        """Навіщо група це пише: ("attendance" | "not_attendance" | "unknown", цитата-контекст).
+
+        Дивимось на мову викладача за хвилину до хвилі й на чат за дві. Головне — речення саме про
+        «плюс» (чи прізвища); якщо в ньому самому не видно навіщо («поставте плюс»), — речення перед
+        ним. Так лекція про проєкти не заважає перекличці, а «хто хоче доповідь — плюс» не стає нею.
+        """
+        speech = [
+            sentence.strip()
+            for t, text in meeting.heard
+            if t >= since - timedelta(minutes=1)
+            for sentence in re.split(r"(?<=[.!?])\s+", text)
+            if sentence.strip()
+        ]
+        chat = [f"{m.author}: {m.text}" for t, m in meeting.chat if t >= since - timedelta(minutes=2) and m.id not in wave]
+
+        def verdict(sentence: str) -> str | None:
+            if NOT_ATTENDANCE_RE.search(sentence):
+                return "not_attendance"
+            if ATTENDANCE_RE.search(sentence):
+                return "attendance"
+            return None
+
+        verdicts, quotes = [], []
+        for sentences in (speech, chat):
+            for index, sentence in enumerate(sentences):
+                if request.search(sentence):
+                    found = verdict(sentence)
+                    if found is None and index > 0:
+                        found, sentence = verdict(sentences[index - 1]), f"{sentences[index - 1]} {sentence}"
+                    verdicts.append(found)
+                    quotes.append(sentence)
+        if not quotes:  # про плюс прямо ніхто не казав — судимо з усього, що було
+            quotes = speech + chat
+            verdicts = [verdict(sentence) for sentence in quotes]
+        context = _snippet(" … ".join(quotes[-3:]), 300)
+        if "not_attendance" in verdicts:
+            return "not_attendance", context
+        if "attendance" in verdicts:
+            return "attendance", context
+        return "unknown", context
+
+    def _consider(
+        self, meeting: Meeting, reply: str, mark: str, what: str, since: datetime, wave: set[str],
+        request: re.Pattern, now: datetime,
+    ) -> None:
+        if mark in meeting.reacted:
+            return
+        intent, context = self._intent(meeting, since, wave, request)
+        meeting.reacted.add(mark)
+        if intent == "attendance":
+            self._offer(meeting, reply, f"{what} — це перекличка", now, context=context)
+        elif intent == "unknown" and self.wake_brain:
+            meeting.awaiting = Awaiting(reply, mark, what, context, now)
+            self.wake_brain(meeting.key)
+        else:
+            hint = (
+                "Схоже, це не перекличка, а запис, голосування чи «зрозуміло?»"
+                if intent == "not_attendance"
+                else "Не зрозумів, навіщо"
+            )
+            self._offer(meeting, reply, f"{what}. {hint} — сам не пишу", now, ask=True, context=context)
 
     # --- Руки --------------------------------------------------------------------
 
@@ -280,14 +473,21 @@ class Assistant:
         if mark in meeting.reacted:
             return
         meeting.reacted.add(mark)
+        self._offer(meeting, text, reason, now)
+
+    def _offer(
+        self, meeting: Meeting, text: str, reason: str, now: datetime, ask: bool = False, context: str = ""
+    ) -> None:
+        """Написати в чат сам, спитати тебе чи лише сповістити — за [me] chat_reply і лімітами."""
+        quote = f"\nКонтекст: «{context}»" if context else ""
         policy = self.me.chat_reply
         if policy == "off":
-            self.notify(f"{reason} на «{meeting.title}». Сам не пишу (chat_reply = \"off\").", urgent=True)
+            self.notify(f"{reason} на «{meeting.title}».{quote}\nСам не пишу (chat_reply = \"off\").", urgent=True)
         elif not self._can_chat(meeting, now):
-            self.notify(f"{reason} на «{meeting.title}», але я вже писав у чат нещодавно — пропускаю.", urgent=True)
-        elif policy == "ask":
+            self.notify(f"{reason} на «{meeting.title}», але я вже писав у чат нещодавно — пропускаю.{quote}", urgent=True)
+        elif ask or policy == "ask":
             meeting.pending = (text, now + ASK_TIMEOUT, reason)
-            self.notify(f"{reason} на «{meeting.title}». Написати «{text}»? Відповідай: так / ні", urgent=True)
+            self.notify(f"{reason} на «{meeting.title}».{quote}\nНаписати «{text}»? Відповідай: так / ні", urgent=True)
         else:
             self._actions.append(Action("chat", meeting.key, text, reason))
 
@@ -311,6 +511,13 @@ class Assistant:
     def tick(self, now: datetime) -> None:
         with self._lock:
             for meeting in self.meetings.values():
+                waiting = meeting.awaiting
+                if waiting and now - waiting.since > BRAIN_ANSWER_TIMEOUT:
+                    meeting.awaiting = None
+                    self._offer(
+                        meeting, waiting.reply, f"{waiting.what}. Мозок не встиг розібратись — сам не пишу", now,
+                        ask=True, context=waiting.context,
+                    )
                 if meeting.pending and now > meeting.pending[1]:
                     meeting.pending = None
                     self.notify(f"Не дочекався відповіді — у чат «{meeting.title}» не пишу.")
@@ -340,6 +547,12 @@ class Assistant:
             if chat:
                 lines.append("\nОстанні повідомлення в чаті:")
                 lines += [f"[{t:%H:%M}] {m.author or '?'}: {m.text}" for t, m in chat]
+            if meeting.awaiting:
+                lines.append(
+                    f"\nПИТАННЯ: {meeting.awaiting.what.lower()}. Якщо викладач робить перекличку — обери "
+                    f"{'chat_name' if meeting.awaiting.mark == '__name__' else 'chat_plus'}. Якщо це запис на щось, "
+                    "голосування, згода чи «зрозуміло?» — обери notify і поясни, на що саме це пишуть."
+                )
             return "\n".join(lines)
 
     def apply_decision(self, key: str, decision: Decision, now: datetime) -> None:
@@ -349,12 +562,32 @@ class Assistant:
                 return
             why = decision.reason or decision.message
             log.info("Мозок: %s — %s", decision.action, why)
+            waiting = meeting.awaiting
+            if waiting is not None:
+                # Мозок відповідав на питання про хвилю «+»/прізвищ.
+                meeting.awaiting = None
+                if decision.action in ("chat_plus", "chat_name"):
+                    self._offer(meeting, waiting.reply, f"{waiting.what} — 🧠 {why}", now, context=waiting.context)
+                else:
+                    self._offer(
+                        meeting, waiting.reply, f"{waiting.what}. 🧠 {decision.message or why} — сам не пишу", now,
+                        ask=True, context=waiting.context,
+                    )
+                return
             if decision.action == "notify":
                 self.notify(f"🧠 {decision.message or why} («{meeting.title}»)", urgent=True)
-            elif decision.action == "chat_plus":
-                self.propose_chat(meeting, "+", f"🧠 {why}", now, mark="echo:0")
-            elif decision.action == "chat_name" and self.me.name:
-                self.propose_chat(meeting, self.me.name, f"🧠 {why}", now, mark="__name__")
+            elif decision.action in ("chat_plus", "chat_name"):
+                reply, mark, request = (
+                    ("+", "echo:0", PLUS_REQUEST_RE)
+                    if decision.action == "chat_plus"
+                    else (self.me.name, "__name__", NAME_REQUEST_RE)
+                )
+                if reply and mark not in meeting.reacted:
+                    meeting.reacted.add(mark)
+                    # Мовна модель може помилитись: якщо поруч ідеться про запис чи голосування — лише питаємо.
+                    intent, context = self._intent(meeting, now - timedelta(minutes=1), set(), request)
+                    ask = intent == "not_attendance"
+                    self._offer(meeting, reply, f"🧠 {why}", now, ask=ask, context=context if ask else "")
             elif decision.action == "leave":
                 # Мовна модель може помилитись — на початку пари її «на сьогодні все» не слухаємо.
                 if now >= meeting.start + (meeting.end - meeting.start) / 2:
@@ -367,7 +600,7 @@ class Assistant:
 
     # --- Команди з Telegram ------------------------------------------------------
 
-    def on_command(self, text: str, now: datetime) -> str:
+    def on_command(self, text: str, now: datetime, is_reply: bool = False) -> str:
         command = text.strip()
         low = command.casefold()
         with self._lock:
@@ -378,6 +611,16 @@ class Assistant:
                 return self._status(meeting, now)
             if meeting is None:
                 return "Зараз я не на парі."
+            if low in ("чат", "/chat"):
+                return self._chat_view(meeting)
+            if low in ("екран", "скрін", "скріншот", "/screen"):
+                self._actions.append(Action("screenshot", meeting.key))
+                return "Роблю скріншот..."
+            if is_reply and low not in COMMANDS and not low.startswith(("напиши ", "/say ")):
+                # Відповідь на будь-яке моє повідомлення — це текст для чату пари.
+                reply = command[:500]
+                self._actions.append(Action("chat", meeting.key, reply, "ти відповів у Telegram"))
+                return f"Пишу «{reply}»."
             if low in ("так", "yes", "ок", "ok", "давай", "+") and meeting.pending:
                 reply, _, reason = meeting.pending
                 meeting.pending = None
@@ -398,6 +641,21 @@ class Assistant:
                 self._actions.append(Action("leave", meeting.key, reason="ти попросив у Telegram"))
                 return "Виходжу."
             return "Не зрозумів.\n\n" + HELP
+
+    def _chat_view(self, meeting: Meeting) -> str:
+        messages = [(None, m) for m in meeting.history] + list(meeting.chat)
+        if not messages:
+            return f"У чаті «{meeting.title}» поки тихо."
+        lines = [f"💬 Чат «{meeting.title}»:"]
+        for t, m in messages[-20:]:
+            when = f"{t:%H:%M}" if t else "раніше"
+            lines.append(f"{when} {m.author or '?'}: {m.text}")
+        lines.append("\n↩️ Відповідай на це повідомлення — і я напишу твій текст у чат.")
+        return "\n".join(lines)
+
+    def photo(self, content: bytes, caption: str) -> None:
+        if self.media is not None:
+            self.media.photo(content, caption)
 
     def _status(self, meeting: Meeting | None, now: datetime) -> str:
         if meeting is None:
