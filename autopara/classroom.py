@@ -28,10 +28,16 @@ FORMS_RE = re.compile(r"forms\.gle/|docs\.google\.com/forms/")
 ADD_RE = re.compile(r"Додати або створити|Add or create", re.I)
 FILE_RE = re.compile(r"^\s*(Файл|File)\s*$", re.I)
 BROWSE_RE = re.compile(r"Огляд|Browse|Вибрати файли|Select files|Вибрати файл", re.I)
-TURN_IN_RE = re.compile(r"^\s*(Здати|Turn in|Позначити як виконане|Mark as done)\s*$", re.I)
+TURN_IN_RE = re.compile(
+    r"^\s*(Здати|Здати повторно|Turn in|Resubmit|Позначити як виконане|Mark as done)\s*$", re.I
+)
 CANCEL_RE = re.compile(r"^\s*(Скасувати|Cancel)\s*$", re.I)
 UNSUBMIT_RE = re.compile(r"Скасувати здачу|Unsubmit", re.I)
-TURNED_IN_RE = re.compile(r"Здано|Turned in|Скасувати здачу|Unsubmit|Оцінено|Graded|Повернуто|Returned", re.I)
+REMOVE_RE = re.compile(r"Видалити|Вилучити|Прибрати|Remove|Delete", re.I)
+GRADED_RE = re.compile(r"Оцінено|Graded", re.I)
+RETURNED_RE = re.compile(r"Повернуто|Returned", re.I)
+TURNED_IN_RE = re.compile(r"Здано|Turned in|Скасувати здачу|Unsubmit", re.I)
+GRADE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*/\s*(\d+)")
 LOGIN_HOSTS = ("accounts.google.com",)
 
 EXPORTS = {
@@ -72,7 +78,8 @@ class Assignment:
     listing: str = ""  # як завдання виглядає у списку «Завдання» (назва, курс, термін)
     text: str = ""  # текст сторінки завдання — умову з нього розбере агент
     attachments: list[Attachment] = field(default_factory=list)
-    status: str = ""
+    status: str = ""  # assigned | turned_in | returned | graded
+    grade: str = ""  # «85/100», якщо оцінено
 
     @property
     def key(self) -> str:
@@ -173,7 +180,7 @@ class Classroom:
                 continue
             seen.add(attachment.file_id or attachment.url)
             item.attachments.append(attachment)
-        item.status = "turned_in" if TURNED_IN_RE.search(item.text) else "assigned"
+        item.status, item.grade = submission_state(item.text)
         return item
 
     def cookies(self) -> list[dict]:
@@ -188,13 +195,23 @@ class Classroom:
 
     # --- Здача --------------------------------------------------------------------
 
-    def submit(self, item: Assignment, files: list[Path], dry_run: bool = False) -> SubmitResult:
-        """Прикріпити файли й здати. ``dry_run`` — дійти до самого підтвердження й натиснути «Скасувати»."""
+    def submit(self, item: Assignment, files: list[Path], dry_run: bool = False, remove: list[str] = ()) -> SubmitResult:
+        """Прикріпити файли й здати. ``dry_run`` — дійти до самого підтвердження й натиснути «Скасувати».
+
+        ``remove`` — назви файлів попередньої версії: їх спершу прибираємо з роботи, інакше викладач
+        отримав би й стару версію. Не вдалося прибрати — не здаємо.
+        """
         page = self._open(item.path)
         try:
             text = page.locator("body").inner_text()
             if UNSUBMIT_RE.search(text):
                 return SubmitResult(True, "уже здано", page.screenshot(full_page=True))
+            for name in remove:
+                if name in text:
+                    self._remove(page, name)
+            text = page.locator("body").inner_text()
+            if stale := [name for name in remove if name in text]:
+                raise PlaywrightError(f"не вдалося прибрати стару версію «{stale[0]}»")
             missing = [path for path in files if path.name not in text]
             if missing:
                 self._attach(page, missing)
@@ -239,6 +256,22 @@ class Classroom:
             page.get_by_text(path.name).first.wait_for(timeout=180_000)
 
     @staticmethod
+    def _remove(page: Page, name: str) -> None:
+        """Прибрати вкладений файл: кнопка «Видалити …» з назвою файлу або хрестик у його рядку."""
+        button = page.get_by_role("button", name=re.compile(rf"({REMOVE_RE.pattern}).*{re.escape(name)}", re.I))
+        if not button.count():
+            row = page.get_by_text(name, exact=False).first.locator("xpath=ancestor::*[.//button][1]")
+            button = row.get_by_role("button", name=REMOVE_RE)
+        if not button.count():
+            raise PlaywrightError(f"не знайшов, як прибрати «{name}»")
+        button.first.click()
+        page.wait_for_timeout(800)
+        dialog = page.get_by_role("dialog")
+        if dialog.count() and dialog.last.is_visible():  # «Видалити вкладений файл?»
+            dialog.last.get_by_role("button", name=REMOVE_RE).first.click()
+        page.get_by_text(name, exact=False).first.wait_for(state="detached", timeout=15_000)
+
+    @staticmethod
     def _click_browse(page: Page) -> None:
         for frame in page.frames:
             button = frame.get_by_role("button", name=BROWSE_RE)
@@ -260,6 +293,28 @@ class Classroom:
             return SubmitResult(False, f"не вийшло скасувати здачу: {str(e).splitlines()[0]}")
         finally:
             page.close()
+
+
+YOUR_WORK_RE = re.compile(r"Ваша робота|Your work", re.I)
+
+
+def submission_state(text: str) -> tuple[str, str]:
+    """Стан роботи на сторінці завдання і оцінка, якщо є.
+
+    Шукаємо в блоці «Ваша робота», якщо він є: у самій умові теж бувають слова «повернуто» чи «5/10».
+    """
+    if matches := list(YOUR_WORK_RE.finditer(text)):
+        text = text[matches[-1].start():]
+    grade = ""
+    if GRADED_RE.search(text) or RETURNED_RE.search(text):
+        if match := GRADE_RE.search(text):
+            grade = f"{match.group(1)}/{match.group(2)}"
+        return ("graded" if GRADED_RE.search(text) or grade else "returned"), grade
+    return ("turned_in" if TURNED_IN_RE.search(text) else "assigned"), ""
+
+
+def task_url(item: Assignment, account: str) -> str:
+    return f"{CLASSROOM}{item.path}?authuser={quote(account)}"
 
 
 def download(url: str, folder: Path, cookies: list[dict], fallback_name: str, session=None) -> Path:

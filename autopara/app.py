@@ -235,6 +235,7 @@ class Controller:
         light_telegram = {"mentions": config.telegram.mentions, "joins": config.telegram.joins}  # діють на льоту
         heavy = (
             any(getattr(old, section) != getattr(config, section) for section in ("ears", "brain", "timezone", "data_dir"))
+            or (old.study.enabled, old.study.folder, old.study.account) != (config.study.enabled, config.study.folder, config.study.account)
             or replace(old.telegram, **light_telegram) != config.telegram
             or (old.join.browser_channel, old.join.browser_path, old.join.mute_sound)
             != (config.join.browser_channel, config.join.browser_path, config.join.mute_sound)
@@ -252,6 +253,13 @@ class Controller:
             runner.assistant.set_me(config.me)
             runner.assistant.alert_mentions = config.telegram.mentions
         self.joiner.settings = config.join
+        if self.study is not None:  # побажання, правила предметів, варіант, агент — з наступної роботи
+            self.study.config = config
+            self.study.agent.settings = config.agent
+            if config.study.list_number != old.study.list_number:
+                self.study.list_number = config.study.list_number
+                if not config.study.list_number and runner.target is not None:
+                    runner._load_classmates()  # «0» — визначити зі списку групи заново
         if old.schedule != config.schedule:
             runner.client = make_source(config)
             runner.target = None
@@ -697,10 +705,63 @@ def api_autostart(server: AppServer, query: dict, body: dict):
 def api_study(server: AppServer, query: dict, body: dict):
     config, study = server.controller.config, server.controller.study
     if not config.study.enabled:
-        return 200, {"off": "вимкнено"}
+        return 200, {"off": "вимкнено", "folder": str(config.study_dir)}
     if study is None:
-        return 200, {"off": "автовхід вимкнено — навчання працює разом з ним (кнопка «Увімкнути» на головній)"}
+        return 200, {
+            "off": "автовхід вимкнено — навчання працює разом з ним (кнопка «Увімкнути» на головній)",
+            "folder": str(config.study_dir),
+        }
     return 200, study.snapshot()
+
+
+def api_study_task(server: AppServer, query: dict, body: dict):
+    details = _study(server).task_details(int(query.get("number") or 0))
+    if details is None:
+        return 404, {"error": "такого завдання немає"}
+    return 200, details
+
+
+def api_study_notes(server: AppServer, query: dict, body: dict):
+    from .study import notes_index
+
+    return 200, {"subjects": notes_index(server.controller.config.study_dir / "Конспекти")}
+
+
+def api_study_note(server: AppServer, query: dict, body: dict):
+    from .study import read_note
+
+    text = read_note(server.controller.config.study_dir / "Конспекти", query.get("id", ""))
+    if text is None:
+        return 404, {"error": "такого конспекту немає"}
+    return 200, {"text": text}
+
+
+def api_study_agent(server: AppServer, query: dict, body: dict):
+    """Чи готовий агент: знайдено команду, яка версія, чи не вичерпано ліміт."""
+    import shutil
+
+    from .agent import Agent
+
+    config = server.controller.config
+    agent = Agent(config.agent, config.data_dir / "agent-usage.json")
+    problem = agent.problem()
+    version = ""
+    if (executable := shutil.which(config.agent.command)) is not None:
+        try:
+            result = subprocess.run(
+                [executable, "--version"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL,
+                encoding="utf-8", errors="replace",
+            )
+            output = (result.stdout or result.stderr).strip()
+            version = output.splitlines()[0][:120] if output else ""
+        except (OSError, subprocess.SubprocessError) as e:
+            problem = problem or f"{config.agent.command} не запускається: {e}"
+    return 200, {"ok": problem is None, "problem": problem, "version": version, "used": agent.used_today()}
+
+
+def api_study_pause(server: AppServer, query: dict, body: dict):
+    study = _study(server)
+    return 200, {"result": study.pause(bool(body.get("paused"))), **study.snapshot()}
 
 
 def _study(server: AppServer):
@@ -725,7 +786,13 @@ def api_study_check(server: AppServer, query: dict, body: dict):
 
 
 def api_study_open(server: AppServer, query: dict, body: dict):
-    """Відкрити теку роботи у файловому менеджері — переглянути файли перед «так»."""
+    """Відкрити теку у файловому менеджері: роботу (переглянути перед «так»), усі роботи чи конспекти."""
+    root = server.controller.config.study_dir
+    if what := body.get("what"):
+        folder = {"works": root / "Роботи", "notes": root / "Конспекти"}.get(what, root)
+        folder.mkdir(parents=True, exist_ok=True)
+        open_path(folder)
+        return 200, {"ok": True, "folder": str(folder)}
     task = _study(server).task(int(body.get("number") or 0))
     if task is None or not task.folder or not Path(task.folder).exists():
         return 404, {"error": "теки цього завдання ще немає"}
@@ -769,6 +836,11 @@ ROUTES = {
     ("POST", "/api/study/action"): api_study_action,
     ("POST", "/api/study/check"): api_study_check,
     ("POST", "/api/study/open"): api_study_open,
+    ("POST", "/api/study/agent"): api_study_agent,
+    ("GET", "/api/study/task"): api_study_task,
+    ("GET", "/api/study/notes"): api_study_notes,
+    ("GET", "/api/study/note"): api_study_note,
+    ("POST", "/api/study/pause"): api_study_pause,
     ("POST", "/api/autostart"): api_autostart,
     ("GET", "/api/audio-devices"): api_audio_devices,
     ("POST", "/api/install-ears"): api_install_ears,

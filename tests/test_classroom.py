@@ -25,6 +25,7 @@ DETAILS = """<!doctype html><meta charset="utf-8"><title>ПР № 1.2 Запит
   <a href="https://docs.google.com/document/d/DOC456/edit">Схема БД</a>
   <a href="https://docs.google.com/forms/d/e/FORM789/viewform">Тест</a>
   <section aria-label="Ваша робота">
+    <h2>Ваша робота</h2>
     <div id="status">Призначено</div>
     <div id="files"></div>
     <button id="add">Додати або створити</button>
@@ -38,9 +39,15 @@ DETAILS = """<!doctype html><meta charset="utf-8"><title>ПР № 1.2 Запит
 // Як справжній Classroom, стан здачі зберігається між перезавантаженнями сторінки.
 const $ = (id) => document.getElementById(id);
 const turnedIn = () => localStorage.getItem("turnedIn") === "1";
+const files = () => JSON.parse(localStorage.getItem("files") || "[]");
+const keep = (list) => localStorage.setItem("files", JSON.stringify(list));
 function draw() {
   $("status").textContent = turnedIn() ? "Здано" : "Призначено";
-  $("turnin").textContent = turnedIn() ? "Скасувати здачу" : "Здати";
+  $("turnin").textContent = turnedIn() ? "Скасувати здачу" : localStorage.getItem("once") ? "Здати повторно" : "Здати";
+  $("files").innerHTML = files().map((name) => '<div class="file"><span>' + name + '</span><button aria-label="Видалити ' + name + '">✕</button></div>').join("");
+  for (const button of $("files").querySelectorAll("button")) {
+    button.onclick = () => { keep(files().filter((name) => "Видалити " + name !== button.getAttribute("aria-label"))); draw(); };
+  }
 }
 function ask(question, yes, onYes) {
   $("dialog").innerHTML = question + ' <button id="cancel">Скасувати</button><button id="yes">' + yes + "</button>";
@@ -54,12 +61,13 @@ $("file").onclick = () => {
   $("picker").innerHTML = '<iframe id="pickerframe" src="https://docs.google.com/picker?x=1"></iframe>';
 };
 window.addEventListener("message", (event) => {
-  for (const name of event.data.files) $("files").insertAdjacentHTML("beforeend", "<div>" + name + "</div>");
+  keep([...files(), ...event.data.files]);
   $("picker").innerHTML = "";
+  draw();
 });
 $("turnin").onclick = () => turnedIn()
   ? ask("Скасувати здачу?", "Скасувати здачу", () => localStorage.removeItem("turnedIn"))
-  : ask("Здати роботу?", "Здати", () => localStorage.setItem("turnedIn", "1"));
+  : ask("Здати роботу?", $("turnin").textContent, () => { localStorage.setItem("turnedIn", "1"); localStorage.setItem("once", "1"); });
 draw();
 </script>"""
 
@@ -119,6 +127,24 @@ def test_dry_run_then_real_submission_then_unsubmit(classroom, tmp_path):
 
     back = reader.unsubmit(item)
     assert back.ok, back.note
+
+    # Нова версія з тією ж назвою: стару спершу прибрати, інакше викладач отримає обидві.
+    report.write_bytes(b"%PDF-1.4 version 2")
+    again = reader.submit(item, [report], remove=[report.name])
+    assert again.ok and again.note == "здано", again.note
+    page = browser.new_page()
+    page.goto("https://classroom.google.com/c/x/a/y/details")
+    assert page.evaluate("JSON.parse(localStorage.getItem('files'))") == [report.name]  # рівно один файл
+    page.close()
+
+
+def test_submission_state_reads_only_your_work():
+    from autopara.classroom import submission_state
+
+    assert submission_state("Умова: оцінка 5/10 за вчасність. Повернуто буде після перевірки.\nВаша робота\nПризначено") == ("assigned", "")
+    assert submission_state("Умова\nВаша робота\nОцінено\n85/100") == ("graded", "85/100")
+    assert submission_state("Your work\nReturned") == ("returned", "")
+    assert submission_state("Ваша робота\nЗдано\nСкасувати здачу") == ("turned_in", "")
 
 
 def test_link_classification():

@@ -69,9 +69,11 @@ class TelegramBot:
         """Підтвердити Telegram, що вже прочитані оновлення оброблено, щоб вони не прийшли знову."""
         self._call("getUpdates", offset=self._offset, timeout=0, limit=1)
 
-    def send(self, text: str, buttons: Buttons | None = None) -> int:
+    def send(self, text: str, buttons: Buttons | None = None, silent: bool = False) -> int:
         """Надіслати повідомлення; повертає його номер (щоб розуміти, на що потім відповіли)."""
         params = {"chat_id": self.chat_id, "text": text[:4000]}
+        if silent:
+            params["disable_notification"] = True
         if buttons:
             params["reply_markup"] = {
                 "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]
@@ -79,12 +81,15 @@ class TelegramBot:
         result = self._call("sendMessage", **params)
         return int(result.get("message_id", 0)) if isinstance(result, dict) else 0
 
-    def _send_file(self, method: str, field: str, filename: str, content: bytes, caption: str) -> int:
-        result = self._call(method, files={field: (filename, content)}, chat_id=self.chat_id, caption=caption[:CAPTION_LIMIT])
+    def _send_file(self, method: str, field: str, filename: str, content: bytes, caption: str, silent: bool = False) -> int:
+        extra = {"disable_notification": "true"} if silent else {}
+        result = self._call(
+            method, files={field: (filename, content)}, chat_id=self.chat_id, caption=caption[:CAPTION_LIMIT], **extra
+        )
         return int(result.get("message_id", 0)) if isinstance(result, dict) else 0
 
-    def send_photo(self, content: bytes, caption: str = "") -> int:
-        return self._send_file("sendPhoto", "photo", "screen.jpg", content, caption)
+    def send_photo(self, content: bytes, caption: str = "", silent: bool = False) -> int:
+        return self._send_file("sendPhoto", "photo", "screen.jpg", content, caption, silent)
 
     def send_video(self, content: bytes, filename: str, caption: str = "") -> int:
         return self._send_file("sendVideo", "video", filename, content, caption)
@@ -92,8 +97,8 @@ class TelegramBot:
     def send_voice(self, content: bytes, filename: str, caption: str = "") -> int:
         return self._send_file("sendVoice", "voice", filename, content, caption)
 
-    def send_document(self, content: bytes, filename: str, caption: str = "") -> int:
-        return self._send_file("sendDocument", "document", filename, content, caption)
+    def send_document(self, content: bytes, filename: str, caption: str = "", silent: bool = False) -> int:
+        return self._send_file("sendDocument", "document", filename, content, caption, silent)
 
     def updates(self, wait: int = 30) -> list[Incoming]:
         """Нові текстові повідомлення боту."""
@@ -235,16 +240,24 @@ class Notifier:
         self._queue.put(job)
 
     def ask(
-        self, text: str, buttons: Buttons, urgent: bool = True, on_sent: Callable[[int], None] | None = None
+        self,
+        text: str,
+        buttons: Buttons,
+        urgent: bool = True,
+        on_sent: Callable[[int], None] | None = None,
+        silent: bool = False,
     ) -> None:
-        """Сповіщення з кнопками: відповісти можна одним дотиком. ``on_sent`` отримає номер повідомлення."""
+        """Сповіщення з кнопками: відповісти можна одним дотиком. ``on_sent`` отримає номер повідомлення.
+
+        ``silent`` — без звуку в Telegram і без сповіщення на робочому столі (тихі години).
+        """
         log.info("🔔 %s", text)
 
         def job() -> None:
-            if self.desktop:
+            if self.desktop and not silent:
                 self.desktop(text, urgent)
             if self.bot:
-                message_id = self.bot.send(text, buttons)
+                message_id = self.bot.send(text, buttons, silent=silent)
                 if on_sent and message_id:
                     on_sent(message_id)
 
@@ -264,8 +277,10 @@ class Notifier:
 
         self._queue.put(job)
 
-    def photo(self, content: bytes, caption: str = "", on_sent: Callable[[int], None] | None = None) -> None:
-        self._media(lambda bot: bot.send_photo(content, caption), caption, "фото", on_sent)
+    def photo(
+        self, content: bytes, caption: str = "", on_sent: Callable[[int], None] | None = None, silent: bool = False
+    ) -> None:
+        self._media(lambda bot: bot.send_photo(content, caption, silent), caption, "фото", on_sent)
 
     def video(self, content: bytes, filename: str, caption: str = "") -> None:
         self._media(lambda bot: bot.send_video(content, filename, caption), caption, "відео")
@@ -273,8 +288,15 @@ class Notifier:
     def voice(self, content: bytes, filename: str, caption: str = "") -> None:
         self._media(lambda bot: bot.send_voice(content, filename, caption), caption, "аудіо")
 
-    def document(self, content: bytes, filename: str, caption: str = "", on_sent: Callable[[int], None] | None = None) -> None:
-        self._media(lambda bot: bot.send_document(content, filename, caption), caption, filename, on_sent)
+    def document(
+        self,
+        content: bytes,
+        filename: str,
+        caption: str = "",
+        on_sent: Callable[[int], None] | None = None,
+        silent: bool = False,
+    ) -> None:
+        self._media(lambda bot: bot.send_document(content, filename, caption, silent), caption, filename, on_sent)
 
     def _run(self) -> None:
         while True:

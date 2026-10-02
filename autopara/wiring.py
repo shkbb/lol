@@ -75,8 +75,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     study = None
     if config.study.enabled:
-        folder = config.data_dir / "study"
-        study = StudyManager(config, Agent(config.agent, folder / "agent-usage.json"), notifier, clock, folder)
+        folder = config.study_dir
+        study = StudyManager(config, Agent(config.agent, config.data_dir / "agent-usage.json"), notifier, clock, folder)
         study.start()
         stoppers.append(study.stop)
         stack.study = study

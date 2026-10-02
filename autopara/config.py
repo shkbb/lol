@@ -121,17 +121,44 @@ class StudySettings:
 
     enabled: bool = False
     account: str = ""  # акаунт Classroom; порожньо — основний акаунт Meet (університетська пошта)
-    full_name: str = ""  # «Прізвище Ім'я По батькові» — для титульної сторінки
+    folder: str = ""  # де лежать роботи й конспекти; порожньо — <data_dir>/study
+    # Про тебе — для титульної сторінки
+    full_name: str = ""  # «Прізвище Ім'я По батькові»
     group: str = ""  # порожньо — група з розкладу
-    specialty: str = "121 Інженерія програмного забезпечення"
-    university: str = "Державний університет інформаційно-комунікаційних технологій"
+    year: int = 0  # курс; 0 — з розкладу (або агент визначить сам)
+    university: str = ""  # порожньо — за університетом розкладу
+    faculty: str = ""  # факультет чи навчально-науковий інститут
     department: str = ""  # кафедра; порожньо — агент візьме з матеріалів курсу
+    specialty: str = ""  # «121 Інженерія програмного забезпечення»
     city: str = "Київ"
-    list_number: int = 0  # номер у списку групи (для варіантів); 0 — визначити за списком з розкладу
-    file_format: str = "pdf"  # у чому здавати звіти: pdf | docx
+    student_id: str = ""  # номер залікової книжки / студентського — бувають варіанти за ним
+    # Варіант
+    list_number: int = 0  # номер у списку групи; 0 — визначити за списком з розкладу
+    variant_rule: str = ""  # як рахувати варіант, якщо в умові не сказано (порожньо — номер у списку)
+    courses: list = field(default_factory=list)  # правила для предметів: {course, variant, notes, mode}
+    # Як працювати
+    start_mode: str = "auto"  # auto — братися одразу; ask — спершу спитати «робити?»
+    ask_first: list = field(default_factory=lambda: ["курсов", "проєкт", "проект"])  # великі — завжди питати
+    overdue_days: int = 60  # прострочені не більше ніж на стільки днів — теж робити (0 — не робити)
+    skip_courses: list = field(default_factory=list)  # курси, яких не чіпати (шматок назви)
     check_hours: int = 3  # як часто дивитися в Classroom
     lecture_notes: bool = True  # після пари — детальна вижимка лекції через агента (і конспект курсу)
-    skip_courses: list = field(default_factory=list)  # курси, яких не чіпати (шматок назви)
+    watch_grades: bool = True  # писати, коли роботу оцінили чи повернули
+    # Зв'язок з тобою
+    ask_questions: bool = True  # агент може спитати тебе через бота, коли без тебе не обійтися
+    remind_hours: int = 24  # нагадати за стільки годин до терміну, якщо щось чекає на тебе (0 — не нагадувати)
+    quiet_from: int = 23  # тихі години: повідомлення про навчання — без звуку
+    quiet_to: int = 8
+    # Оформлення
+    file_format: str = "pdf"  # у чому здавати звіти: pdf | docx
+    file_name: str = "{short}_{work}"  # назва звіту без розширення: «Ляшко_Д.О._Лб3»
+    language: str = "українська"  # мова звітів
+    style: str = ""  # побажання до всіх робіт («пиши просто», «код з коментарями»…)
+    examples: str = ""  # тека зі зразками твоїх робіт — оформлювати так само
+
+
+STUDY_COURSE_MODES = ("auto", "ask", "skip")
+FILE_NAME_FIELDS = ("short", "surname", "name", "group", "title", "course", "kind", "n", "work", "number")
 
 
 @dataclass
@@ -163,6 +190,11 @@ class Config:
     def profile_dir(self) -> Path:
         return self.data_dir / "browser-profile"
 
+    @property
+    def study_dir(self) -> Path:
+        """Де лежать роботи й конспекти (Роботи/<курс>/…, Конспекти/<предмет>/…)."""
+        return Path(self.study.folder).expanduser() if self.study.folder.strip() else self.data_dir / "study"
+
 
 def _build(cls, data: Any, section: str):
     if not isinstance(data, dict):
@@ -180,6 +212,37 @@ def _build(cls, data: Any, section: str):
             raise ConfigError(f"[{section}] {name}: очікується {expected.__name__}, а не {value!r}")
         values[name] = value
     return cls(**values)
+
+
+def _check_study(study: StudySettings) -> None:
+    if study.file_format not in ("pdf", "docx"):
+        raise ConfigError('[study] file_format має бути "pdf" або "docx"')
+    if study.start_mode not in ("auto", "ask"):
+        raise ConfigError('[study] start_mode має бути "auto" або "ask"')
+    for name in ("quiet_from", "quiet_to"):
+        if not 0 <= getattr(study, name) <= 23:
+            raise ConfigError(f"[study] {name} — година від 0 до 23")
+    if min(study.overdue_days, study.remind_hours, study.list_number, study.year) < 0 or study.check_hours < 1:
+        raise ConfigError("[study] числа не можуть бути від'ємними, а check_hours — менше 1")
+    try:
+        study.file_name.format(**{key: "x" for key in FILE_NAME_FIELDS})
+    except (KeyError, IndexError, ValueError):
+        allowed = ", ".join("{" + key + "}" for key in FILE_NAME_FIELDS)
+        raise ConfigError(f"[study] file_name: можна вживати лише {allowed}") from None
+    if not all(isinstance(rule, dict) for rule in study.courses):
+        raise ConfigError("[study] courses: кожне правило — таблиця з полем course")
+    study.courses = [rule for rule in study.courses if str(rule.get("course", "")).strip()]  # порожні рядки з вікна
+    for rule in study.courses:
+        unknown = set(rule) - {"course", "variant", "notes", "mode"}
+        if unknown:
+            raise ConfigError(f"[study] courses: невідомі поля {', '.join(sorted(unknown))}")
+        if not all(isinstance(value, str) for value in rule.values()):
+            raise ConfigError("[study] courses: значення правил — текст")
+        if rule.get("mode", "auto") not in STUDY_COURSE_MODES:
+            raise ConfigError('[study] courses: mode має бути "auto", "ask" або "skip"')
+    for name in ("ask_first", "skip_courses"):
+        if not all(isinstance(item, str) for item in getattr(study, name)):
+            raise ConfigError(f"[study] {name} — список рядків")
 
 
 def parse_config(data: dict) -> Config:
@@ -233,8 +296,7 @@ def parse_config(data: dict) -> Config:
         study=_build(StudySettings, data.get("study", {}), "study"),
         agent=_build(AgentSettings, data.get("agent", {}), "agent"),
     )
-    if config.study.file_format not in ("pdf", "docx"):
-        raise ConfigError('[study] file_format має бути "pdf" або "docx"')
+    _check_study(config.study)
     if not all(isinstance(arg, str) for arg in config.agent.args):
         raise ConfigError("[agent] args — це список рядків")
     if "timezone" in data:

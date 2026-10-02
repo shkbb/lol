@@ -332,7 +332,7 @@ def test_study_api(running_app, tmp_path):
     from .test_study import LAB, make, run_jobs, ticks
 
     server, controller, _ = running_app
-    assert call(server, "GET", "/api/study")[1] == {"off": "вимкнено"}
+    assert call(server, "GET", "/api/study")[1]["off"] == "вимкнено"
     controller.config.study.enabled = True
     assert "автовхід вимкнено" in call(server, "GET", "/api/study")[1]["off"]
     assert call(server, "POST", "/api/study/check")[0] == 400
@@ -351,4 +351,37 @@ def test_study_api(running_app, tmp_path):
     assert data["tasks"][0]["status"] == "working" and data["tasks"][0]["feedback"] == ["додай висновок"]
     assert call(server, "POST", "/api/study/check")[0] == 200
     assert call(server, "POST", "/api/study/open", {"number": 99})[0] == 404
+
+    status, details = call(server, "GET", "/api/study/task?number=1")
+    assert status == 200 and "Виконайте запити" in details["assignment"] and details["defense"].startswith("Питання")
+    assert details["files_info"][0]["name"] == "Ляшко_Д.О._ПР1.2.pdf" and details["url"].startswith("https://classroom.google.com/c/C1/a/A1")
+    assert call(server, "GET", "/api/study/task?number=42")[0] == 404
+
+    status, data = call(server, "POST", "/api/study/pause", {"paused": True})
+    assert data["paused"] and "паузі" in data["result"]
+    assert not call(server, "POST", "/api/study/pause", {"paused": False})[1]["paused"]
+    status, agent = call(server, "POST", "/api/study/agent")
+    assert status == 200 and agent["ok"] is False and "agy" in agent["problem"]  # тут agy не встановлено
     controller.study = None
+
+
+def test_study_notes_api(running_app):
+    server, controller, _ = running_app
+    controller.config.study.folder = str(controller.config_path.parent / "навчання")
+    assert call(server, "GET", "/api/study/notes")[1] == {"subjects": []}
+    lecture = controller.config.study_dir / "Конспекти" / "Бази даних" / "2026-10-01 10-00"
+    lecture.mkdir(parents=True)
+    (lecture / "SUMMARY.md").write_text("# Нормалізація\n\nТекст.", encoding="utf-8")
+    other = controller.config.study_dir / "Конспекти" / "Java" / "2026-09-30 13-15"
+    other.mkdir(parents=True)
+    (other / "LECTURE.md").write_text("Інструкція агентові\n\n## Розшифровка\n\n[10:00] колекції", encoding="utf-8")
+    subjects = call(server, "GET", "/api/study/notes")[1]["subjects"]
+    assert [(s["name"], s["lectures"][0]["ready"], s["lectures"][0]["preview"]) for s in subjects] == [
+        ("Java", False, ""), ("Бази даних", True, "Нормалізація"),
+    ]
+    from urllib.parse import quote
+
+    assert call(server, "GET", f"/api/study/note?id={quote('Бази даних/2026-10-01 10-00')}")[1]["text"].startswith("# Нормалізація")
+    transcript = call(server, "GET", f"/api/study/note?id={quote('Java/2026-09-30 13-15')}")[1]["text"]
+    assert "колекції" in transcript and "Інструкція агентові" not in transcript  # лише розшифровка, без службового
+    assert call(server, "GET", f"/api/study/note?id={quote('../../config.toml')}")[0] == 404  # за межі теки — ні

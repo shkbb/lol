@@ -8,7 +8,7 @@ from autopara.agent import AgentError, AgentResult
 from autopara.assistant import ChatMessage, LessonRecord
 from autopara.classroom import Assignment, Attachment, ClassroomError, SubmitResult
 from autopara.config import Config, MeSettings, ScheduleSettings, StudySettings
-from autopara.study import StudyManager, due_of, match_subject, short_name
+from autopara.study import DECIDE, PAUSED, StudyManager, due_of, match_subject, short_name, work_kind
 
 TZ = ZoneInfo("Europe/Kyiv")
 NOW = datetime(2026, 10, 2, 16, 0, tzinfo=TZ)
@@ -21,6 +21,8 @@ class FakeAgent:
         self.verdict = verdict
         self.calls: list[tuple[str, Path]] = []
         self.unavailable = ""
+        self.question = ""  # якщо задано й відповіді ще немає в TASK.md — агент питає замість роботи
+        self.big = 0  # розмір додаткового великого файла в out/ (відео)
 
     def problem(self):
         return self.unavailable or None
@@ -44,6 +46,12 @@ class FakeAgent:
                 f.write("\n" + self.verdict + "\n")
             return AgentResult(True, self.verdict)
         task = (workdir / "TASK.md").read_text(encoding="utf-8")
+        if self.question and "Відповідь:" not in task:
+            (workdir / "QUESTION.md").write_text(self.question, encoding="utf-8")
+            return AgentResult(True, "маю питання")
+        if self.big:
+            with (workdir / "out" / "simulation.mp4").open("wb") as f:
+                f.truncate(self.big)
         (workdir / "out" / "Ляшко_Д.О._ПР1.2.pdf").write_bytes(b"%PDF-1.4 " + task.encode("utf-8")[:50])
         (workdir / "RESULT.md").write_text("Зроблено 10 запитів, скріншоти в звіті.", encoding="utf-8")
         (workdir / "DEFENSE.md").write_text("Питання: що таке JOIN?", encoding="utf-8")
@@ -56,14 +64,17 @@ class FakeClassroom:
         self.details_text = {}
         self.submitted: list[tuple[str, list[str], bool]] = []
         self.unsubmitted: list[str] = []
+        self.removed: list[list[str]] = []
+        self.states: dict[str, tuple[str, str]] = {}  # стан роботи на сторінці: (status, grade)
         self.todo_calls = 0
         self.error = None
+        self.turned_in: set[str] = set()  # як у справжньому Classroom: здане зникає зі списку незданих
 
     def todo(self):
         self.todo_calls += 1
         if self.error:
             raise self.error
-        return [Assignment(i.course_id, i.item_id, i.title, i.course, i.listing) for i in self.items]
+        return [Assignment(i.course_id, i.item_id, i.title, i.course, i.listing) for i in self.items if i.key not in self.turned_in]
 
     def cookies(self):
         return []
@@ -72,14 +83,19 @@ class FakeClassroom:
         item.text = self.details_text.get(item.key, "Виконайте запити згідно варіанту.")
         if "Тест" in item.title:
             item.attachments = [Attachment("https://forms.gle/x", "Тест", "forms")]
+        item.status, item.grade = self.states.get(item.key, ("assigned", ""))
         return item
 
-    def submit(self, item, files, dry_run=False):
+    def submit(self, item, files, dry_run=False, remove=()):
+        self.removed.append(list(remove))
         self.submitted.append((item.key, [f.name for f in files], dry_run))
+        if not dry_run:
+            self.turned_in.add(item.key)
         return SubmitResult(True, "пробна здача" if dry_run else "здано", b"png")
 
     def unsubmit(self, item):
         self.unsubmitted.append(item.key)
+        self.turned_in.discard(item.key)
         return SubmitResult(True, "здачу скасовано", b"png")
 
 
@@ -89,6 +105,7 @@ class FakeNotifier:
         self.asks: list[tuple[int, str, list]] = []
         self.documents: list[tuple[str, str]] = []
         self.photos: list[str] = []
+        self.silent: list[bool] = []
         self._next_id = 100
 
     def __call__(self, text, urgent=False):
@@ -100,17 +117,18 @@ class FakeNotifier:
             on_sent(self._next_id)
         return self._next_id
 
-    def ask(self, text, buttons, urgent=True, on_sent=None):
+    def ask(self, text, buttons, urgent=True, on_sent=None, silent=False):
+        self.silent.append(silent)
         message_id = self._sent(on_sent)
         self.asks.append((message_id, text, buttons))
         if not buttons:
             self.texts.append(text)
 
-    def photo(self, content, caption="", on_sent=None):
+    def photo(self, content, caption="", on_sent=None, silent=False):
         self._sent(on_sent)
         self.photos.append(caption)
 
-    def document(self, content, filename, caption="", on_sent=None):
+    def document(self, content, filename, caption="", on_sent=None, silent=False):
         self._sent(on_sent)
         self.documents.append((filename, caption))
 
@@ -118,11 +136,11 @@ class FakeNotifier:
         return "\n".join(text for _, text, _ in self.asks)
 
 
-def make(tmp_path, items=(), verdict="STATUS: COMPLETE", clock=lambda: NOW):
+def make(tmp_path, items=(), verdict="STATUS: COMPLETE", clock=lambda: NOW, **study):
     config = Config(
         schedule=ScheduleSettings(group="ТЦР-32"),
         me=MeSettings(name="Денис Ляшко"),
-        study=StudySettings(enabled=True, full_name="Ляшко Денис Олегович"),
+        study=StudySettings(enabled=True, full_name="Ляшко Денис Олегович", **study),
     )
     config.agent.attempts = 2
     agent, notifier = FakeAgent(verdict), FakeNotifier()
@@ -197,7 +215,7 @@ def test_incomplete_work_is_never_sent(tmp_path):
     assert lab.status == "stuck" and "Tinkercad" in lab.error
     assert notifier.documents == []  # жодних напівготових файлів
     _, text, buttons = notifier.asks[-1]
-    assert "не вдалося довести" in text and buttons == [[("🔁 Спробувати ще", "study:retry:1")]]
+    assert "не вдалося довести" in text and buttons == [[("🔁 Спробувати ще", "study:retry:1"), ("❌ Не робити", "study:no:1")]]
     assert len([c for c in agent.calls if "перевіряльник" in c[0]]) == 2  # кожна спроба — з перевіркою
     assert manager.on_command("study:yes:1:0").endswith("здавати нічого.")
     ticks(manager, 3, NOW + timedelta(hours=1))
@@ -378,3 +396,279 @@ def test_replies_to_study_messages_never_reach_the_class_chat(tmp_path):
     assert manager.task(1).status == "ready"
     assert "Переробляю" in manager.on_command("тут не той варіант", reply_to=document_ids[0])
     assert manager.on_command("дякую", reply_to=999_999) is None  # чуже — помічнику
+
+
+# --- Питання, «робити?», правила предметів -------------------------------------------------
+
+
+def test_agent_asks_and_continues_with_the_answer(tmp_path):
+    manager, agent, notifier, _ = make(tmp_path, [LAB])
+    agent.question = "Варіант за списком — 5, але в таблиці лише 4 варіанти. Брати 1 (5 mod 4) чи 4?"
+    ticks(manager, 2)
+    run_jobs(manager)
+    lab = manager.task(1)
+    assert lab.status == "question" and notifier.documents == []
+    message_id, text, buttons = notifier.asks[-1]
+    assert "агент питає" in text and "5 mod 4" in text
+    assert buttons == [[("🤷 Виріши сам", "study:decide:1"), ("❌ Не робити", "study:no:1")]]
+    assert "QUESTION.md" in agent.calls[0][0]  # агент знає, що можна питати
+
+    assert "Передав агентові" in manager.on_command("так, бери 1", reply_to=message_id)  # «так» тут — відповідь
+    run_jobs(manager)
+    task_md = (Path(lab.folder) / "TASK.md").read_text(encoding="utf-8")
+    assert "Питання: Варіант за списком" in task_md and "Відповідь: так, бери 1" in task_md
+    assert lab.status == "ready"
+
+
+def test_decide_yourself_button(tmp_path):
+    manager, agent, *_ = make(tmp_path, [LAB])
+    agent.question = "Яку СУБД брати?"
+    ticks(manager, 2)
+    run_jobs(manager)
+    manager.on_command("study:decide:1")
+    run_jobs(manager)
+    assert manager.task(1).questions == [{"q": "Яку СУБД брати?", "a": DECIDE}] and manager.task(1).status == "ready"
+
+
+def test_no_questions_mode(tmp_path):
+    manager, agent, *_ = make(tmp_path, [LAB], ask_questions=False)
+    ticks(manager, 2)
+    run_jobs(manager)
+    assert all("QUESTION.md" not in instruction for instruction, _ in agent.calls)
+    assert "Не став студентові питань" in (Path(manager.task(1).folder) / "TASK.md").read_text(encoding="utf-8")
+
+
+def test_big_works_and_ask_mode_are_proposed_first(tmp_path):
+    project = Assignment("C8", "A8", "Курсовий проєкт", "2026 Бази даних", "Курсовий проєкт · До 10 груд.")
+    manager, agent, notifier, _ = make(tmp_path, [project, LAB], courses=[{"course": "Бази", "mode": "ask"}])
+    ticks(manager, 3)
+    assert {manager.task(1).status, manager.task(2).status} == {"proposed"}  # обидва з «Бази даних» — спершу спитати
+    proposal = next(m for m in notifier.asks if "Курсовий" in m[1] and "Робити?" in m[1])
+    assert "велика робота" in proposal[1] or "просив" in proposal[1]
+    assert agent.calls == []  # без твого «роби» агент не починає
+    number = next(t.number for t in manager.tasks if t.title == "Курсовий проєкт")
+    assert proposal[2] == [[("▶️ Роби", f"study:start:{number}"), ("❌ Не треба", f"study:no:{number}")]]
+    assert "Беруся" in manager.on_command("так", reply_to=proposal[0])
+    assert manager.task(number).status == "working" and manager.task(number).started
+    other = next(t for t in manager.tasks if t.number != number)
+    assert "не роблю" in manager.on_command(f"study:no:{other.number}") and other.status == "declined"
+
+
+def test_start_mode_ask_for_everything(tmp_path):
+    manager, *_ = make(tmp_path, [LAB], start_mode="ask")
+    ticks(manager, 2)
+    assert manager.task(1).status == "proposed"
+    manager.on_command("study:start:1")
+    run_jobs(manager)
+    assert manager.task(1).status == "ready"
+
+
+def test_course_rules_variant_and_notes_and_skip(tmp_path):
+    java = Assignment("C9", "A9", "ЛР №3 Колекції", "Java 2026", "ЛР №3 · Java 2026")
+    iot = Assignment("C10", "A10", "Лабораторна робота_2", "Технології Інтернету речей", "ЛР 2")
+    manager, *_ = make(
+        tmp_path, [LAB, java, iot],
+        courses=[
+            {"course": "Бази даних|БД", "variant": "7", "notes": "Лише PostgreSQL, скрипти окремим файлом."},
+            {"course": "Інтернету речей", "mode": "skip"},
+        ],
+        skip_courses=["Java"], style="Без води, код з коментарями.", variant_rule="остача від ділення номера на 15",
+        student_id="КВ 12345678",
+    )
+    ticks(manager, 2)
+    assert [task.title for task in manager.tasks] == ["ПР № 1.2 Запити вибірки"]  # IoT і Java — не чіпати
+    run_jobs(manager)
+    task_md = (Path(manager.task(1).folder) / "TASK.md").read_text(encoding="utf-8")
+    assert "**7**" in task_md and "Лише PostgreSQL" in task_md and "Без води" in task_md
+    assert "остача від ділення номера на 15" in task_md and "КВ 12345678" in task_md
+
+
+def test_overdue_limit(tmp_path):
+    old = Assignment("C11", "A11", "Лаба 1", "Java", "Лаба 1 · Java · Пропущено · 20 вер.")  # 12 днів тому
+    recent = Assignment("C12", "A12", "Лаба 2", "Java", "Лаба 2 · Java · Пропущено · 25 вер.")  # 7 днів тому
+    manager, _, notifier, _ = make(tmp_path, [old, recent], overdue_days=10)
+    manager.browser_tick(NOW)
+    assert [task.title for task in manager.tasks] == ["Лаба 2"] and "давніше ніж на 10 дн." in notifier.texts[0]
+    strict, *_ = make(tmp_path / "strict", [old, recent], overdue_days=0)
+    strict.browser_tick(NOW)
+    assert strict.tasks == []
+
+
+# --- Нагадування, тихі години, пауза --------------------------------------------------------
+
+
+def test_deadline_reminders_once(tmp_path):
+    tomorrow = Assignment("C13", "A13", "ПР № 2 Join", "2026 Бази даних", "ПР № 2 · До 3 жовт.")
+    manager, agent, notifier, _ = make(tmp_path, [tomorrow, QUIZ], remind_hours=48)
+    ticks(manager, 3)
+    run_jobs(manager)
+    before = len(notifier.asks)
+    manager.browser_tick(NOW + timedelta(hours=1))
+    reminders = [m for m in notifier.asks[before:] if m[1].startswith("⏰")]
+    assert len(reminders) == 2
+    ready = next(m for m in reminders if "готова робота" in m[1])
+    assert ready[2][0][0] == ("✅ Так, здати", "study:yes:1:1")  # одразу можна погодити
+    assert any("Тест з теми 2" in m[1] and "Це на тобі" in m[1] for m in reminders)
+    manager.browser_tick(NOW + timedelta(hours=2))
+    assert not [m for m in notifier.asks[before + len(reminders):] if m[1].startswith("⏰")]  # не повторюємо
+
+
+def test_quiet_hours_send_silently(tmp_path):
+    night = datetime(2026, 10, 3, 2, 30, tzinfo=TZ)
+    manager, _, notifier, _ = make(tmp_path, [LAB], clock=lambda: night)
+    manager.browser_tick(night)
+    assert notifier.silent[-1] is True
+    day, _, day_notifier, _ = make(tmp_path / "day", [LAB])
+    day.browser_tick(NOW)
+    assert day_notifier.silent[-1] is False
+
+
+def test_pause_and_resume(tmp_path):
+    manager, agent, *_ = make(tmp_path, [LAB])
+    assert "паузі" in manager.on_command("пауза")
+    ticks(manager, 2)
+    run_jobs(manager)
+    assert manager.task(1).status == "waiting" and manager.task(1).error == PAUSED and agent.calls == []
+    manager.browser_tick(NOW + timedelta(minutes=30))
+    assert manager.task(1).status == "waiting"  # на паузі не продовжуємо
+    assert "Продовжую" in manager.on_command("продовжуй")
+    manager.browser_tick(NOW + timedelta(minutes=31))
+    run_jobs(manager)
+    assert manager.task(1).status == "ready"
+
+
+# --- Після здачі: повернення, переробка, оцінка ---------------------------------------------
+
+
+def submit_for_real(manager):
+    manager.state["dry_run_done"] = True
+    manager.on_command(f"study:yes:1:{manager.task(1).version}")
+    manager.browser_tick(NOW + timedelta(hours=1))
+    assert manager.task(1).status == "submitted"
+
+
+def test_returned_work_is_reworked_and_old_file_replaced(tmp_path):
+    manager, agent, notifier, classroom = make(tmp_path, [LAB])
+    ticks(manager, 2)
+    run_jobs(manager)
+    submit_for_real(manager)
+    assert manager.task(1).attached == ["Ляшко_Д.О._ПР1.2.pdf"]
+
+    classroom.turned_in.discard("C1/A1")  # викладач повернув — знову серед незданих
+    classroom.states["C1/A1"] = ("returned", "")
+    classroom.details_text["C1/A1"] = "Умова...\nВаша робота\nПовернуто\nПриватний коментар: додайте ER-діаграму"
+    manager.check_now()
+    manager.browser_tick(NOW + timedelta(hours=5))  # завдання знову серед незданих
+    assert manager.task(1).status == "returned"
+    message_id, text, buttons = notifier.asks[-1]
+    assert "повернули" in text and buttons[0][0] == ("✏️ Переробити", "study:rework:1")
+
+    manager.on_command("study:rework:1")
+    manager.browser_tick(NOW + timedelta(hours=5, minutes=1))  # перечитує сторінку з коментарем
+    assert manager.task(1).status == "working"
+    run_jobs(manager)
+    task_md = (Path(manager.task(1).folder) / "TASK.md").read_text(encoding="utf-8")
+    assert "додайте ER-діаграму" in task_md and "Викладач повернув роботу" in task_md
+    assert manager.task(1).version == 2
+    manager.on_command("study:yes:1:2")
+    manager.browser_tick(NOW + timedelta(hours=6))
+    assert classroom.removed[-1] == ["Ляшко_Д.О._ПР1.2.pdf"]  # стару версію спершу прибрати
+    assert manager.task(1).status == "submitted"
+
+
+def test_grade_is_reported_once(tmp_path):
+    manager, agent, notifier, classroom = make(tmp_path, [LAB])
+    ticks(manager, 2)
+    run_jobs(manager)
+    submit_for_real(manager)
+    classroom.states["C1/A1"] = ("graded", "9/10")
+    manager.browser_tick(NOW + timedelta(hours=1, minutes=5))
+    assert "оцінка 9/10" in notifier.asks[-1][1] and manager.task(1).grade == "9/10"
+    count = len(notifier.asks)
+    manager.browser_tick(NOW + timedelta(hours=2))
+    manager.browser_tick(NOW + timedelta(days=1, hours=2))
+    assert len(notifier.asks) == count  # та сама оцінка — без повторів
+
+
+# --- Теки, назви, зразки, великі файли ------------------------------------------------------
+
+
+def test_folders_per_course_and_work_kind(tmp_path):
+    java = Assignment("C9", "A9", "ЛР №3 Колекції", "Java 2026", "ЛР №3 · Java 2026")
+    twin = Assignment("C14", "A14", "ЛР №3 Колекції", "Java 2026", "той самий заголовок")
+    manager, *_ = make(tmp_path, [LAB, java, twin])
+    ticks(manager, 4)
+    folders = sorted(str(Path(task.folder).relative_to(tmp_path / "study")) for task in manager.tasks)
+    assert folders == sorted([
+        "Роботи/Бази даних/Пр 1.2 Запити вибірки",
+        "Роботи/Java/Лб 3 Колекції",
+        f"Роботи/Java/Лб 3 Колекції ({manager.tasks[2].number})",
+    ])
+    assert manager.report_name(manager.task(1)) == "Ляшко_Д.О._Пр1.2.pdf"
+
+
+def test_work_kinds():
+    assert work_kind("ПР № 1.2 Запити вибірки") == ("Пр", "1.2", "Запити вибірки")
+    assert work_kind("Лабораторна робота_1") == ("Лб", "1", "")
+    assert work_kind("Lab 4: Spring Boot") == ("Лб", "4", "Spring Boot")
+    assert work_kind("Самостійна робота №4")[:2] == ("СР", "4")
+    assert work_kind("Курсовий проєкт") == ("Курсова", "", "")
+    assert work_kind("Звіт по Tinkercad") == ("Завдання", "", "Звіт по Tinkercad")
+
+
+def test_examples_previous_works_and_university(tmp_path):
+    examples = tmp_path / "зразки"
+    examples.mkdir()
+    (examples / "Ляшко_Д.О._Лаб5.pdf").write_bytes(b"%PDF")
+    (examples / "notes.exe").write_bytes(b"MZ")
+    second = Assignment("C1", "A2", "ПР № 2 Join", "2026 Бази даних", "ПР № 2")
+    manager, *_ = make(tmp_path, [LAB], examples=str(examples))
+    ticks(manager, 2)
+    run_jobs(manager)
+    assert sorted(p.name for p in (Path(manager.task(1).folder) / "examples").iterdir()) == ["Ляшко_Д.О._Лаб5.pdf"]
+    manager.classroom.items.append(second)
+    manager.check_now()
+    ticks(manager, 2, NOW + timedelta(hours=1))
+    run_jobs(manager)
+    task_md = (Path(manager.task(2).folder) / "TASK.md").read_text(encoding="utf-8")
+    assert "Попередні роботи з цього предмета" in task_md and str(Path(manager.task(1).folder) / "out") in task_md
+    assert "Державний університет інформаційно-комунікаційних технологій" in task_md  # з розкладу (ДУІКТ)
+
+
+def test_big_files_are_not_sent_to_telegram(tmp_path):
+    manager, agent, notifier, _ = make(tmp_path, [LAB])
+    agent.big = 60 * 1024 * 1024
+    ticks(manager, 2)
+    run_jobs(manager)
+    assert "simulation.mp4" not in [name for name, _ in notifier.documents]
+    assert "Завеликі для Telegram" in notifier.asks[-1][1] and "simulation.mp4 (60 МБ)" in notifier.asks[-1][1]
+    assert any(path.endswith("simulation.mp4") for path in manager.task(1).files)  # здавати — так
+
+
+def test_bot_commands(tmp_path):
+    manager, agent, notifier, _ = make(tmp_path, [LAB, QUIZ])
+    agent.question = "Яку СУБД?"
+    ticks(manager, 3)
+    run_jobs(manager)
+    overview = manager.on_command("завдання")
+    assert overview.splitlines()[1].startswith("👉 №1")  # те, що чекає на тебе, — першим
+    assert manager.on_command("питання") == "" and "Яку СУБД?" in notifier.asks[-1][1]
+    assert "Перевірю" in manager.on_command("перевір") and manager.state["last_check"] == ""
+
+
+def test_study_settings_validation():
+    import pytest
+
+    from autopara.config import ConfigError, parse_config
+
+    config = parse_config({"study": {"courses": [{"course": "Java", "variant": "3", "mode": "ask"}, {"course": " "}], "file_name": "{surname}_{kind}{n}"}})
+    assert config.study.courses == [{"course": "Java", "variant": "3", "mode": "ask"}]  # порожній рядок з вікна — відкинуто
+    for bad in (
+        {"courses": [{"course": "Java", "mode": "never"}]},
+        {"courses": ["Java"]},
+        {"file_name": "{прізвище}"},
+        {"start_mode": "sometimes"},
+        {"quiet_from": 24},
+    ):
+        with pytest.raises(ConfigError):
+            parse_config({"study": bad})

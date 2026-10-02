@@ -86,7 +86,7 @@ def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
     if config.study.enabled:
         from .agent import Agent
 
-        agent = Agent(config.agent, config.data_dir / "study" / "agent-usage.json")
+        agent = Agent(config.agent, config.data_dir / "agent-usage.json")
         problem = agent.problem()
         checks.append(Check(problem is None, "агент", problem or f"{config.agent.command} знайдено"))
     else:

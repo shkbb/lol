@@ -129,3 +129,15 @@ def test_desktop_notifications_per_platform(monkeypatch):
 
     monkeypatch.setattr(telegram.shutil, "which", lambda name: None)
     assert telegram.desktop_notifier() is None
+
+
+def test_quiet_messages_have_no_sound():
+    api = FakeApi()
+    notifier = Notifier(TelegramBot("123:abc", chat_id=42, session=api), desktop=False)
+    notifier.ask("вночі", [], urgent=False, silent=True)
+    notifier.document(b"pdf", "звіт.pdf", "звіт", silent=True)
+    notifier.ask("вдень", [], urgent=False)
+    notifier.flush()
+    (m1, p1, _), (m2, p2, _), (m3, p3, _) = api.calls
+    assert p1["disable_notification"] is True and p2["disable_notification"] == "true"
+    assert "disable_notification" not in p3
