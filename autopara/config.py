@@ -98,6 +98,9 @@ class EarsSettings:
     enabled: bool = False
     model: str = "small"
     language: str = "uk"
+    # Звідки брати звук: "browser" — зі сторінки пари (будь-яка ОС), "pulse" — системний звук Linux,
+    # "auto" — системний, де він є, інакше з браузера.
+    source: str = "auto"
 
 
 @dataclass
@@ -179,13 +182,16 @@ def parse_config(data: dict) -> Config:
     telegram = _build(TelegramSettings, data.get("telegram", {}), "telegram")
     if telegram.token and ":" not in telegram.token:
         raise ConfigError("[telegram] token виглядає неправильно — візьми його в @BotFather")
+    ears = _build(EarsSettings, data.get("ears", {}), "ears")
+    if ears.source not in ("auto", "browser", "pulse"):
+        raise ConfigError('[ears] source має бути "auto", "browser" або "pulse"')
     config = Config(
         schedule=schedule,
         join=join,
         links=rules,
         me=me,
         telegram=telegram,
-        ears=_build(EarsSettings, data.get("ears", {}), "ears"),
+        ears=ears,
         brain=_build(BrainSettings, data.get("brain", {}), "brain"),
     )
     if "timezone" in data:

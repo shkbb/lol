@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import re
 import shutil
@@ -12,6 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
+from xml.sax.saxutils import escape
 
 import requests
 
@@ -150,6 +152,54 @@ def wait_for_code(token: str, code: str, wait_seconds: int = 180, session: reque
     return None
 
 
+# Windows: стандартне сповіщення через PowerShell (без додаткових програм). Текст передаємо через
+# змінну середовища, а не в самому скрипті, тож жодні лапки в ньому нічого не зламають.
+WINDOWS_TOAST = (
+    "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;"
+    "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;"
+    "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; $xml.LoadXml($env:AUTOPARA_TOAST);"
+    "$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';"
+    "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show("
+    "[Windows.UI.Notifications.ToastNotification]::new($xml))"
+)
+
+
+def desktop_notifier() -> Callable[[str, bool], None] | None:
+    """Як показати сповіщення на робочому столі на цій ОС (або None, якщо ніяк)."""
+    if sys.platform == "win32" and shutil.which("powershell"):
+
+        def windows(text: str, urgent: bool) -> None:
+            sound = '<audio src="ms-winsoundevent:Notification.Reminder"/>' if urgent else ""
+            xml = (
+                '<toast><visual><binding template="ToastGeneric"><text>autopara</text>'
+                f"<text>{escape(text[:400])}</text></binding></visual>{sound}</toast>"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST],
+                env={**os.environ, "AUTOPARA_TOAST": xml},
+                capture_output=True,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+
+        return windows
+    if sys.platform == "darwin" and shutil.which("osascript"):
+
+        def mac(text: str, urgent: bool) -> None:
+            script = 'on run argv\ndisplay notification (item 1 of argv) with title "autopara"\nend run'
+            subprocess.run(["osascript", "-e", script, text[:400]], capture_output=True, check=False)
+
+        return mac
+    if shutil.which("notify-send"):
+
+        def linux(text: str, urgent: bool) -> None:
+            level = "critical" if urgent else "normal"
+            subprocess.run(["notify-send", "-a", "autopara", "-u", level, "autopara", text], check=False)
+
+        return linux
+    return None
+
+
 class Notifier:
     """Надсилає сповіщення у фоні, щоб повільна мережа не гальмувала решту.
 
@@ -158,7 +208,7 @@ class Notifier:
 
     def __init__(self, bot: TelegramBot | None = None, desktop: bool = True):
         self.bot = bot
-        self.desktop = desktop and sys.platform.startswith("linux") and shutil.which("notify-send") is not None
+        self.desktop = desktop_notifier() if desktop else None
         self._queue: queue.Queue[Callable[[], None]] = queue.Queue()
         self._thread = threading.Thread(target=self._run, name="notifier", daemon=True)
         self._thread.start()
@@ -168,10 +218,7 @@ class Notifier:
 
         def job() -> None:
             if self.desktop:
-                subprocess.run(
-                    ["notify-send", "-a", "autopara", "-u", "critical" if urgent else "normal", "autopara", text],
-                    check=False,
-                )
+                self.desktop(text, urgent)
             if self.bot:
                 self.bot.send(text)
 
@@ -183,10 +230,7 @@ class Notifier:
 
         def job() -> None:
             if self.desktop:
-                subprocess.run(
-                    ["notify-send", "-a", "autopara", "-u", "critical" if urgent else "normal", "autopara", text],
-                    check=False,
-                )
+                self.desktop(text, urgent)
             if self.bot:
                 self.bot.send(text, buttons)
 

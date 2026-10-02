@@ -722,10 +722,9 @@ function brainGb(model) {
 }
 
 function resourcesCard() {
-  const linux = (meta.platform || "").startsWith("linux");
   const gb = (value) => `≈ ${String(value).replace(".", ",")} ГБ`;
   const rows = [["Браузер на парі (Meet)", 1.2, "процесор 10–25 %"], ["Сама програма", 0.15, "майже 0 %"]];
-  if (cfg.ears.enabled && linux) {
+  if (cfg.ears.enabled) {
     const model = cfg.ears.model || "small";
     rows.push([`Вуха (${model})`, EARS_GB[model] ?? 1.5, "30–50 %, поки на парі говорять"]);
   }
@@ -782,11 +781,11 @@ pages.assistant = () => {
     h("div", { class: "card" },
       h("h2", {}, "Вуха й мозок"),
       checkField("ears.enabled", "Слухати пару",
-        linux ? "Локальне розпізнавання мови, без інтернету. Потрібен пакет autopara[ears]."
-          : "Поки лише на Linux (PipeWire/PulseAudio). Без вух усе інше працює: чат, учасники, сповіщення, звіт за чатом.",
-        { disabled: !linux && !get("ears.enabled") }),
-      linux && selectField("ears.model", "Модель розпізнавання", "large-v3-turbo — точніша для української; якщо комп'ютер не встигатиме, програма сама перейде на small.",
+        "Розпізнає мову локально, без інтернету: кличуть тебе, перекличка голосом, розшифровка для звіту. Потрібен пакет autopara[ears]."),
+      selectField("ears.model", "Модель розпізнавання", "large-v3-turbo — точніша для української; якщо комп'ютер не встигатиме, програма сама перейде на small.",
         [["small", "small — швидка"], ["medium", "medium"], ["large-v3-turbo", "large-v3-turbo — точна"]]),
+      linux && selectField("ears.source", "Звідки брати звук", "Зі сторінки пари — на будь-якій ОС і навіть із вимкненим звуком; системний — через PipeWire/PulseAudio, чує все, що грає браузер.",
+        [["auto", "автоматично (системний, якщо є)"], ["browser", "зі сторінки пари"], ["pulse", "системний звук Linux"]]),
       checkField("brain.enabled", "Мозок (локальна мовна модель)", "Через Ollama (є для Linux, Windows і macOS). Розбирається в незапрограмованих ситуаціях і складає звіт після пари."),
       h("div", { class: "grid" },
         textField("brain.model", "Модель", "", { placeholder: "gemma3:4b" }),
@@ -879,7 +878,6 @@ pages.telegram = () => {
         : h("div", { class: "row", style: "margin-top:8px" }, connect, connected && test,
             connected && h("span", { class: "badge ok" }, "✓ підключено")))));
 
-  const linux = (meta.platform || "").startsWith("linux");
   return [
     h("h1", {}, "Telegram"),
     h("p", { class: "lead" }, "Твій особистий бот: пише, коли тебе кличуть, питає «написати «+»?» кнопками, шле звіт після пари. ",
@@ -893,7 +891,7 @@ pages.telegram = () => {
       checkField("telegram.clips", "Відеовирізка моменту", "Хвилина відео з чатом (і звуком, якщо ввімкнені вуха), коли тебе згадали. Потрібен ffmpeg."),
       checkField("telegram.reports", "Звіт після пари", "Про що була пара, завдання й дедлайни, чи тебе кликали. З мозком — з підсумком."),
       checkField("telegram.joins", "Повідомляти, коли зайшов чи вийшов з пари", "Якщо зайти не вдалося — повідомить завжди."),
-      linux && checkField("telegram.desktop", "Дублювати сповіщення на робочий стіл", "")),
+      checkField("telegram.desktop", "Дублювати сповіщення на робочий стіл", "Звичайні сповіщення системи — Windows, macOS чи Linux.")),
   ];
 };
 

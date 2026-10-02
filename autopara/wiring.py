@@ -12,7 +12,7 @@ from typing import Callable, Iterator
 from .assistant import Assistant
 from .brain import BrainWorker, OllamaBrain
 from .config import Config
-from .ears import Ears, EarsError, NullSink, WhisperTranscriber, ears_available
+from .ears import BrowserAudio, Ears, EarsError, NullSink, WhisperTranscriber, pick_source, pulse_available
 from .media import AudioBuffer, Clipper, FrameBuffer
 from .report import Reporter
 from .telegram import Notifier, TelegramBot
@@ -23,7 +23,8 @@ log = logging.getLogger(__name__)
 @dataclass
 class Stack:
     assistant: Assistant
-    audio_sink: str = ""  # куди браузер віддає звук (для вух), або ""
+    audio_sink: str = ""  # куди браузер віддає звук (для вух, системний звук Linux), або ""
+    audio_tap: Callable[[str], None] | None = None  # або: сторінка пари віддає звук сюди (вуха через браузер)
     frames: FrameBuffer | None = None  # кадри сторінки для відеовирізок, або None
 
 
@@ -73,28 +74,37 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         audio = AudioBuffer() if config.ears.enabled else None
 
     if config.ears.enabled:
-        if problem := ears_available():
-            log.warning("Вуха вимкнено: %s", problem)
+        try:
+            transcriber = WhisperTranscriber(config.ears.model, config.ears.language, hints=assistant.whisper_hints)
+        except EarsError as e:
+            log.warning("Вуха вимкнено: %s", e)
         else:
-            sink = NullSink(loopback=not config.join.mute_sound)
-            try:
-                sink.create()
-                transcriber = WhisperTranscriber(config.ears.model, config.ears.language, hints=assistant.whisper_hints)
-            except EarsError as e:
-                sink.close()
-                log.warning("Вуха вимкнено: %s", e)
-            else:
-                ears = Ears(
-                    transcriber,
-                    lambda text, confident: assistant.on_heard(text, clock(), confident),
-                    sink.monitor,
-                    on_audio=audio.add if audio else None,
-                )
-                ears.start()
-                assistant.ears_on = True
-                stoppers += [sink.close, ears.stop]
-                stack.audio_sink = sink.name
-                log.info("Вуха: слухаю пари (модель %s)", config.ears.model)
+            source = pick_source(config.ears.source)
+            on_text = lambda text, confident: assistant.on_heard(text, clock(), confident)  # noqa: E731
+            ears = None
+            if source == "pulse":
+                sink = NullSink(loopback=not config.join.mute_sound)
+                try:
+                    if problem := pulse_available():
+                        raise EarsError(problem)
+                    sink.create()
+                except EarsError as e:
+                    sink.close()
+                    log.warning("Системний звук недоступний (%s) — слухаю пару через браузер", e)
+                    source = "browser"
+                else:
+                    ears = Ears(transcriber, on_text, sink.monitor, on_audio=audio.add if audio else None)
+                    stoppers.append(sink.close)
+                    stack.audio_sink = sink.name
+            if source == "browser":
+                stream = BrowserAudio()
+                ears = Ears(transcriber, on_text, stream, on_audio=audio.add if audio else None)
+                stack.audio_tap = stream.feed_base64
+            ears.start()
+            assistant.ears_on = True
+            stoppers.append(ears.stop)
+            where = "системний звук" if source == "pulse" else "звук зі сторінки пари"
+            log.info("Вуха: слухаю пари (модель %s, %s)", config.ears.model, where)
 
     if clips:
         assistant.on_moment = Clipper(stack.frames, audio, notifier, assistant.quote).capture

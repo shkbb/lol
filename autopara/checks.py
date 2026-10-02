@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import shutil
 import sys
 from dataclasses import dataclass
@@ -45,7 +44,7 @@ def install_hint(linux: str, windows: str, mac: str) -> str:
 
 def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
     from .brain import OllamaBrain
-    from .ears import ears_available
+    from .ears import pick_source, pulse_available, whisper_available
     from .telegram import TelegramBot, TelegramError
 
     checks = []
@@ -89,10 +88,12 @@ def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
     else:
         checks.append(Check(None, "мозок", "вимкнено"))
     if config.ears.enabled:
-        problem = ears_available()
-        if problem is None and importlib.util.find_spec("faster_whisper") is None:
-            problem = 'немає faster-whisper — pip install "autopara[ears]"'
-        checks.append(Check(problem is None, "вуха", problem or f"готові ({config.ears.model})"))
+        problem = whisper_available()
+        where = "звук зі сторінки пари"
+        if pick_source(config.ears.source) == "pulse":
+            pulse = pulse_available()
+            where = "системний звук" if pulse is None else f"звук зі сторінки пари, бо системний недоступний: {pulse}"
+        checks.append(Check(problem is None, "вуха", problem or f"готові ({config.ears.model}, {where})"))
     else:
         checks.append(Check(None, "вуха", "вимкнено"))
     return checks

@@ -152,7 +152,9 @@ def cmd_join(args, config: Config) -> None:
     visit = Visit(args.url, platform_of(args.url), [lesson], now, leave_at)
     logging.getLogger("autopara.ears").setLevel(logging.DEBUG)  # показувати розпізнану мову
     with assistant_stack(config, clock) as stack:
-        joiner = Joiner(config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames)
+        joiner = Joiner(
+            config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames, audio_tap=stack.audio_tap
+        )
         runner = Runner(config, _client(config), joiner, clock=clock, assistant=stack.assistant)
         runner.plan = Plan(visits=[visit])
         runner.next_refresh = leave_at + timedelta(days=1)  # розклад не потрібен
@@ -285,17 +287,24 @@ def cmd_check(args, config: Config) -> None:
 
 
 def cmd_listen_test(args, config: Config) -> None:
-    """Порівняти моделі розпізнавання на справжньому звуці, що зараз грає на ноуті."""
+    """Порівняти моделі розпізнавання на справжньому звуці: що грає на ноуті (Linux) або з файла."""
     from time import monotonic
 
-    from .ears import RATE, EarsError, WhisperTranscriber, clean_text, ears_available, record
+    from .ears import RATE, EarsError, WhisperTranscriber, clean_text, decode_file, pulse_available, record
 
-    if problem := ears_available():
-        print(f"Помилка: {problem}", file=sys.stderr)
-        sys.exit(1)
     models = [model.strip() for model in (args.models or config.ears.model).split(",") if model.strip()]
-    print(f"Записую {args.seconds} с того, що грає на ноуті. Увімкни, наприклад, лекцію українською на YouTube...")
-    pcm = record("@DEFAULT_MONITOR@", args.seconds)
+    if args.file:
+        pcm = decode_file(Path(args.file).expanduser(), args.seconds)
+    else:
+        if problem := pulse_available():
+            print(
+                f"Помилка: {problem}. Запиши шматок лекції у файл (будь-який аудіо чи відео) і запусти:\n"
+                "  autopara listen-test --file лекція.mp3",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"Записую {args.seconds} с того, що грає на ноуті. Увімкни, наприклад, лекцію українською на YouTube...")
+        pcm = record("@DEFAULT_MONITOR@", args.seconds)
     seconds = len(pcm) / (RATE * 2)
     if seconds < 1:
         print("Нічого не записалось — перевір, що звук грає.", file=sys.stderr)
@@ -367,7 +376,8 @@ def build_parser() -> argparse.ArgumentParser:
     check.set_defaults(func=cmd_check)
 
     listen = sub.add_parser("listen-test", help="порівняти моделі розпізнавання мови на звуці з ноута")
-    listen.add_argument("--seconds", type=int, default=30, help="скільки секунд записати")
+    listen.add_argument("--seconds", type=int, default=30, help="скільки секунд записати (чи взяти з файла)")
+    listen.add_argument("--file", help="узяти звук з файла (mp3, m4a, wav, відео…) — працює на будь-якій ОС")
     listen.add_argument("--models", help="моделі через кому, наприклад small,large-v3-turbo")
     listen.set_defaults(func=cmd_listen_test)
     return parser

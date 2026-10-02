@@ -102,3 +102,30 @@ def test_pairing_by_typed_code_and_timeout():
 
     assert wait_for_code("123:abc", "000111", wait_seconds=5, session=FakeApi([update(1, 9, " 000111 ")])) == 9
     assert wait_for_code("123:abc", "000111", wait_seconds=1, session=FakeApi([update(1, 9, "000112")])) is None
+
+
+def test_desktop_notifications_per_platform(monkeypatch):
+    from autopara import telegram
+
+    runs = []
+    monkeypatch.setattr(telegram.subprocess, "run", lambda args, **kw: runs.append((args, kw)))
+    monkeypatch.setattr(telegram.shutil, "which", lambda name: f"/bin/{name}")
+    tricky = 'Ляшко, ви тут? <b>"$(rm -rf ~)"</b> & \'лапки\''
+
+    monkeypatch.setattr(telegram.sys, "platform", "win32")
+    telegram.desktop_notifier()(tricky, True)
+    args, kw = runs[-1]
+    assert args[0] == "powershell" and tricky not in " ".join(args)  # текст — не в команді
+    assert "&lt;b&gt;" in kw["env"]["AUTOPARA_TOAST"] and "&amp;" in kw["env"]["AUTOPARA_TOAST"]
+
+    monkeypatch.setattr(telegram.sys, "platform", "darwin")
+    telegram.desktop_notifier()(tricky, False)
+    args, _ = runs[-1]
+    assert args[0] == "osascript" and args[-1] == tricky  # окремим аргументом, не всередині скрипта
+
+    monkeypatch.setattr(telegram.sys, "platform", "linux")
+    telegram.desktop_notifier()(tricky, True)
+    assert runs[-1][0] == ["notify-send", "-a", "autopara", "-u", "critical", "autopara", tricky]
+
+    monkeypatch.setattr(telegram.shutil, "which", lambda name: None)
+    assert telegram.desktop_notifier() is None

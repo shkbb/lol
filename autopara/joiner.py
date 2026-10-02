@@ -25,6 +25,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 from .assistant import ChatMessage
 from .config import JoinSettings
+from .ears import TAP_SCRIPT
 from .leaving import Observation
 from .links import meet_url, zoom_app_url, zoom_web_url
 from .planner import Visit
@@ -453,11 +454,13 @@ class Browser:
         headless: bool = False,
         executable_path: str = "",
         audio_sink: str = "",
+        audio_tap: Callable[[str], None] | None = None,
     ):
         self.profile_dir = profile_dir
         self.channel = channel
         self.executable_path = executable_path
         self.audio_sink = audio_sink  # куди віддавати звук, щоб «вуха» могли його слухати
+        self.audio_tap = audio_tap  # або: сторінка пари сама віддає звук сюди (base64 PCM 16 кГц)
         self.mute_sound = mute_sound
         self.headless = headless
         self._playwright = None
@@ -467,6 +470,10 @@ class Browser:
         if self._context is None:
             self._context = self._launch()
             self._context.on("close", lambda _: setattr(self, "_context", None))
+            if self.audio_tap is not None:
+                tap = self.audio_tap
+                self._context.expose_binding("__autoparaAudio", lambda source, data: tap(data))
+                self._context.add_init_script(script=TAP_SCRIPT.read_text(encoding="utf-8"))
             # Перша вкладка — «якір»: пари відкриваються в нових вкладках і закриваються,
             # а вікно браузера лишається.
             if self._context.pages:
@@ -490,6 +497,8 @@ class Browser:
             self._playwright = sync_playwright().start()
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         args = ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
+        if self.audio_tap is not None:
+            args.append("--autoplay-policy=no-user-gesture-required")  # щоб збирач звуку стартував одразу
         env = None
         if self.audio_sink:
             # Звук іде у віртуальний вихід: у динаміках тиша, а вуха його чують.
@@ -543,11 +552,13 @@ class Joiner:
         opener=open_uri,
         audio_sink: str = "",
         frames=None,
+        audio_tap: Callable[[str], None] | None = None,
     ):
         self.settings = settings
         self.frames = frames  # FrameBuffer для відеовирізок, або None
         self.browser = Browser(
-            profile_dir, settings.browser_channel, settings.mute_sound, headless, settings.browser_path, audio_sink
+            profile_dir, settings.browser_channel, settings.mute_sound, headless, settings.browser_path, audio_sink,
+            audio_tap,
         )
         self._open_uri = opener
 

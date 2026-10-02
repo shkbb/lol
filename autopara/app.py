@@ -140,7 +140,10 @@ class Controller:
         from .wiring import assistant_stack
 
         info = stack.enter_context(assistant_stack(self.config, self.clock))
-        joiner = Joiner(self.config.join, self.config.profile_dir, audio_sink=info.audio_sink, frames=info.frames)
+        joiner = Joiner(
+            self.config.join, self.config.profile_dir, audio_sink=info.audio_sink, frames=info.frames,
+            audio_tap=info.audio_tap,
+        )
         runner = Runner(self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant)
         return runner, joiner
 

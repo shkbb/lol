@@ -28,11 +28,14 @@ def test_ears_transcribe_loud_chunks_only(monkeypatch):
     heard, chunks = [], []
     done = threading.Event()
 
-    class FakeParec:
-        stdout = io.BytesIO(audio)
+    class FakeStream:
+        data = io.BytesIO(audio)
 
-        def poll(self):
-            return 0
+        def read(self, size):
+            return self.data.read(size) or None
+
+        def close(self):
+            pass
 
     def transcribe(chunk):
         chunks.append(len(chunk))
@@ -41,7 +44,7 @@ def test_ears_transcribe_loud_chunks_only(monkeypatch):
         return [Heard("Дякую за перегляд", True)]
 
     listener = Ears(transcribe, lambda text, confident: heard.append((text, confident)), source="autopara.monitor")
-    monkeypatch.setattr(listener, "_record", lambda: FakeParec())
+    monkeypatch.setattr(listener, "_record", lambda: FakeStream())
     monkeypatch.setattr(listener._stop, "wait", lambda seconds: done.set() or listener._stop.set())
     listener._run()
     assert chunks == [ears.RATE * 2 * 10] * 2  # тихий шматок навіть не розпізнавали
@@ -160,3 +163,39 @@ def test_too_slow_model_switches_to_a_lighter_one(monkeypatch):
     assert transcriber.name == "small" and transcriber.model.name == "small"
     listener._watch_speed(2.0)
     assert transcriber.name == "small"
+
+
+def test_browser_audio_stream():
+    stream = ears.BrowserAudio(max_seconds=1)
+    assert stream.read(100, timeout=0.01) == b""  # не на парі — просто тиша
+    stream.feed(b"\x01\x00" * 10)
+    stream.feed_base64("AgADAA==")  # два відліки з браузера
+    assert stream.read(8) == b"\x01\x00" * 4
+    assert stream.read(100) == b"\x01\x00" * 6 + b"\x02\x00\x03\x00"
+    stream.feed(b"\x00" * (ears.RATE * 2 * 2))  # більше, ніж влазить, — старе відкидається
+    assert len(stream.read(10**9)) <= ears.RATE * 2
+    stream.close()
+    assert stream.read(10) is None
+
+
+def test_ears_flush_the_tail_when_the_class_ends():
+    """Звук з браузера припинився — хвіст розпізнаємо одразу, а не разом з наступною парою."""
+    chunks = []
+    stream = ears.BrowserAudio()
+    listener = Ears(lambda chunk: chunks.append(len(chunk)) or [], lambda text, confident: None, stream)
+    stream.feed(tone(4, 3000))
+    listener.start()
+    for _ in range(100):
+        if chunks:
+            break
+        threading.Event().wait(0.1)
+    listener.stop()
+    assert chunks == [ears.RATE * 2 * 4]
+
+
+def test_audio_source_choice(monkeypatch):
+    monkeypatch.setattr(ears, "pulse_available", lambda: None)
+    assert ears.pick_source("auto") == "pulse"
+    monkeypatch.setattr(ears, "pulse_available", lambda: "системний звук слухаю лише на Linux")
+    assert ears.pick_source("auto") == "browser"
+    assert ears.pick_source("pulse") == "pulse"

@@ -30,6 +30,7 @@ autopara-window = "autopara.cli:window"  # на Windows — без вікна к
 packages = ["autopara", "autopara.ui"]
 
 [tool.setuptools.package-data]
+autopara = ["*.js"]  # збирач звуку пари для вух (ears_tap.js)
 "autopara.ui" = ["*.html", "*.js", "*.css"]  # вікно програми (не Python-код, лише файли)
 
 [tool.pytest.ini_options]
