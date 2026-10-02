@@ -444,6 +444,32 @@ ANCHOR_PAGE = """<!doctype html><meta charset="utf-8"><title>autopara</title>
 <h2>autopara</h2><p>Тут відкриватимуться пари. Не закривай це вікно, поки працює autopara.</p></body>"""
 
 
+def disallow_browser_signin(profile_dir: Path) -> None:
+    """У Google входимо лише на сайтах, а не в сам Chrome («Дозволити вхід у Chrome» — вимкнено).
+
+    Інакше Chrome переносить акаунт організації (університетська пошта, Google Workspace)
+    в окремий профіль Chrome, і в нашому профілі після перезапуску входу вже немає.
+    """
+    prefs_file = profile_dir / "Default" / "Preferences"
+    try:
+        prefs = json.loads(prefs_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        prefs = {}
+    except (OSError, ValueError) as e:
+        log.warning("Не вдалося прочитати налаштування браузера %s: %s", prefs_file, e)
+        return
+    signin = prefs.get("signin")
+    if not isinstance(signin, dict):
+        signin = prefs["signin"] = {}
+    # Перемикач у налаштуваннях Chrome — це allowed_on_next_startup; при запуску Chrome
+    # переписує ним allowed, тож ставимо обидва.
+    if signin.get("allowed") is False and signin.get("allowed_on_next_startup") is False:
+        return
+    signin["allowed"] = signin["allowed_on_next_startup"] = False
+    prefs_file.parent.mkdir(parents=True, exist_ok=True)
+    prefs_file.write_text(json.dumps(prefs, ensure_ascii=False), encoding="utf-8")
+
+
 class Browser:
     """Один Chrome з окремим постійним профілем: логін у Google зберігається між запусками."""
 
@@ -497,6 +523,7 @@ class Browser:
         if self._playwright is None:
             self._playwright = sync_playwright().start()
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        disallow_browser_signin(self.profile_dir)
         args = ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
         if self.audio_tap is not None:
             args.append("--autoplay-policy=no-user-gesture-required")  # щоб збирач звуку стартував одразу
