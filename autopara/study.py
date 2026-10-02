@@ -1302,6 +1302,20 @@ class StudyManager:
                 "waiting_on_you": sum(task.status in WAITING_ON_YOU for task in self.tasks),
             }
 
+    def attention(self) -> dict:
+        """Коротко для «Сьогодні»: що чекає на тебе і що робить агент."""
+        with self._lock:
+            waiting = [task for task in self._ordered() if task.status in WAITING_ON_YOU]
+            return {
+                "waiting": [
+                    {"number": task.number, "title": task.title, "status": task.status, "due": task.due} for task in waiting[:6]
+                ],
+                "waiting_count": len(waiting),
+                "activity": self.activity,
+                "paused": self.paused,
+                "problem": self.agent.problem(),
+            }
+
     def _task_view(self, task: StudyTask) -> dict:
         return {
             **asdict(task),

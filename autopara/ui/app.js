@@ -228,74 +228,105 @@ function chipsField(path, label, hint, placeholder) {
 // ---------------------------------------------------------------------------
 
 const pages = {};
+const sections = {};  // вкладки «Налаштувань»
+
+// Рідкісні параметри — під спойлером, щоб на екрані лишалось головне.
+function more(...children) {
+  return h("details", { class: "more" }, h("summary", {}, "Більше налаштувань"), h("div", {}, ...children));
+}
 
 pages.home = () => {
-  const content = [h("h1", {}, "Головна"), h("p", { class: "lead" }, "Програма сама заходить на пари за розкладом, з вимкненими мікрофоном і камерою.")];
+  const today = new Date().toLocaleDateString("uk-UA", { weekday: "long", day: "numeric", month: "long" });
+  const content = [h("div", { class: "page-head" }, h("h1", {}, "Сьогодні"), h("span", { class: "muted" }, today))];
 
   if (!state.configured) {
     content.push(h("div", { class: "card" },
       h("h2", {}, "Почнімо"),
       h("ol", { class: "steps" },
-        h("li", {}, h("div", {}, h("b", {}, "Обери університет і групу"), h("div", { class: "muted" }, "Вкладка «Група»."))),
-        h("li", {}, h("div", {}, h("b", {}, "Додай посилання на пари"), h("div", { class: "muted" }, "Вкладка «Посилання»: програма сама покаже предмети з твого розкладу."))),
-        h("li", {}, h("div", {}, h("b", {}, "Увійди в Google"), h("div", { class: "muted" }, "Вкладка «Акаунти» → «Увійти в Google»."))),
-        h("li", {}, h("div", {}, h("b", {}, "За бажанням — підключи Telegram"), h("div", { class: "muted" }, "Вкладка «Telegram»: свій бот за хвилину, сповіщення лише тобі."))),
-      ),
+        h("li", {}, h("div", {}, h("b", {}, "Обери університет і групу"), h("div", { class: "muted" }, "Налаштування → Пари."))),
+        h("li", {}, h("div", {}, h("b", {}, "Додай посилання на пари"), h("div", { class: "muted" }, "Там само: програма сама покаже предмети з твого розкладу."))),
+        h("li", {}, h("div", {}, h("b", {}, "Увійди в Google"), h("div", { class: "muted" }, "Налаштування → Акаунти → «Увійти в Google»."))),
+        h("li", {}, h("div", {}, h("b", {}, "За бажанням — Telegram"), h("div", { class: "muted" }, "Налаштування → Telegram: свій бот за хвилину.")))),
       h("div", { class: "row" },
-        h("button", { class: "primary", onclick: () => go("group") }, "Обрати групу"),
-        importControls()),
-    ));
+        h("button", { class: "primary", onclick: () => goSettings("pairs") }, "Обрати групу"),
+        importControls())));
   }
 
+  // Стан і пара, що йде зараз, — однією карткою.
   const toggle = h("button", { class: state.running ? "ghost" : "primary" }, state.running ? "Вимкнути" : "Увімкнути");
   toggle.onclick = () => busy(toggle, "…", async () => {
     await api("POST", state.running ? "/api/stop" : "/api/start");
     await refreshState();
   });
+  const active = (state.active || []).map((session) => {
+    const leave = h("button", { class: "ghost" }, "Вийти");
+    leave.onclick = () => busy(leave, "…", async () => { await api("POST", "/api/leave", { key: session.key }); refreshState(); });
+    return h("div", { class: "item" },
+      h("span", { class: "badge ok" }, `зараз · ${PLATFORM[session.platform] || session.platform}`),
+      h("div", {}, h("div", { class: "title" }, session.title),
+        session.participants && h("div", { class: "muted small" }, `👥 ${session.participants} учасників`)),
+      h("span", { class: "spacer" }), leave);
+  });
   content.push(h("div", { class: "card" },
     h("div", { class: "status" },
       h("span", { class: state.running ? "dot on" : "dot" }),
       h("div", {},
-        h("div", { class: "status-title" }, state.running ? "Працює" : "Вимкнено"),
+        h("div", { class: "status-title" }, state.running ? "Програма працює" : "Програма вимкнена"),
         h("div", { class: "muted" }, [state.university, state.group].filter(Boolean).join(" · ") || "група не обрана")),
       h("span", { class: "spacer" }),
       toggle),
     state.restart_pending && h("div", { class: "banner warn", style: "margin:14px 0 0" }, "Нові налаштування застосуються, щойно скінчиться поточна пара."),
     state.error && h("div", { class: "banner bad", style: "margin:14px 0 0" }, state.error),
-  ));
+    active.length > 0 && h("div", { class: "list", style: "margin-top:12px" }, active)));
 
-  if (state.active?.length) {
-    content.push(h("div", { class: "card" }, h("h2", {}, "Зараз на парі"), h("div", { class: "list" }, state.active.map((session) => {
-      const leave = h("button", { class: "ghost" }, "Вийти");
-      leave.onclick = () => busy(leave, "…", async () => { await api("POST", "/api/leave", { key: session.key }); refreshState(); });
-      return h("div", { class: "item" },
-        h("span", { class: "badge ok" }, PLATFORM[session.platform] || session.platform),
-        h("div", {}, h("div", { class: "title" }, session.title),
-          session.participants && h("div", { class: "muted small" }, `👥 ${session.participants} учасників`)),
-        h("span", { class: "spacer" }), leave);
-    }))));
+  // Усе, що чекає на тебе, — одним списком.
+  const attention = [];
+  const study = state.study || {};
+  const STUDY_ICON = { question: "❓", ready: "📘", proposed: "🆕", returned: "↩️" };
+  const STUDY_TEXT = { question: "Агент питає", ready: "Готово до здачі", proposed: "Робити?", returned: "Повернуто викладачем" };
+  for (const task of study.waiting || []) {
+    attention.push(h("div", { class: "item" },
+      h("span", { class: "big-icon" }, STUDY_ICON[task.status] || "📚"),
+      h("div", { style: "flex:1" }, h("div", { class: "title" }, task.title), h("div", { class: "muted small" }, STUDY_TEXT[task.status] || "")),
+      dueChip(task.due),
+      h("button", { class: "soft", onclick: () => openTask(task.number) }, "Відкрити")));
   }
-
-  for (const conflict of state.conflicts || []) content.push(h("div", { class: "banner warn" }, conflict));
+  if ((study.waiting_count || 0) > (study.waiting || []).length) {
+    attention.push(h("div", { class: "item" }, h("span", { class: "muted" }, `і ще ${study.waiting_count - study.waiting.length}`), h("span", { class: "spacer" }),
+      h("button", { class: "ghost", onclick: () => go("study") }, "Усі завдання")));
+  }
+  for (const lesson of (state.unlinked || []).slice(0, 4)) {
+    attention.push(h("div", { class: "item" },
+      h("span", { class: "big-icon" }, "🔗"),
+      h("div", { style: "flex:1" }, h("div", { class: "title" }, lesson.title), h("div", { class: "muted small" }, `немає посилання · ${lesson.when}`)),
+      h("button", { class: "soft", onclick: () => goSettings("pairs") }, "Додати")));
+  }
+  for (const conflict of state.conflicts || []) attention.push(h("div", { class: "item" }, h("span", { class: "big-icon" }, "⚠️"), h("div", {}, conflict)));
+  if (study.enabled && study.problem && !study.paused) {
+    attention.push(h("div", { class: "item" }, h("span", { class: "big-icon" }, "🤖"),
+      h("div", { style: "flex:1" }, h("div", { class: "title" }, "Агент недоступний"), h("div", { class: "muted small" }, study.problem)),
+      h("button", { class: "ghost", onclick: () => goSettings("study") }, "Налаштувати")));
+  }
+  content.push(attention.length
+    ? h("div", { class: "card" }, h("h2", {}, "Потребує уваги"), h("div", { class: "list" }, attention))
+    : h("div", { class: "calm-line" }, "✓ Нічого не потребує твоєї уваги"));
 
   const upcoming = state.upcoming || [];
-  content.push(h("div", { class: "grid" },
-    h("div", { class: "card" }, h("h2", {}, "Найближчі пари"),
-      upcoming.length ? h("div", { class: "list" }, upcoming.map((visit) => h("div", { class: "item" },
-        h("span", { class: "time" }, when(visit.join_at)),
-        h("div", { class: "title" }, visit.title),
-        h("span", { class: "spacer" }),
-        h("span", { class: "badge accent" }, PLATFORM[visit.platform] || visit.platform))))
-        : h("div", { class: "empty" }, state.running ? "Найближчими днями пар з посиланнями немає." : "Увімкни програму, щоб побачити план.")),
-    h("div", { class: "card" }, h("h2", {}, "Без посилання"),
-      state.unlinked?.length
-        ? [h("div", { class: "list" }, state.unlinked.map((lesson) => h("div", { class: "item" },
-            h("span", { class: "time" }, lesson.when), h("div", {}, lesson.title)))),
-           h("button", { class: "soft", style: "margin-top:10px", onclick: () => go("links") }, "Додати посилання")]
-        : h("div", { class: "empty" }, "Усі пари мають посилання 👍")),
-  ));
+  content.push(h("div", { class: "card" },
+    h("div", { class: "row", style: "margin-bottom:6px" }, h("h2", { style: "margin:0" }, "Далі"), h("span", { class: "spacer" }),
+      h("button", { class: "link", onclick: () => go("timetable") }, "Весь розклад")),
+    upcoming.length ? h("div", { class: "list" }, upcoming.slice(0, 5).map((visit) => h("div", { class: "item" },
+      h("span", { class: "time" }, when(visit.join_at)),
+      h("div", { class: "title" }, visit.title),
+      h("span", { class: "spacer" }),
+      h("span", { class: "badge accent" }, PLATFORM[visit.platform] || visit.platform))))
+      : h("div", { class: "empty" }, state.running ? "Найближчими днями пар з посиланнями немає." : "Увімкни програму, щоб побачити план.")));
 
-  content.push(actionsCard());
+  if (study.activity) {
+    content.push(h("div", { class: "status-line", style: "margin-top:4px" }, h("span", { class: "pulse busy" }),
+      h("span", {}, `Агент ${study.activity.what} «${study.activity.title}» · ${elapsed(study.activity.since)}`),
+      h("button", { class: "link", onclick: () => go("study") }, "Навчання →")));
+  }
   return content;
 };
 
@@ -357,14 +388,14 @@ function actionsCard() {
     checks.replaceChildren(...checkRows(lastChecks));
   });
   return h("div", { class: "card" },
-    h("h2", {}, "Перевірка"),
+    h("h2", {}, "Перевірка й тестовий вхід"),
     h("div", { class: "row" }, h("div", { style: "flex:1;min-width:240px" }, url), join),
     h("small", { class: "hint" }, "Тестовий вхід: створи зустріч на meet.new і встав посилання — програма зайде так само, як на пару."),
     h("div", { class: "row", style: "margin-top:12px" }, login, check),
     checks);
 }
 
-pages.group = () => {
+sections.group = () => {
   const university = get("schedule.university") || "duikt";
   const switcher = h("div", { class: "segmented" }, Object.entries(meta.universities).map(([code, name]) =>
     h("button", { class: code === university ? "on" : "", onclick: () => {
@@ -433,20 +464,14 @@ pages.group = () => {
     h("div", { class: "card" },
       h("h2", {}, "Університет і група"), switcher,
       h("label", { class: "field" }, h("span", {}, "Група"), h("div", { class: "search" }, input, results), chosen),
-      university === "duikt" && studentControl(),
     ),
-    h("div", { class: "card" },
-      h("h2", {}, "Оновлення"),
-      h("div", { class: "grid" },
-        numberField("schedule.days_ahead", "На скільки днів уперед", "Скільки розкладу тримати в голові.", { min: 1 }),
-        numberField("schedule.refresh_minutes", "Оновлювати кожні, хв", "Пари іноді переносять.", { min: 5 })),
-      checkField("schedule.use_schedule_links", "Брати посилання з самого розкладу", "Якщо для пари немає твого посилання, а викладач вписав Meet чи Zoom у розклад."),
-    ),
-    h("div", { class: "card row" },
-      h("div", { style: "flex:1" }, h("b", {}, "Перевір, що розклад правильний"),
-        h("div", { class: "muted small" }, JSON.stringify(cfg) !== savedJson ? "Спершу збережи зміни." : "Пари на тиждень з позначками, куди програма заходитиме.")),
-      h("button", { class: "soft", onclick: () => go("timetable") }, "Відкрити розклад")),
   ];
+  content[2].append(more(
+    university === "duikt" && studentControl(),
+    h("div", { class: "grid" },
+      numberField("schedule.days_ahead", "На скільки днів уперед", "Скільки розкладу тримати в голові.", { min: 1 }),
+      numberField("schedule.refresh_minutes", "Оновлювати кожні, хв", "Пари іноді переносять.", { min: 5 })),
+    checkField("schedule.use_schedule_links", "Брати посилання з самого розкладу", "Якщо для пари немає твого посилання, а викладач вписав Meet чи Zoom у розклад.")));
   return content;
 };
 
@@ -475,7 +500,7 @@ function lessonBadge(lesson) {
   return h("span", { class: "badge ok", title: lesson.url }, text);
 }
 
-pages.links = () => {
+sections.links = () => {
   const content = [
     h("h1", {}, "Посилання"),
     h("p", { class: "lead" }, "Куди заходити на кожну пару. Програма бере предмети з твого розкладу — лишається вставити посилання."),
@@ -490,7 +515,7 @@ pages.links = () => {
   const reload = h("button", { class: "ghost" }, "Оновити");
   reload.onclick = () => busy(reload, "…", async () => { lessonsCache = null; await load(); });
   const subjectsCard = h("div", { class: "card" },
-    h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Пари з розкладу (2 тижні)"), h("span", { class: "spacer" }), reload),
+    h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Посилання на пари"), h("span", { class: "spacer" }), reload),
     JSON.stringify(cfg) !== savedJson && h("small", { class: "hint" }, "Статуси показані для збережених налаштувань."),
     subjects);
   if (get("schedule.group") || get("schedule.group_uid")) {
@@ -499,7 +524,8 @@ pages.links = () => {
   } else {
     subjects.replaceChildren(h("div", { class: "empty" }, "Спершу обери групу у вкладці «Група»."));
   }
-  content.push(subjectsCard, rulesCard());
+  subjectsCard.append(h("details", { class: "more" }, h("summary", {}, `Усі правила (${cfg.links.length})`), h("div", {}, rulesCard())));
+  content.push(subjectsCard);
   return content;
 };
 
@@ -564,9 +590,8 @@ function rulesCard() {
         h("button", { class: "icon", title: "Нижче", onclick: () => move(1) }, "↓"),
         h("button", { class: "icon", title: "Видалити", onclick: () => { cfg.links.splice(index, 1); changed(); render(); } }, "✕")));
   });
-  return h("div", { class: "card" },
-    h("h2", {}, "Правила"),
-    h("small", { class: "hint", style: "margin:-6px 0 12px" },
+  return h("div", {},
+    h("small", { class: "hint", style: "margin:0 0 12px" },
       "Перевіряються згори донизу; перше, що підійшло, і спрацьовує. «Предмет» — шматок назви (регістр не важливий), кілька варіантів через «|». Тип — Лк, Пз чи Лб, якщо посилання різні."),
     cfg.links.length
       ? h("table", { class: "rules" }, h("tr", {}, ["Предмет", "Тип", "Посилання", "Акаунт", "Пропуск", ""].map((name) => h("th", {}, name))), rows)
@@ -574,7 +599,7 @@ function rulesCard() {
     h("button", { class: "ghost", style: "margin-top:10px", onclick: () => { cfg.links.push({ subject: "", url: "" }); changed(); render(); } }, "Додати правило"));
 }
 
-pages.accounts = () => {
+sections.accounts = () => {
   const login = h("button", { class: "primary" }, "Увійти в Google");
   login.onclick = () => busy(login, "Відкриваю…", async () => {
     await api("POST", "/api/login");
@@ -589,7 +614,7 @@ pages.accounts = () => {
       chipsField("join.accounts", "Інші акаунти", "Для зустрічей, які не пускають з основного (наприклад, особиста пошта). Акаунт для пари обирається у вкладці «Посилання».", "email і Enter"),
       h("div", { class: "row" }, login,
         h("span", { class: "muted small" }, "Відкриється браузер програми: увійди в усі ці акаунти (наступний — через «Додати обліковий запис»)."))),
-    h("div", { class: "card" },
+    more(h("div", { class: "card" },
       h("h2", {}, "Zoom"),
       choiceField("join.zoom_mode", [
         { value: "auto", label: "Автоматично (рекомендовано)", hint: "Zoom-клієнт, якщо вуха можуть його чути (Linux або віртуальний кабель); інакше Zoom у браузері, а якщо там не пустять — таки клієнт, і це посилання програма запам'ятає." },
@@ -600,7 +625,7 @@ pages.accounts = () => {
     h("div", { class: "card" },
       h("h2", {}, "Браузер"),
       selectField("join.browser_channel", "Який браузер відкривати", "Логін у Google зберігається в окремому профілі програми.", [["chrome", "Google Chrome"], ["msedge", "Microsoft Edge"], ["", "вбудований Chromium"]]),
-      textField("join.browser_path", "Або шлях до браузера", "Наприклад, /usr/bin/chromium. Має пріоритет над вибором вище.", { placeholder: "необов'язково" })),
+      textField("join.browser_path", "Або шлях до браузера", "Наприклад, /usr/bin/chromium. Має пріоритет над вибором вище.", { placeholder: "необов'язково" }))),
   ];
 };
 
@@ -709,7 +734,7 @@ pages.timetable = () => {
   const content = [h("h1", {}, "Розклад"), h("p", { class: "lead" }, "Твої пари і куди програма заходитиме.")];
   if (!get("schedule.group") && !get("schedule.group_uid")) {
     content.push(h("div", { class: "card" }, h("p", {}, "Спершу обери групу."),
-      h("button", { class: "primary", onclick: () => go("group") }, "Обрати групу")));
+      h("button", { class: "primary", onclick: () => goSettings("pairs") }, "Обрати групу")));
     return content;
   }
   load().catch((e) => body.replaceChildren(h("div", { class: "banner bad" }, e.message)));
@@ -778,7 +803,7 @@ function zoomEars(linux) {
     audioDevices = [];
     api("GET", "/api/audio-devices").then((result) => {
       audioDevices = result.devices;
-      if (page === "assistant") render();
+      if (page === "settings") render();
     }).catch(() => {});
   }
   const current = get("ears.app_device") || "";
@@ -802,7 +827,7 @@ function zoomEars(linux) {
     h("small", { class: "hint" }, "Так вуха чують лише Zoom, а не YouTube чи музику. Як при цьому чути пару й самому — README, розділ «Вуха»."));
 }
 
-pages.assistant = () => {
+sections.assistant = () => {
   const linux = (meta.platform || "").startsWith("linux");
   const check = h("button", { class: "ghost" }, "Перевірити мозок і вуха");
   const checks = h("div", { class: "list" });
@@ -812,43 +837,39 @@ pages.assistant = () => {
       h("div", { class: "item" }, h("span", { class: item.ok ? "badge ok" : item.ok === null ? "badge" : "badge bad" }, item.area), h("span", {}, item.text))));
   });
   return [
-    h("h1", {}, "Помічник"),
     h("p", { class: "lead" }, "Стежить за парою, поки тебе немає: відмічається на перекличці, кличе тебе, коли звертаються, шле звіт після пари."),
     h("div", { class: "card" },
-      h("h2", {}, "Про тебе"),
-      textField("me.name", "Прізвище та ім'я", "Як тебе називають викладачі — щоб помічати, коли кличуть.", { placeholder: "Прізвище Ім'я" }),
-      h("div", { class: "grid" },
-        textField("me.present", "Що писати на перекличці", "", { placeholder: "Присутній" }),
-        textField("me.here", "Відповідь на «…, ви тут?»", "", { placeholder: "Так, я тут" })),
-      chipsField("me.quick_replies", "Кнопки-відповіді в Telegram", "Коли тебе кличуть, під сповіщенням будуть ці кнопки: натиснув — і текст пішов у чат пари.", "текст і Enter")),
-    h("div", { class: "card" },
-      h("h2", {}, "Писати в чат пари самому"),
+      textField("me.name", "Твоє прізвище та ім'я", "Як тебе називають викладачі — щоб помічати, коли кличуть.", { placeholder: "Прізвище Ім'я" }),
+      h("div", { style: "margin:4px 0 8px;font-weight:600" }, "Писати в чат пари самому"),
       choiceField("me.chat_reply", [
-        { value: "auto", label: "Так, де сигнали надійні", hint: "Коли не всі сигнали за — спитає в Telegram, а за 45 с без твого «ні» напише сам." },
+        { value: "auto", label: "Так, де сигнали надійні", hint: "Перекличка, «… ви тут?». Коли не впевнений — спитає в Telegram." },
         { value: "ask", label: "Лише після мого «так» у Telegram", hint: "Кожен раз питає кнопками." },
         { value: "off", label: "Ніколи", hint: "Лише сповіщає." },
       ]),
-      h("div", { style: "margin:4px 0 8px;font-weight:600" }, "Що саме можна писати"),
-      checkField("me.roll_call", "Відмічатися на перекличці", "«+», «Присутній» чи прізвище, коли відмічається група. Вимкнено — лише питає тебе."),
-      checkField("me.answer_here", "Відповідати, коли викладач питає саме тебе", "«Ляшко, ви тут?» → «Так, я тут». Вимкнено — лише питає."),
-      checkField("me.polite", "Дублювати за групою «Дякую», «Добрий день», «До побачення»", "Вимкнено — мовчить."),
-      h("small", { class: "hint" }, "На запис, голосування, «хто здав» чи «зрозуміло?» помічник сам не відповідає ніколи — це вирішуєш ти.")),
-    h("div", { class: "card" },
-      h("h2", {}, "Вуха й мозок"),
-      checkField("ears.enabled", "Слухати пару",
-        "Розпізнає мову локально, без інтернету: кличуть тебе, перекличка голосом, розшифровка для звіту. Потрібен пакет autopara[ears]."),
+      checkField("ears.enabled", "Слухати пару", "Розпізнає мову локально: кличуть тебе, перекличка голосом, розшифровка для звіту й вижимок."),
       get("ears.enabled") && !meta.ears_installed && earsInstallBanner(),
-      selectField("ears.model", "Модель розпізнавання", "Якщо комп'ютер не встигатиме за мовою, програма сама перейде на легшу модель.",
-        [["auto", "автоматично за потужністю комп'ютера"], ["small", "small — швидка"], ["medium", "medium"], ["large-v3-turbo", "large-v3-turbo — точна"]]),
-      linux && selectField("ears.source", "Пари в браузері: звідки брати звук", "Зі вкладки пари — вуха чують лише пару, навіть із вимкненим звуком. Весь звук браузера — запасний шлях: чує й інші вкладки браузера програми.",
-        [["auto", "зі вкладки пари (рекомендовано)"], ["pulse", "весь звук браузера програми (PipeWire/PulseAudio)"]]),
-      get("ears.enabled") && zoomEars(linux),
-      checkField("brain.enabled", "Мозок (локальна мовна модель)", "Через Ollama (є для Linux, Windows і macOS). Розбирається в незапрограмованих ситуаціях і складає звіт після пари."),
-      h("div", { class: "grid" },
-        textField("brain.model", "Модель", "", { placeholder: "gemma3:4b" }),
-        textField("brain.url", "Адреса Ollama", "", { placeholder: "http://127.0.0.1:11434" })),
-      check, checks),
-    resourcesCard(),
+      checkField("brain.enabled", "Мозок (локальна мовна модель)", "Через Ollama: розбирається в незвичних ситуаціях і складає звіт після пари."),
+      more(
+        h("h2", { style: "margin-top:6px" }, "Відповіді"),
+        h("div", { class: "grid" },
+          textField("me.present", "Що писати на перекличці", "", { placeholder: "Присутній" }),
+          textField("me.here", "Відповідь на «…, ви тут?»", "", { placeholder: "Так, я тут" })),
+        chipsField("me.quick_replies", "Кнопки-відповіді в Telegram", "Коли тебе кличуть, під сповіщенням будуть ці кнопки: натиснув — і текст пішов у чат пари.", "текст і Enter"),
+        checkField("me.roll_call", "Відмічатися на перекличці", "«+», «Присутній» чи прізвище, коли відмічається група. Вимкнено — лише питає тебе."),
+        checkField("me.answer_here", "Відповідати, коли викладач питає саме тебе", "«Ляшко, ви тут?» → «Так, я тут». Вимкнено — лише питає."),
+        checkField("me.polite", "Дублювати за групою «Дякую», «Добрий день», «До побачення»", "Вимкнено — мовчить."),
+        h("small", { class: "hint", style: "margin-bottom:14px" }, "На запис, голосування, «хто здав» чи «зрозуміло?» помічник сам не відповідає ніколи — це вирішуєш ти."),
+        h("h2", {}, "Вуха й мозок"),
+        selectField("ears.model", "Модель розпізнавання", "Якщо комп'ютер не встигатиме за мовою, програма сама перейде на легшу модель.",
+          [["auto", "автоматично за потужністю комп'ютера"], ["small", "small — швидка"], ["medium", "medium"], ["large-v3-turbo", "large-v3-turbo — точна"]]),
+        linux && selectField("ears.source", "Пари в браузері: звідки брати звук", "Зі вкладки пари — вуха чують лише пару, навіть із вимкненим звуком.",
+          [["auto", "зі вкладки пари (рекомендовано)"], ["pulse", "весь звук браузера програми (PipeWire/PulseAudio)"]]),
+        get("ears.enabled") && zoomEars(linux),
+        h("div", { class: "grid" },
+          textField("brain.model", "Модель мозку", "", { placeholder: "gemma3:4b" }),
+          textField("brain.url", "Адреса Ollama", "", { placeholder: "http://127.0.0.1:11434" })),
+        check, checks,
+        resourcesCard())),
   ];
 };
 
@@ -872,13 +893,13 @@ function pairCode() {
   return String(random[0] % 1000000).padStart(6, "0");
 }
 
-pages.telegram = () => {
+sections.telegram = () => {
   const token = (get("telegram.token") || "").trim();
   const chatId = get("telegram.chat_id") || 0;
   const connected = chatId !== 0;
   const known = token && botInfo.token === token;
   const username = known ? botInfo.username : "";
-  if (token && !known) checkBot(token).then(() => { if (page === "telegram") render(); });
+  if (token && !known) checkBot(token).then(() => { if (page === "settings") render(); });
 
   const tokenInput = h("input", { type: "password", value: token, placeholder: "123456789:AAH…", autocomplete: "off",
     oninput: (event) => { set("telegram.token", event.target.value.trim()); set("telegram.chat_id", 0); } });
@@ -973,23 +994,25 @@ function autostartCard() {
       h("span", { class: "hint" }, auto.note || "У фоні, без вікна. Вікно — ярликом або командою autopara app."))));
 }
 
-pages.behaviour = () => [
-  h("h1", {}, "Поведінка"),
-  h("p", { class: "lead" }, "Коли запускатися, заходити й виходити."),
+sections.general = () => [
   autostartCard(),
   h("div", { class: "card" },
-    h("h2", {}, "Вхід"),
+    h("h2", {}, "На парі"),
     numberField("join.minutes_before", "За скільки хвилин до пари заходити", ""),
     checkField("join.mute_microphone", "Вимикати мікрофон", "Якщо не вдасться переконатися, що він вимкнений, браузер заборонить сторінці доступ до нього."),
     checkField("join.camera_off", "Вимикати камеру", ""),
-    checkField("join.mute_sound", "Без звуку", "Вимкни, щоб чути пару з колонок (помічник однаково чутиме).")),
+    checkField("join.mute_sound", "Без звуку", "Вимкни, щоб чути пару з колонок (помічник однаково чутиме)."),
+    checkField("join.smart_leave", "Виходити разом з групою, а не рівно за розкладом", "Відпустили раніше — вийде, коли вийде більшість; затягнулась — не вийде першим."),
+    more(
+      checkField("join.auto_leave", "Виходити з пари самому", "Вимкнено — програма лише заходить, а виходиш ти."),
+      h("div", { class: "grid" },
+        numberField("join.max_overtime_minutes", "Не довше ніж хв після кінця", ""),
+        numberField("join.leave_after_minutes", "Якщо учасників не видно — через хв після кінця", "")))),
+  actionsCard(),
   h("div", { class: "card" },
-    h("h2", {}, "Вихід"),
-    checkField("join.auto_leave", "Виходити з пари самому", ""),
-    checkField("join.smart_leave", "Разом з групою, а не рівно за розкладом", "Відпустили раніше — вийде, коли вийде більшість; затягнулась — не вийде першим."),
-    h("div", { class: "grid" },
-      numberField("join.max_overtime_minutes", "Не довше ніж хв після кінця", ""),
-      numberField("join.leave_after_minutes", "Якщо учасників не видно — через хв після кінця", ""))),
+    h("h2", {}, "Перенести налаштування"),
+    h("p", { class: "muted small", style: "margin-top:-6px" }, `Готовий профіль чи файл config.toml від одногрупника. Налаштування лежать у ${meta.path}`),
+    h("div", { class: "row" }, importControls())),
 ];
 
 // --- Навчання -------------------------------------------------------------------
@@ -1001,26 +1024,12 @@ const STUDY_BADGE = {
 const STUDY_DONE = ["submitted", "declined", "skipped", "gone"];
 const STUDY_YOURS = ["proposed", "question", "ready", "returned"];
 const STUDY_BUSY = ["new", "working", "waiting", "approved", "returning"];
-const STUDY_FILTERS = [
-  ["active", "Активні", (task) => !STUDY_DONE.includes(task.status)],
-  ["yours", "Чекають на тебе", (task) => STUDY_YOURS.includes(task.status)],
-  ["busy", "У роботі", (task) => STUDY_BUSY.includes(task.status)],
-  ["problems", "Не вийшло", (task) => ["stuck", "failed"].includes(task.status)],
-  ["submitted", "Здані", (task) => task.status === "submitted"],
-  ["skipped", "Пропущені", (task) => ["skipped", "declined", "gone"].includes(task.status)],
-  ["all", "Усі", () => true],
-];
-const STUDY_TABS = [["overview", "Огляд"], ["tasks", "Завдання"], ["notes", "Конспекти"], ["settings", "Налаштування"]];
+const STUDY_ASK = { proposed: "Робити?", question: "Агент питає", ready: "Готово — здати?", returned: "Повернуто викладачем" };
 
-let studyTab = "overview";
-try { studyTab = localStorage.getItem("autopara-study-tab") || "overview"; } catch (e) { /* не страшно */ }
-let studyFilter = "active";
-let studyCourse = "";
-let studyQuery = "";
-let studySelected = 0;
+let studyLatest = null;
+let studySelected = 0;  // завдання, відкрите в бічній панелі
 let studyDetails = null;
 let studyEditing = 0;  // номер завдання, для якого відкрите поле зауважень
-let studyLatest = null;
 let agentInfo = null;
 let agentChecking = false;
 let studyTimer;
@@ -1028,9 +1037,7 @@ let notesData = null;
 let noteSelected = "";
 let noteText = "";
 let notesQuery = "";
-const studyBox = { head: null, tabs: null, body: null };
-
-// --- Дрібниці -------------------------------------------------------------------
+const studyBox = { head: null, body: null };
 
 function studyDate(iso) {
   return new Date(iso).toLocaleDateString("uk-UA", { day: "numeric", month: "short" });
@@ -1080,21 +1087,12 @@ function noteParts(name) {
   };
 }
 
-function ensureAgentInfo() {
-  if (agentInfo || agentChecking) return;
-  agentChecking = true;
-  api("POST", "/api/study/agent")
-    .then((info) => { agentInfo = info; agentChecking = false; studyDraw(true); })
-    .catch(() => { agentChecking = false; });
-}
-
 function textareaField(path, label, hint, placeholder) {
   return field(label, hint, h("textarea", {
     rows: 3, placeholder: placeholder || "", value: get(path) ?? "", oninput: (event) => set(path, event.target.value),
   }));
 }
 
-// Markdown агента → DOM (без innerHTML: текст лишається текстом).
 function mdInline(text) {
   const parts = [];
   const pattern = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|\*[^*\s][^*]*\*|_[^_\s][^_]*_)/g;
@@ -1165,51 +1163,10 @@ function md(text) {
   return root;
 }
 
-// --- Дії ----------------------------------------------------------------------------
-
-async function studyAct(button, number, action, extra = {}) {
-  const task = (studyLatest?.tasks || []).find((item) => item.number === number) || {};
-  await busy(button, "…", async () => {
-    const data = await api("POST", "/api/study/action", { number, action, version: task.version, ...extra });
-    if (data.result) toast(data.result);
-    studyEditing = 0;
-    studyLatest = data;
-    if (studySelected === number) studyDetails = null;
-    studyDraw();
-  });
-}
-
 function actionButton(task, label, cls, action, question) {
   const element = h("button", { class: cls }, label);
   element.onclick = () => { if (!question || confirm(question)) studyAct(element, task.number, action); };
   return element;
-}
-
-function taskActions(task, compact = false) {
-  const actions = [];
-  const add = (...items) => actions.push(...items);
-  if (task.status === "proposed") add(actionButton(task, "▶️ Роби", "primary", "start"), actionButton(task, "❌ Не треба", "ghost", "no"));
-  if (task.status === "returned") add(actionButton(task, "✏️ Переробити за коментарями", "primary", "rework"), actionButton(task, "❌ Не треба", "ghost", "no"));
-  if ((task.status === "ready" || task.status === "failed") && task.files.length) {
-    add(actionButton(task, "✅ Так, здати", "primary", "yes", `Здати «${task.title}» у Classroom?`));
-  }
-  if (task.status === "ready" || task.status === "stuck") {
-    const redo = h("button", { class: "soft" }, task.status === "stuck" ? "💡 Підказати агентові" : "✏️ Переробити");
-    redo.onclick = () => { studyEditing = task.number; if (compact) { studySelected = task.number; switchStudyTab("tasks"); } else studyDraw(); };
-    add(redo);
-  }
-  if (["stuck", "failed", "declined", "gone"].includes(task.status)) add(actionButton(task, "🔁 Спробувати ще", "soft", "retry"));
-  if (["ready", "stuck", "failed", "approved", "waiting"].includes(task.status)) add(actionButton(task, "❌ Не здавати", "ghost", "no"));
-  if (task.status === "submitted" && task.submitted !== "раніше") add(actionButton(task, "↩️ Забрати з Classroom", "ghost", "back", `Скасувати здачу «${task.title}»?`));
-  if (!compact) {
-    if (task.folder) {
-      const open = h("button", { class: "ghost" }, "📂 Файли");
-      open.onclick = () => busy(open, "…", () => api("POST", "/api/study/open", { number: task.number }));
-      add(open);
-    }
-    if (task.url) add(h("button", { class: "ghost", onclick: () => window.open(task.url, "_blank", "noopener") }, "↗ Classroom"));
-  }
-  return actions;
 }
 
 function askBox(task) {
@@ -1240,191 +1197,6 @@ function redoBox(task) {
     h("div", { class: "row", style: "margin-top:8px" }, send, h("button", { class: "ghost", onclick: () => { studyEditing = 0; studyDraw(); } }, "Скасувати")));
 }
 
-function switchStudyTab(tab) {
-  studyTab = tab;
-  try { localStorage.setItem("autopara-study-tab", tab); } catch (e) { /* не страшно */ }
-  studyDraw(true);
-  window.scrollTo(0, 0);
-}
-
-function openTask(number) {
-  studySelected = number;
-  studyDetails = null;
-  if (studyTab !== "tasks") switchStudyTab("tasks"); else studyDraw();
-}
-
-// --- Шапка: що відбувається зараз --------------------------------------------------
-
-function studyHead() {
-  const L = studyLatest;
-  const open = (what, label) => {
-    const element = h("button", { class: "ghost" }, label);
-    element.onclick = () => busy(element, "…", () => api("POST", "/api/study/open", { what }));
-    return element;
-  };
-  const head = h("div", { class: "study-head" },
-    h("div", { style: "flex:1;min-width:260px" }, h("h1", {}, "Навчання"),
-      h("p", { class: "lead" }, "Агент (Antigravity) робить завдання з Google Classroom і вижимки лекцій. Тобі приходять лише повністю готові роботи — і здаються вони тільки після твого «так».")));
-  if (!L || L.off) return head;
-
-  let pulse = "pulse";
-  let what = "Агент вільний";
-  let sub = "";
-  if (L.activity) {
-    pulse = "pulse busy";
-    what = `Агент ${L.activity.what}${L.activity.title ? ` «${L.activity.title}»` : ""}`;
-    sub = `${elapsed(L.activity.since)}${L.activity.attempt > 1 ? ` · спроба ${L.activity.attempt}` : ""}`;
-  } else if (L.paused) {
-    pulse = "pulse off"; what = "Агент на паузі"; sub = "нових робіт не бере; готові здавати можна";
-  } else if (L.agent_problem) {
-    pulse = "pulse warn"; what = "Агент недоступний"; sub = L.agent_problem;
-  } else if (L.last_check) {
-    const next = new Date(new Date(L.last_check).getTime() + (get("study.check_hours") || 3) * 36e5);
-    sub = `Classroom перевірено ${when(L.last_check)} · наступна перевірка ~${next.toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" })}`;
-  } else sub = "Classroom ще не перевіряли — перевірю між парами";
-
-  const usage = L.agent_limit ? Math.min(100, Math.round((L.agent_used / L.agent_limit) * 100)) : 0;
-  const check = h("button", { class: "ghost" }, "Перевірити Classroom");
-  check.onclick = () => busy(check, "…", async () => toast((await api("POST", "/api/study/check")).result));
-  const pause = h("button", { class: L.paused ? "primary" : "ghost" }, L.paused ? "▶️ Продовжити" : "⏸ Пауза");
-  pause.onclick = () => busy(pause, "…", async () => {
-    const result = await api("POST", "/api/study/pause", { paused: !L.paused });
-    toast(result.result);
-    studyLatest = result;
-    studyDraw();
-  });
-  return h("div", {}, head,
-    h("div", { class: "strip" },
-      h("span", { class: pulse }),
-      h("div", { style: "flex:1;min-width:220px" }, h("div", { class: "what" }, what), sub && h("div", { class: "muted small" }, sub)),
-      h("div", { style: "min-width:170px" },
-        h("div", { class: "muted small" }, `Запуски агента сьогодні: ${L.agent_used} з ${L.agent_limit}`),
-        h("div", { class: `meter${usage > 80 ? " high" : ""}` }, h("div", { style: `width:${usage}%` }))),
-      check, pause, open("works", "📂 Роботи")),
-    L.last_error && h("div", { class: "banner bad" }, `Classroom: ${L.last_error}`));
-}
-
-function studyTabs() {
-  const L = studyLatest;
-  const yours = L && !L.off ? L.tasks.filter((task) => STUDY_YOURS.includes(task.status)).length : 0;
-  const active = L && !L.off ? L.tasks.filter((task) => !STUDY_DONE.includes(task.status)).length : 0;
-  const counts = { overview: yours, tasks: active };
-  return h("div", { class: "study-tabs" }, STUDY_TABS.map(([key, label]) => h("button", {
-    class: studyTab === key ? "on" : "", onclick: () => switchStudyTab(key),
-  }, label, counts[key] > 0 && h("span", { class: `count${key === "tasks" ? " muted" : ""}` }, counts[key]),
-    key === "settings" && L && L.agent_problem && h("span", { class: "count", style: "background:var(--warn)" }, "!"))));
-}
-
-// --- Огляд --------------------------------------------------------------------------
-
-function studyOnboarding() {
-  const L = studyLatest;
-  if (get("study.enabled") && L && L.off) {
-    const start = h("button", { class: "primary" }, "Увімкнути автовхід");
-    start.onclick = () => busy(start, "…", async () => { await api("POST", "/api/start"); toast("Увімкнено"); });
-    return h("div", { class: "hero" }, h("h2", {}, "Навчання ввімкнене, але програма зараз на паузі"),
-      h("p", { class: "muted" }, `Навчання працює разом з автовходом на пари: ${L.off}.`), start);
-  }
-  ensureAgentInfo();
-  const done = {
-    agent: agentInfo ? agentInfo.ok : null,
-    name: !!(get("study.full_name") || "").trim(),
-    telegram: !!get("telegram.chat_id"),
-  };
-  const item = (ok, title, hint) => h("div", { class: "ci" },
-    h("span", { class: `mark ${ok ? "yes" : "no"}` }, ok ? "✓" : ok === null ? "…" : "·"),
-    h("div", {}, h("b", {}, title), h("div", { class: "muted small" }, hint)));
-  const enable = h("button", { class: "primary" }, "Увімкнути навчання");
-  enable.onclick = () => { set("study.enabled", true); save(); };
-  const feature = (title, text) => h("div", { class: "feature" }, h("b", {}, title), h("span", {}, text));
-  return h("div", { class: "hero" },
-    h("h2", {}, "Агент, що робить завдання з Classroom"),
-    h("p", { class: "muted", style: "margin:0;max-width:760px" }, "Між парами програма дивиться в Google Classroom, агент Antigravity виконує лаби й практичні повністю — з кодом, скріншотами, звітом і шпаргалкою до захисту. Ти переглядаєш і натискаєш «так» — програма здає."),
-    h("div", { class: "features" },
-      feature("✅ Лише після твого «так»", "Нічого не здається без тебе. Перша здача — пробна, зі скріном."),
-      feature("🧪 Лише готові роботи", "Окремий прохід суворо перевіряє роботу проти умови й доробляє."),
-      feature("❓ Питає, коли треба", "Незрозумілий варіант чи умова — питання в Telegram, відповідаєш — продовжує."),
-      feature("📚 Вижимки лекцій", "Після пари — детальний конспект, а побажання викладача потрапляють у роботи."),
-      feature("📒 Шпаргалка до захисту", "До кожної роботи — суть простими словами й імовірні питання."),
-      feature("📬 Оцінки й повернення", "Пише про оцінку, а повернену роботу пропонує переробити за коментарями.")),
-    h("b", {}, "Щоб почати"),
-    h("div", { class: "checklist" },
-      item(done.agent, "Antigravity CLI встановлено й виконано вхід", agentInfo ? (agentInfo.ok ? `Готово${agentInfo.version ? ` · ${agentInfo.version}` : ""}` : agentInfo.problem) : "Перевіряю…"),
-      item(done.name, "ПІБ для титульної сторінки", done.name ? get("study.full_name") : "Вкладка «Налаштування» → «Про тебе»"),
-      item(done.telegram, "Telegram-бот підключено", done.telegram ? "Готові роботи й питання приходитимуть туди" : "Можна й без нього — усе буде тут, у вікні"),
-      item(true, "Вхід у Classroom", `Classroom відкривається в браузері програми під акаунтом ${get("study.account") || get("join.meet_account") || "з «Акаунтів»"}`)),
-    h("div", { class: "row" }, enable, h("button", { class: "ghost", onclick: () => switchStudyTab("settings") }, "Спершу налаштувати")));
-}
-
-function compactCard(task) {
-  return h("div", { class: "card", style: "margin-bottom:10px" },
-    h("div", { class: "row" },
-      h("b", { style: "cursor:pointer", onclick: () => openTask(task.number) }, task.title),
-      h("span", { class: `badge ${STUDY_BADGE[task.status] || ""}` }, task.status_text), dueChip(task.due)),
-    h("div", { class: "muted small" }, task.course, task.version > 1 ? ` · версія ${task.version}` : ""),
-    task.status === "question" ? askBox(task) : null,
-    task.status === "ready" && task.summary && h("div", { class: "small", style: "margin-top:6px;color:var(--muted)" }, task.summary.split("\n").find((line) => line.trim()) || ""),
-    h("div", { class: "row", style: "margin-top:10px" }, taskActions(task, true),
-      h("button", { class: "ghost", onclick: () => openTask(task.number) }, "Детальніше →")));
-}
-
-function studyLoading() {
-  return h("div", { class: "card" }, h("div", { class: "empty" }, "Завантажую…"));
-}
-
-function studyOverview() {
-  const L = studyLatest;
-  if (!L) return studyLoading();
-  if (L.off) return studyOnboarding();
-  const tasks = L.tasks;
-  const yours = tasks.filter((task) => STUDY_YOURS.includes(task.status));
-  const busyTasks = tasks.filter((task) => STUDY_BUSY.includes(task.status) || task.status === "question");
-  const submitted = tasks.filter((task) => task.status === "submitted");
-  const upcoming = tasks.filter((task) => task.due && !STUDY_DONE.includes(task.status) && new Date(task.due) > Date.now() - 864e5 * 3)
-    .sort((a, b) => new Date(a.due) - new Date(b.due));
-  const next = upcoming.find((task) => new Date(task.due) > Date.now());
-  const tile = (cls, num, label, sub, onclick) => h("button", { class: `tile ${cls}`, onclick }, h("span", { class: "num" }, num), h("span", { class: "label" }, label), sub && h("span", { class: "sub" }, sub));
-  const filterTo = (key) => () => { studyFilter = key; switchStudyTab("tasks"); };
-  const graded = submitted.filter((task) => task.grade);
-
-  const notesCard = h("div", { class: "card" }, h("div", { class: "section-title" }, h("h2", {}, "Останні вижимки"), h("span", { class: "spacer" }),
-    h("button", { class: "ghost", onclick: () => switchStudyTab("notes") }, "Усі конспекти →")));
-  const notesList = h("div", { class: "empty" }, "Завантажую…");
-  notesCard.append(notesList);
-  loadNotes().then(() => {
-    const recent = (notesData || []).flatMap((subject) => subject.lectures.map((lecture) => ({ ...lecture, subject: subject.name })))
-      .sort((a, b) => b.date.localeCompare(a.date)).slice(0, 4);
-    notesList.replaceWith(recent.length ? h("div", { class: "timeline" }, recent.map((lecture) => h("div", {
-      class: "tl-row", onclick: () => { noteSelected = lecture.id; noteText = ""; switchStudyTab("notes"); },
-    }, h("div", { class: "d" }, noteParts(lecture.date).day, h("small", {}, noteParts(lecture.date).sub)),
-      h("div", {}, h("div", { class: "t" }, lecture.subject), h("div", { class: "c" }, lecture.preview || "вижимка ще готується")),
-      lecture.ready ? h("span", { class: "badge ok" }, "готово") : h("span", { class: "badge" }, "лише розшифровка"))))
-      : h("div", { class: "empty" }, "Вижимок ще немає — з'являться після першої пари, яку почують вуха."));
-  });
-
-  return [
-    h("div", { class: "tiles" },
-      tile(yours.length ? "accent" : "", yours.length, "Чекають на тебе", yours.length ? yours.map((task) => task.title).join(" · ") : "нічого не треба", filterTo("yours")),
-      tile("warn", busyTasks.length, "Агент робить", L.activity ? `зараз: ${L.activity.title}` : "у черзі", filterTo("busy")),
-      tile("ok", submitted.length, "Здано", graded.length ? `оцінено: ${graded.length}` : "з програми й раніше", filterTo("submitted")),
-      tile("", next ? (dueInfo(next.due).text) : "—", "Найближчий термін", next ? next.title : "немає", next ? () => openTask(next.number) : filterTo("active"))),
-    h("div", { class: "cols" },
-      h("div", {},
-        h("div", { class: "section-title" }, h("h2", {}, "Чекають на тебе"), yours.length > 0 && h("span", { class: "count" }, yours.length)),
-        yours.length ? yours.map(compactCard) : h("div", { class: "card" }, h("div", { class: "empty" }, "Усе під контролем: ні питань, ні готових робіт без твого рішення."))),
-      h("div", {},
-        h("div", { class: "card" }, h("h2", {}, "Терміни"),
-          upcoming.length ? h("div", { class: "timeline" }, upcoming.slice(0, 10).map((task) => h("div", { class: "tl-row", onclick: () => openTask(task.number) },
-            h("div", { class: "d" }, studyDate(task.due), h("small", {}, new Date(task.due).toLocaleDateString("uk-UA", { weekday: "short" }))),
-            h("div", {}, h("div", { class: "t" }, task.title), h("div", { class: "c" }, task.course)),
-            h("span", { class: `badge ${STUDY_BADGE[task.status] || ""}` }, task.status_text))))
-            : h("div", { class: "empty" }, "Найближчих термінів немає.")),
-        notesCard)),
-  ];
-}
-
-// --- Завдання -----------------------------------------------------------------------
-
 function stepper(task) {
   const stage = { new: 0, proposed: 0, working: 1, question: 1, waiting: 1, stuck: 1, ready: 2, approved: 2, failed: 2, returning: 2, submitted: 3, returned: 3 }[task.status];
   if (stage === undefined) return null;
@@ -1439,166 +1211,9 @@ function fold(title, content, open = false) {
   return content ? h("details", { class: "fold", open }, h("summary", {}, title), h("div", {}, content)) : null;
 }
 
-function taskDetail(task) {
-  if (!task) return h("div", { class: "card" }, h("div", { class: "empty" }, "Обери завдання зліва."));
-  const details = studyDetails && studyDetails.number === task.number ? studyDetails : null;
-  if (!details) {
-    api("GET", `/api/study/task?number=${task.number}`).then((data) => {
-      studyDetails = data;
-      if (studySelected === task.number) drawTaskDetail();
-    }).catch((e) => toast(e.message, true));
-  }
-  const info = details || task;
-  const files = details ? details.files_info : [];
-  const qa = [
-    ...info.questions.flatMap((item) => [
-      h("div", { class: "bubble agent" }, h("span", { class: "who" }, "Агент"), item.q),
-      item.a && h("div", { class: "bubble me" }, h("span", { class: "who" }, "Ти"), item.a)]),
-    ...info.feedback.map((item) => h("div", { class: "bubble me" }, h("span", { class: "who" }, "Твоє зауваження"), item)),
-  ].filter(Boolean);
-  return h("div", { class: "card" },
-    h("div", { class: "detail-head" },
-      h("h2", {}, info.title),
-      h("span", { class: `badge ${STUDY_BADGE[info.status] || ""}` }, info.status_text),
-      info.grade && h("span", { class: "badge ok" }, `📬 ${info.grade}`)),
-    h("div", { class: "facts" }, info.course, dueChip(info.due),
-      info.version > 0 && h("span", {}, `версія ${info.version}`),
-      info.attempts > 0 && h("span", {}, `запусків агента: ${info.attempts}`),
-      info.updated && h("span", {}, `оновлено ${when(info.updated)}`)),
-    stepper(info),
-    info.status === "question" ? askBox(info) : null,
-    info.error && !["ready", "submitted"].includes(info.status) && h("div", { class: info.status === "stuck" || info.status === "failed" ? "banner bad" : "banner warn" }, info.error),
-    h("div", { class: "row", style: "margin-bottom:6px" }, taskActions(info)),
-    studyEditing === info.number && redoBox(info),
-    !details && h("div", { class: "empty" }, "Завантажую подробиці…"),
-    details && fold(`📎 Файли для здачі (${files.length})`, files.length ? h("div", { class: "files" }, files.map((file) => h("div", { class: "file-row" },
-      h("span", {}, /\.pdf$/i.test(file.name) ? "📄" : /\.(mp4|mov|webm)$/i.test(file.name) ? "🎬" : /\.(zip|rar|7z)$/i.test(file.name) ? "🗜" : "📎"),
-      h("span", { class: "name" }, file.name), h("span", { class: "size" }, fileSize(file.size))))) : null, info.status === "ready"),
-    details && details.report_name && !files.length && h("div", { class: "muted small", style: "padding:8px 0" }, `Звіт буде названо: ${details.report_name}`),
-    details && fold("📝 Що зроблено", details.result ? md(details.result) : null, info.status === "ready"),
-    details && fold("📒 Шпаргалка до захисту", details.defense ? md(details.defense) : null),
-    qa.length > 0 && fold(`💬 Питання й зауваження (${qa.length})`, h("div", { class: "qa" }, qa), info.status === "question"),
-    details && fold("📋 Умова завдання", details.assignment ? h("div", { class: "plain" }, details.assignment) : null, !details.result),
-    details && fold(`📚 Матеріали від викладача (${details.materials.length})`, details.materials.length ? h("div", { class: "files" }, details.materials.map((file) => h("div", { class: "file-row" },
-      h("span", {}, "📎"), h("span", { class: "name" }, file.name.replace(/\.link\.txt$/, " (лише посилання)")), h("span", { class: "size" }, fileSize(file.size))))) : null));
-}
-
-let drawTaskDetail = () => {};
-
-function studyTasksTab() {
-  const L = studyLatest;
-  if (!L) return studyLoading();
-  if (L.off) return studyOnboarding();
-  const courses = [...new Set(L.tasks.map((task) => task.course).filter(Boolean))].sort();
-  const listBox = h("div", { class: "task-list" });
-  const detailBox = h("div", { class: "detail" });
-  const visible = () => {
-    const test = STUDY_FILTERS.find(([key]) => key === studyFilter)[2];
-    const query = studyQuery.trim().toLowerCase();
-    return L.tasks.filter((task) => test(task) && (!studyCourse || task.course === studyCourse)
-      && (!query || `${task.title} ${task.course}`.toLowerCase().includes(query)));
-  };
-  const drawList = () => {
-    const tasks = visible();
-    if (!studySelected && tasks.length) studySelected = tasks[0].number;
-    listBox.replaceChildren(...(tasks.length ? tasks.map((task) => h("button", {
-      class: `task-row${task.number === studySelected ? " on" : ""}`,
-      onclick: () => { studySelected = task.number; studyDetails = null; studyEditing = 0; drawList(); drawTaskDetail(); },
-    },
-      h("span", { class: `bar ${STUDY_BADGE[task.status] || ""}` }),
-      h("div", {}, h("div", { class: "t" }, task.title), h("div", { class: "c" }, `№${task.number} · ${task.course}`)),
-      h("div", { class: "side" }, h("span", { class: `badge ${STUDY_BADGE[task.status] || ""}` }, task.status_text), dueChip(task.due))))
-      : [h("div", { class: "card" }, h("div", { class: "empty" }, "Тут порожньо."))]));
-  };
-  drawTaskDetail = () => detailBox.replaceChildren(taskDetail(L.tasks.find((task) => task.number === studySelected)));
-  drawList();
-  drawTaskDetail();
-
-  const search = h("input", { type: "text", placeholder: "Пошук за назвою…", value: studyQuery, oninput: (event) => { studyQuery = event.target.value; drawList(); } });
-  return [
-    h("div", { class: "filters" },
-      STUDY_FILTERS.map(([key, label, test]) => {
-        const count = L.tasks.filter(test).length;
-        return h("button", { class: `filter${studyFilter === key ? " on" : ""}`, onclick: () => { studyFilter = key; studySelected = 0; studyDetails = null; studyDraw(); } },
-          label, h("span", { class: "count muted" }, count));
-      }),
-      h("span", { class: "spacer" }),
-      courses.length > 1 && h("select", { onchange: (event) => { studyCourse = event.target.value; studySelected = 0; studyDraw(); } },
-        h("option", { value: "" }, "Усі предмети"), courses.map((course) => h("option", { value: course, selected: course === studyCourse }, course))),
-      search),
-    h("div", { class: "split" }, listBox, detailBox),
-  ];
-}
-
-// --- Конспекти ------------------------------------------------------------------------
-
 async function loadNotes(force = false) {
   if (notesData && !force) return;
   try { notesData = (await api("GET", "/api/study/notes")).subjects; } catch (e) { notesData = []; }
-}
-
-function studyNotesTab() {
-  const listBox = h("div", {}, h("div", { class: "empty" }, "Завантажую…"));
-  const noteBox = h("div", { class: "card" }, h("div", { class: "empty" }, "Обери пару зліва."));
-  const showNote = async () => {
-    if (!noteSelected) return;
-    if (!noteText) {
-      noteBox.replaceChildren(h("div", { class: "empty" }, "Завантажую…"));
-      try { noteText = (await api("GET", `/api/study/note?id=${encodeURIComponent(noteSelected)}`)).text; } catch (e) { noteText = `_${e.message}_`; }
-    }
-    const [subject, date] = noteSelected.split("/");
-    noteBox.replaceChildren(h("div", { class: "facts", style: "margin:0 0 12px" }, h("b", { style: "color:var(--text)" }, subject), h("span", {}, noteWhen(date))), md(noteText));
-  };
-  const drawList = () => {
-    const query = notesQuery.trim().toLowerCase();
-    const subjects = (notesData || []).map((subject) => ({
-      ...subject,
-      lectures: subject.lectures.filter((lecture) => !query || `${subject.name} ${lecture.preview}`.toLowerCase().includes(query)),
-    })).filter((subject) => subject.lectures.length);
-    if (!noteSelected && subjects.length) noteSelected = subjects[0].lectures[0].id;
-    listBox.replaceChildren(...(subjects.length ? subjects.map((subject) => h("div", { class: "subject" },
-      h("b", {}, subject.name, " ", h("span", { class: "count muted" }, subject.lectures.length)),
-      subject.lectures.map((lecture) => h("button", {
-        class: `lecture${lecture.id === noteSelected ? " on" : ""}`,
-        onclick: () => { noteSelected = lecture.id; noteText = ""; drawList(); showNote(); },
-      }, h("div", { class: "when" }, noteWhen(lecture.date), !lecture.ready && h("span", { class: "badge", style: "margin-left:6px" }, "розшифровка")),
-        h("div", { class: "pv" }, lecture.preview || "вижимка ще готується")))))
-      : [h("div", { class: "empty" }, notesData && notesData.length ? "Нічого не знайдено." : "Конспектів ще немає. Після кожної пари, яку почують вуха, агент зробить детальну вижимку.")]));
-  };
-  loadNotes(true).then(() => { drawList(); showNote(); });
-  const openFolder = h("button", { class: "ghost" }, "📂 Теку конспектів");
-  openFolder.onclick = () => busy(openFolder, "…", () => api("POST", "/api/study/open", { what: "notes" }));
-  return [
-    h("div", { class: "filters" },
-      h("input", { type: "text", placeholder: "Пошук у конспектах…", value: notesQuery, oninput: (event) => { notesQuery = event.target.value; drawList(); } }),
-      h("span", { class: "spacer" }), openFolder),
-    h("div", { class: "notes" }, h("div", { class: "card" }, listBox), noteBox),
-  ];
-}
-
-// --- Налаштування ----------------------------------------------------------------------
-
-function agentSetup() {
-  ensureAgentInfo();
-  const result = h("div");
-  const show = () => result.replaceChildren(agentInfo ? (agentInfo.ok
-    ? h("div", { class: "banner ok" }, `Агент готовий${agentInfo.version ? ` · ${agentInfo.version}` : ""} · сьогодні запусків: ${agentInfo.used}`)
-    : h("div", { class: "banner bad" }, agentInfo.problem)) : "");
-  const check = h("button", { class: "primary" }, "Перевірити агента");
-  check.onclick = () => busy(check, "Перевіряю…", async () => { agentInfo = await api("POST", "/api/study/agent"); show(); });
-  show();
-  const windows = (meta.platform || "").startsWith("win");
-  return h("details", { class: "card", open: !agentInfo || !agentInfo.ok },
-    h("summary", { style: "cursor:pointer" }, h("b", {}, "Підключення агента (Antigravity CLI)"),
-      agentInfo && h("span", { class: `badge ${agentInfo.ok ? "ok" : "bad"}`, style: "margin-left:8px" }, agentInfo.ok ? "готовий" : "не готовий")),
-    h("ol", { class: "steps", style: "margin-top:12px" },
-      h("li", {}, h("div", {}, "Потрібна підписка Google з Antigravity. Встанови Antigravity CLI за інструкцією на ",
-        h("a", { href: "https://antigravity.google", target: "_blank", rel: "noopener" }, "antigravity.google"), ".")),
-      h("li", {}, h("div", {}, `Відкрий ${windows ? "PowerShell" : "термінал"}, введи `, h("code", {}, "agy"), " і увійди Google-акаунтом, на якому підписка. Це потрібно один раз.")),
-      h("li", {}, h("div", {}, "Натисни «Перевірити агента». Пише, що команду не знайдено? Вкажи повний шлях у полі «Команда» нижче",
-        windows ? " (напр. C:\\Users\\Ім'я\\AppData\\Local\\…\\agy.exe)." : ".")),
-      h("li", {}, h("div", {}, "Classroom має бути відкритий у браузері програми під твоїм університетським акаунтом («Акаунти» → «Увійти в Google»)."))),
-    h("div", { class: "row", style: "margin:6px 0 10px" }, check), result);
 }
 
 function listNumberControl() {
@@ -1665,106 +1280,255 @@ function fileNamePreview() {
   return `${text}.${get("study.file_format") || "pdf"}`;
 }
 
-function studySettingsTab() {
-  const university = { duikt: "Державний університет інформаційно-комунікаційних технологій", kpi: "КПІ ім. Ігоря Сікорського" }[get("schedule.university") || "duikt"];
-  const preview = h("small", { class: "hint" }, `Приклад: ${fileNamePreview()}`);
-  const fileName = textField("study.file_name", "Назва звіту",
-    "{short} — Ляшко_Д.О., {surname}, {name}, {group}, {kind} — Лб/Пр/СР…, {n} — номер роботи, {work} — Лб3 (а без номера — назва), {title}, {course}.",
-    { placeholder: "{short}_{work}" });
-  fileName.addEventListener("input", () => { preview.textContent = `Приклад: ${fileNamePreview()}`; });
-  const windows = (meta.platform || "").startsWith("win");
-  const section = (id, title, ...content) => h("div", { class: "card", id: `study-${id}` }, h("h2", {}, title), ...content);
-  const sections = [["main", "Основне"], ["me", "Про тебе"], ["variant", "Варіант"], ["courses", "Предмети"], ["look", "Оформлення"], ["talk", "Зв'язок"], ["agent", "Агент"]];
+function ensureAgentInfo() {
+  if (agentInfo || agentChecking) return;
+  agentChecking = true;
+  api("POST", "/api/study/agent")
+    .then((info) => { agentInfo = info; agentChecking = false; if (["study", "settings"].includes(page)) render(); })
+    .catch(() => { agentChecking = false; });
+}
+
+function firstLine(text) {
+  return (text || "").split("\n").map((line) => line.replace(/^[#*\-\s]+/, "").trim()).find(Boolean) || "";
+}
+
+async function studyAct(button, number, action, extra = {}) {
+  const task = (studyLatest?.tasks || []).find((item) => item.number === number) || {};
+  await busy(button, "…", async () => {
+    const data = await api("POST", "/api/study/action", { number, action, version: task.version, ...extra });
+    if (data.result) toast(data.result);
+    studyEditing = 0;
+    studyLatest = data;
+    studyDetails = null;
+    studyDraw();
+    refreshState();
+  });
+}
+
+function taskActions(task, full) {
+  const actions = [];
+  const add = (...items) => actions.push(...items);
+  if (task.status === "proposed") add(actionButton(task, "▶️ Роби", "primary", "start"), actionButton(task, "Не треба", "ghost", "no"));
+  if (task.status === "returned") add(actionButton(task, "✏️ Переробити за коментарями", "primary", "rework"), actionButton(task, "Не треба", "ghost", "no"));
+  if ((task.status === "ready" || task.status === "failed") && task.files.length) {
+    add(actionButton(task, "✅ Так, здати", "primary", "yes", `Здати «${task.title}» у Classroom?`));
+  }
+  if (!full) {
+    if (task.status === "ready") add(h("button", { class: "ghost", onclick: () => openTask(task.number) }, "Переглянути"));
+    return actions;
+  }
+  if (task.status === "ready" || task.status === "stuck") {
+    const redo = h("button", { class: "soft" }, task.status === "stuck" ? "💡 Підказати агентові" : "✏️ Переробити");
+    redo.onclick = () => { studyEditing = task.number; drawDrawer(); };
+    add(redo);
+  }
+  if (["stuck", "failed", "declined", "gone"].includes(task.status)) add(actionButton(task, "🔁 Спробувати ще", "soft", "retry"));
+  if (["ready", "stuck", "failed", "approved", "waiting"].includes(task.status)) add(actionButton(task, "Не здавати", "ghost", "no"));
+  if (task.status === "submitted" && task.submitted !== "раніше") add(actionButton(task, "↩️ Забрати з Classroom", "ghost", "back", `Скасувати здачу «${task.title}»?`));
+  if (task.folder) {
+    const open = h("button", { class: "ghost" }, "📂 Файли");
+    open.onclick = () => busy(open, "…", () => api("POST", "/api/study/open", { number: task.number }));
+    add(open);
+  }
+  if (task.url) add(h("button", { class: "ghost", onclick: () => window.open(task.url, "_blank", "noopener") }, "↗ Classroom"));
+  return actions;
+}
+
+// --- Бічна панель з подробицями завдання -------------------------------------------
+
+function openTask(number) {
+  studySelected = number;
+  studyDetails = null;
+  studyEditing = 0;
+  if (page !== "study") go("study"); else drawDrawer();
+}
+
+function closeTask() {
+  studySelected = 0;
+  studyEditing = 0;
+  drawDrawer();
+}
+
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && studySelected) closeTask(); });
+
+function drawDrawer() {
+  let drawer = document.getElementById("drawer");
+  const task = studySelected && page === "study" ? (studyLatest?.tasks || []).find((item) => item.number === studySelected) : null;
+  if (!task) {
+    drawer?.remove();
+    return;
+  }
+  if (!drawer) {
+    drawer = h("div", { id: "drawer" }, h("div", { class: "backdrop", onclick: closeTask }), h("aside", { class: "panel" }));
+    document.body.append(drawer);
+  }
+  drawer.querySelector(".panel").replaceChildren(
+    h("button", { class: "icon close", title: "Закрити (Esc)", onclick: closeTask }, "✕"),
+    taskDetail(task));
+}
+
+function taskDetail(task) {
+  const details = studyDetails && studyDetails.number === task.number ? studyDetails : null;
+  if (!details) {
+    api("GET", `/api/study/task?number=${task.number}`).then((data) => {
+      studyDetails = data;
+      if (studySelected === task.number) drawDrawer();
+    }).catch((e) => toast(e.message, true));
+  }
+  const info = details || task;
+  const files = details ? details.files_info : [];
+  const qa = [
+    ...info.questions.flatMap((item) => [
+      h("div", { class: "bubble agent" }, h("span", { class: "who" }, "Агент"), item.q),
+      item.a && h("div", { class: "bubble me" }, h("span", { class: "who" }, "Ти"), item.a)]),
+    ...info.feedback.map((item) => h("div", { class: "bubble me" }, h("span", { class: "who" }, "Твоє зауваження"), item)),
+  ].filter(Boolean);
+  const icon = (name) => (/\.pdf$/i.test(name) ? "📄" : /\.(mp4|mov|webm)$/i.test(name) ? "🎬" : /\.(zip|rar|7z)$/i.test(name) ? "🗜" : "📎");
+  return h("div", {},
+    h("div", { class: "muted small" }, info.course),
+    h("h2", { class: "drawer-title" }, info.title),
+    h("div", { class: "facts" },
+      h("span", { class: `badge ${STUDY_BADGE[info.status] || ""}` }, info.status_text), dueChip(info.due),
+      info.grade && h("span", { class: "badge ok" }, `📬 ${info.grade}`),
+      info.version > 1 && h("span", {}, `версія ${info.version}`)),
+    stepper(info),
+    info.status === "question" ? askBox(info) : null,
+    info.error && !["ready", "submitted"].includes(info.status) && h("div", { class: ["stuck", "failed"].includes(info.status) ? "banner bad" : "banner warn" }, info.error),
+    h("div", { class: "row", style: "margin-bottom:8px" }, taskActions(info, true)),
+    studyEditing === info.number && redoBox(info),
+    !details && h("div", { class: "empty" }, "Завантажую…"),
+    details && fold(`Файли для здачі (${files.length})`, files.length ? h("div", { class: "files" }, files.map((file) => h("div", { class: "file-row" },
+      h("span", {}, icon(file.name)), h("span", { class: "name" }, file.name), h("span", { class: "size" }, fileSize(file.size))))) : null, info.status === "ready"),
+    details && fold("Що зроблено", details.result ? md(details.result) : null, info.status === "ready"),
+    details && fold("Шпаргалка до захисту", details.defense ? md(details.defense) : null),
+    qa.length > 0 && fold(`Переписка з агентом (${qa.length})`, h("div", { class: "qa" }, qa), info.status === "question"),
+    details && fold("Умова завдання", details.assignment ? h("div", { class: "plain" }, details.assignment) : null, !details.result && info.status !== "question"),
+    details && details.materials.length > 0 && fold(`Матеріали викладача (${details.materials.length})`, h("div", { class: "files" }, details.materials.map((file) => h("div", { class: "file-row" },
+      h("span", {}, "📎"), h("span", { class: "name" }, file.name.replace(/\.link\.txt$/, " (лише посилання)")), h("span", { class: "size" }, fileSize(file.size)))))),
+    details && !files.length && details.report_name && h("div", { class: "muted small", style: "padding-top:10px" }, `Звіт буде названо: ${details.report_name}`));
+}
+
+// --- Сторінка «Навчання»: лише те, що треба зробити ----------------------------------
+
+function studyStatus() {
+  const L = studyLatest;
+  let pulse = "pulse";
+  let text = "Агент вільний";
+  if (L.activity) {
+    pulse = "pulse busy";
+    text = `Агент ${L.activity.what}${L.activity.title ? ` «${L.activity.title}»` : ""} · ${elapsed(L.activity.since)}`;
+  } else if (L.paused) {
+    pulse = "pulse off"; text = "Агент на паузі — нових робіт не бере";
+  } else if (L.agent_problem) {
+    pulse = "pulse warn"; text = `Агент недоступний: ${L.agent_problem}`;
+  }
+  const checked = L.last_check ? `Classroom перевірено ${when(L.last_check)}` : "Classroom ще не перевіряли";
+  return h("div", { class: "status-line" }, h("span", { class: pulse }),
+    h("div", {}, h("div", { class: "what" }, text), h("div", { class: "muted small" }, `${checked} · запусків агента сьогодні: ${L.agent_used} з ${L.agent_limit}`)));
+}
+
+function studyHead() {
+  const L = studyLatest;
+  const head = h("div", { class: "page-head" }, h("h1", {}, "Навчання"), h("span", { class: "spacer" }));
+  if (!L || L.off) return head;
+  const check = h("button", { class: "ghost" }, "Перевірити Classroom");
+  check.onclick = () => busy(check, "…", async () => toast((await api("POST", "/api/study/check")).result));
+  const pause = h("button", { class: "ghost" }, L.paused ? "▶️ Продовжити" : "⏸ Пауза");
+  pause.onclick = () => busy(pause, "…", async () => {
+    const result = await api("POST", "/api/study/pause", { paused: !L.paused });
+    toast(result.result);
+    studyLatest = result;
+    studyDraw();
+  });
+  const folder = h("button", { class: "ghost", title: "Теки з роботами" }, "📂");
+  folder.onclick = () => busy(folder, "…", () => api("POST", "/api/study/open", { what: "works" }));
+  head.append(check, pause, folder);
+  return h("div", {}, head, studyStatus(), L.last_error && h("div", { class: "banner bad" }, `Classroom: ${L.last_error}`));
+}
+
+function studyOff() {
+  const L = studyLatest;
+  if (get("study.enabled") && L.off) {
+    const start = h("button", { class: "primary" }, "Увімкнути");
+    start.onclick = () => busy(start, "…", async () => { await api("POST", "/api/start"); toast("Увімкнено"); refreshState(); });
+    return h("div", { class: "card calm" }, h("h2", {}, "Програма зараз вимкнена"),
+      h("p", { class: "muted" }, "Навчання працює разом з автовходом на пари."), start);
+  }
+  ensureAgentInfo();
+  const item = (ok, title, hint) => h("div", { class: "ci" },
+    h("span", { class: `mark ${ok ? "yes" : "no"}` }, ok ? "✓" : ok === null ? "…" : "·"),
+    h("div", {}, h("b", {}, title), h("div", { class: "muted small" }, hint)));
+  const enable = h("button", { class: "primary" }, "Увімкнути навчання");
+  enable.onclick = () => { set("study.enabled", true); save(); };
+  return h("div", { class: "card calm" },
+    h("h2", {}, "Агент, що робить завдання з Classroom"),
+    h("p", { class: "muted" }, "Між парами програма бере завдання з Google Classroom, а агент Antigravity виконує їх повністю: код, скріншоти, звіт, шпаргалка до захисту. Ти переглядаєш — і лише після твого «так» програма здає."),
+    h("div", { class: "checklist" },
+      item(agentInfo ? agentInfo.ok : null, "Antigravity CLI", agentInfo ? (agentInfo.ok ? `готовий${agentInfo.version ? ` · ${agentInfo.version}` : ""}` : agentInfo.problem) : "перевіряю…"),
+      item(!!(get("study.full_name") || "").trim(), "ПІБ для титульної сторінки", get("study.full_name") || "Налаштування → Навчання")),
+    h("div", { class: "row" }, enable, h("button", { class: "ghost", onclick: () => goSettings("study") }, "Налаштувати")));
+}
+
+function inboxCard(task) {
+  return h("div", { class: "inbox-card" },
+    h("div", { class: "row" },
+      h("span", { class: `badge ${STUDY_BADGE[task.status] || ""}` }, STUDY_ASK[task.status] || task.status_text), dueChip(task.due),
+      h("span", { class: "spacer" }),
+      h("button", { class: "link", onclick: () => openTask(task.number) }, "Подробиці")),
+    h("div", { class: "inbox-title" }, task.title),
+    h("div", { class: "muted small" }, task.course),
+    task.status === "question"
+      ? askBox(task)
+      : [task.status === "ready" && task.summary && h("div", { class: "small muted", style: "margin-top:6px" }, firstLine(task.summary)),
+         h("div", { class: "row", style: "margin-top:10px" }, taskActions(task, false))]);
+}
+
+function taskRow(task, note) {
+  return h("button", { class: `task-row${task.number === studySelected ? " on" : ""}`, onclick: () => openTask(task.number) },
+    h("span", { class: `bar ${STUDY_BADGE[task.status] || ""}` }),
+    h("div", {}, h("div", { class: "t" }, task.title), h("div", { class: "c" }, note || task.course)),
+    h("div", { class: "side" }, h("span", { class: `badge ${STUDY_BADGE[task.status] || ""}` }, task.status_text), dueChip(task.due)));
+}
+
+function studyList() {
+  const L = studyLatest;
+  if (!L) return h("div", { class: "empty" }, "Завантажую…");
+  if (L.off) return studyOff();
+  const yours = L.tasks.filter((task) => STUDY_YOURS.includes(task.status));
+  const working = L.tasks.filter((task) => STUDY_BUSY.includes(task.status));
+  const failed = L.tasks.filter((task) => ["stuck", "failed"].includes(task.status));
+  const done = L.tasks.filter((task) => STUDY_DONE.includes(task.status));
+  const now = L.activity && L.activity.number;
   return [
-    agentSetup(),
-    h("div", { class: "settings-nav" }, sections.map(([id, title]) => h("button", { class: "filter", onclick: () => document.getElementById(`study-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }) }, title))),
-    h("div", { class: "cols" },
-      section("main", "Основне",
-        checkField("study.enabled", "Виконувати завдання з Classroom", "Перевіряє «Завдання» між парами. Тести, захисти й контрольні не чіпає — лише нагадує про них."),
-        h("div", { class: "grid" },
-          textField("study.account", "Акаунт Classroom", "Порожньо — той самий, що для Meet.", { placeholder: get("join.meet_account") || "st…@stud.duikt.edu.ua" }),
-          numberField("study.check_hours", "Перевіряти кожні, год", "", { min: 1 })),
-        h("div", { style: "margin:4px 0 8px;font-weight:600" }, "Коли братися за нове завдання"),
-        choiceField("study.start_mode", [
-          { value: "auto", label: "Одразу", hint: "Агент починає сам, тобі приходить готова робота." },
-          { value: "ask", label: "Спершу спитати «робити?»", hint: "Кнопки «▶️ Роби» / «❌ Не треба» на кожне нове завдання." },
-        ]),
-        chipsField("study.ask_first", "Завжди спершу питати, якщо в назві є", "Великі роботи: курсові, проєкти.", "слово і Enter"),
-        h("div", { class: "grid" },
-          numberField("study.overdue_days", "Прострочені — якщо не старші за, днів", "0 — прострочені не робити зовсім."),
-          numberField("study.remind_hours", "Нагадувати за, год до терміну", "0 — не нагадувати.")),
-        chipsField("study.skip_courses", "Курси, які не чіпати зовсім", "Частина назви курсу.", "назва курсу і Enter"),
-        checkField("study.lecture_notes", "Вижимки лекцій", "Після пари агент робить детальний конспект з розшифровки. Конспекти бачить і агент, коли робить завдання з цього предмета."),
-        checkField("study.watch_grades", "Стежити за оцінками", "Пише, коли здану роботу оцінили чи повернули, і пропонує переробити за коментарями викладача.")),
-      section("me", "Про тебе — для титульної сторінки",
-        h("div", { class: "grid" },
-          textField("study.full_name", "ПІБ повністю", "", { placeholder: "Прізвище Ім'я По батькові" }),
-          textField("study.group", "Група", "Порожньо — з розкладу.", { placeholder: get("schedule.group") || "" })),
-        textField("study.university", "Університет", "Порожньо — за університетом розкладу.", { placeholder: university }),
-        h("div", { class: "grid" },
-          textField("study.faculty", "Факультет / інститут", "Порожньо — з матеріалів курсу."),
-          textField("study.department", "Кафедра", "Порожньо — з матеріалів курсу.")),
-        textField("study.specialty", "Спеціальність", "", { placeholder: "121 Інженерія програмного забезпечення" }),
-        h("div", { class: "grid" },
-          numberField("study.year", "Курс", "Порожньо — з розкладу.", { optional: true }),
-          textField("study.city", "Місто", ""),
-          textField("study.student_id", "Номер залікової", "Бувають варіанти за ним."))),
-      section("variant", "Варіант",
-        listNumberControl(),
-        textField("study.variant_rule", "Як рахувати варіант, якщо в умові не сказано", "Порожньо — номер у списку групи. Або: «остача від ділення номера на 15», «остання цифра залікової».",
-          { placeholder: "номер у списку групи" }),
-        h("small", { class: "hint" }, "Якщо в умові своє правило (формула, літера прізвища…), агент порахує за ним і покаже розрахунок у звіті. Не вистачає даних — спитає тебе. Для окремого предмета варіант задається в «Предметах».")),
-      section("talk", "Зв'язок з тобою",
-        checkField("study.ask_questions", "Агент може питати мене через бота", "Незрозумілий варіант, суперечлива умова, потрібен твій акаунт чи пристрій. Вимкнено — вирішує сам і пише про це у звіті."),
-        h("div", { class: "grid" },
-          numberField("study.quiet_from", "Тихі години: з", "Повідомлення про навчання — без звуку.", { min: 0 }),
-          numberField("study.quiet_to", "до", "Однакові — тихих годин немає.", { min: 0 })),
-        h("small", { class: "hint" }, "Боту можна писати: «завдання», «питання», «перевір», «пауза», «продовжуй». Відповідь (reply) на повідомлення про роботу — відповідь агентові чи зауваження до роботи."))),
-    section("courses", "Предмети",
-      h("p", { class: "muted small", style: "margin-top:-4px" }, "Свій варіант, побажання викладача до робіт і що робити з предметом. Кілька варіантів назви — через «|»."),
-      courseRules()),
-    h("div", { class: "cols" },
-      section("look", "Оформлення",
-        h("div", { class: "grid" },
-          selectField("study.file_format", "Формат звіту", "", [["pdf", "PDF"], ["docx", "Word (DOCX)"]]),
-          textField("study.language", "Мова звітів", "", { placeholder: "українська" })),
-        fileName, preview,
-        textareaField("study.style", "Побажання до всіх робіт", "Агент дотримуватиметься їх у кожній роботі.", "Пиши просто, без води. Код з коментарями. Скріншоти з підписами."),
-        textField("study.examples", "Тека зі зразками твоїх робіт", "Кілька твоїх звітів (PDF/DOCX) — агент оформлюватиме так само. Попередні роботи з того самого предмета він бачить і так.",
-          { placeholder: windows ? "C:\\Users\\Ім'я\\Documents\\Звіти" : "~/Документи/Звіти" })),
-      section("agent", "Агент",
-        h("div", { class: "grid" },
-          textField("agent.command", "Команда", "agy або повний шлях до нього.", { placeholder: "agy" }),
-          numberField("agent.timeout_minutes", "Хвилин на запуск", "", { min: 5 })),
-        h("div", { class: "grid" },
-          numberField("agent.daily_limit", "Запусків на день", "Одна робота — 2–6 запусків.", { min: 1 }),
-          numberField("agent.attempts", "Спроб довести до готового", "Кожна — виконання + перевірка.", { min: 1 })),
-        chipsField("agent.args", "Параметри запуску", "Без --dangerously-skip-permissions агент не зможе сам запускати код. Модель тощо — тут, якщо твій agy це підтримує.", "параметр і Enter"),
-        textField("study.folder", "Тека для робіт і конспектів", "Усередині: «Роботи/<предмет>/Лб 3 …» і «Конспекти/<предмет>/<дата>». Порожньо — у теці програми.",
-          { placeholder: (studyLatest && studyLatest.folder) || "" }))),
+    yours.length
+      ? [h("div", { class: "group-title" }, "Чекає на тебе", h("span", { class: "count" }, yours.length)), h("div", { class: "inbox" }, yours.map(inboxCard))]
+      : h("div", { class: "calm-line" }, "✓ Нічого не чекає на тебе", working.length ? ` — агент робить ${working.length}` : ""),
+    working.length > 0 && [h("div", { class: "group-title" }, "Агент робить"),
+      h("div", { class: "task-list" }, working.map((task) => taskRow(task, task.number === now ? `${task.course} · ${L.activity.what} зараз` : task.course)))],
+    failed.length > 0 && [h("div", { class: "group-title" }, "Не вийшло"),
+      h("div", { class: "task-list" }, failed.map((task) => taskRow(task, task.error ? firstLine(task.error).slice(0, 120) : task.course)))],
+    done.length > 0 && h("details", { class: "more", style: "margin-top:18px" }, h("summary", {}, `Здані й пропущені (${done.length})`),
+      h("div", { class: "task-list" }, done.map((task) => taskRow(task, task.grade ? `${task.course} · оцінка ${task.grade}` : task.course)))),
+    !L.tasks.length && h("div", { class: "empty", style: "margin-top:10px" }, "Незданих завдань у Classroom немає."),
   ];
 }
 
-// --- Складання сторінки ----------------------------------------------------------------
-
-function studyDraw(full = false) {
-  if (page !== "study" || !studyBox.body) return;
-  studyBox.head.replaceChildren(studyHead());
-  studyBox.tabs.replaceChildren(studyTabs());
-  if (full || studyTab !== "settings") {
-    const body = { overview: studyOverview, tasks: studyTasksTab, notes: studyNotesTab, settings: studySettingsTab }[studyTab] || studyOverview;
-    studyBox.body.replaceChildren(...[body()].flat().filter(Boolean));
+function studyDraw() {
+  if (page === "study" && studyBox.body) {
+    studyBox.head.replaceChildren(studyHead());
+    studyBox.body.replaceChildren(...[studyList()].flat(3).filter(Boolean));
   }
+  drawDrawer();
 }
 
-function studyBusyTyping() {
+function studyTyping() {
   const focused = document.activeElement;
-  return studyEditing || (focused && studyBox.body && studyBox.body.contains(focused) && ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName));
+  return studyEditing || (focused && ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName)
+    && (studyBox.body?.contains(focused) || document.getElementById("drawer")?.contains(focused)));
 }
 
 pages.study = () => {
   studyBox.head = h("div");
-  studyBox.tabs = h("div");
   studyBox.body = h("div");
   const pull = async () => {
     if (page !== "study") return;
@@ -1772,22 +1536,185 @@ pages.study = () => {
       const data = await api("GET", "/api/study");
       const changed = JSON.stringify(data) !== JSON.stringify(studyLatest);
       studyLatest = data;
-      if (changed && studyTab !== "notes") {
-        studyBox.head.replaceChildren(studyHead());
-        studyBox.tabs.replaceChildren(studyTabs());
-        if (!studyBusyTyping() && studyTab !== "settings") {
-          const selected = data.tasks?.find((task) => task.number === studySelected);
-          if (studyDetails && selected && selected.updated !== studyDetails.updated) studyDetails = null;
-          studyDraw();
-        }
-      } else if (studyLatest && studyLatest.activity) studyBox.head.replaceChildren(studyHead());  // лічильник часу
+      if (!studyTyping()) {
+        const selected = data.tasks?.find((task) => task.number === studySelected);
+        if (studyDetails && selected && selected.updated !== studyDetails.updated) studyDetails = null;
+        if (changed) studyDraw();
+        else studyBox.head.replaceChildren(studyHead());  // лічильник часу
+      }
     } catch (e) { /* програма перезапускається */ }
     studyTimer = setTimeout(pull, 5000);
   };
   clearTimeout(studyTimer);
-  studyEditing = 0;
-  setTimeout(() => { studyDraw(true); pull(); }, 0);
-  return [studyBox.head, studyBox.tabs, studyBox.body];
+  setTimeout(() => { studyDraw(); pull(); }, 0);
+  return [studyBox.head, studyBox.body];
+};
+
+// --- Конспекти --------------------------------------------------------------------------
+
+pages.notes = () => {
+  const listBox = h("div", {}, h("div", { class: "empty" }, "Завантажую…"));
+  const noteBox = h("div", { class: "card" }, h("div", { class: "empty" }, "Обери пару зліва."));
+  const showNote = async () => {
+    if (!noteSelected) return;
+    if (!noteText) {
+      noteBox.replaceChildren(h("div", { class: "empty" }, "Завантажую…"));
+      try { noteText = (await api("GET", `/api/study/note?id=${encodeURIComponent(noteSelected)}`)).text; } catch (e) { noteText = `_${e.message}_`; }
+    }
+    const [subject, date] = noteSelected.split("/");
+    noteBox.replaceChildren(h("div", { class: "facts", style: "margin:0 0 12px" }, h("b", { style: "color:var(--text)" }, subject), h("span", {}, noteWhen(date))), md(noteText));
+  };
+  const drawList = () => {
+    const query = notesQuery.trim().toLowerCase();
+    const subjects = (notesData || []).map((subject) => ({
+      ...subject,
+      lectures: subject.lectures.filter((lecture) => !query || `${subject.name} ${lecture.preview}`.toLowerCase().includes(query)),
+    })).filter((subject) => subject.lectures.length);
+    if (!noteSelected && subjects.length) noteSelected = subjects[0].lectures[0].id;
+    listBox.replaceChildren(...(subjects.length ? subjects.map((subject) => h("div", { class: "subject" },
+      h("b", {}, subject.name, " ", h("span", { class: "count muted" }, subject.lectures.length)),
+      subject.lectures.map((lecture) => h("button", {
+        class: `lecture${lecture.id === noteSelected ? " on" : ""}`,
+        onclick: () => { noteSelected = lecture.id; noteText = ""; drawList(); showNote(); },
+      }, h("div", { class: "when" }, noteWhen(lecture.date), !lecture.ready && h("span", { class: "badge", style: "margin-left:6px" }, "розшифровка")),
+        h("div", { class: "pv" }, lecture.preview || "вижимка ще готується")))))
+      : [h("div", { class: "empty" }, notesData && notesData.length ? "Нічого не знайдено." : "Конспектів ще немає. Після кожної пари, яку почують вуха, тут з'явиться детальна вижимка.")]));
+  };
+  loadNotes(true).then(() => { drawList(); showNote(); });
+  const openFolder = h("button", { class: "ghost", title: "Теки з конспектами" }, "📂");
+  openFolder.onclick = () => busy(openFolder, "…", () => api("POST", "/api/study/open", { what: "notes" }));
+  return [
+    h("div", { class: "page-head" }, h("h1", {}, "Конспекти"), h("span", { class: "spacer" }),
+      h("input", { type: "text", placeholder: "Пошук…", value: notesQuery, style: "max-width:260px", oninput: (event) => { notesQuery = event.target.value; drawList(); } }),
+      openFolder),
+    h("p", { class: "lead" }, "Вижимки пар: тема, поняття, приклади, завдання й побажання викладача."),
+    h("div", { class: "notes" }, h("div", { class: "card" }, listBox), noteBox),
+  ];
+};
+
+// --- Налаштування → Навчання ----------------------------------------------------------
+
+function agentLine() {
+  ensureAgentInfo();
+  const check = h("button", { class: "ghost" }, "Перевірити");
+  check.onclick = () => busy(check, "…", async () => { agentInfo = await api("POST", "/api/study/agent"); render(); });
+  const windows = (meta.platform || "").startsWith("win");
+  const ok = agentInfo && agentInfo.ok;
+  return h("div", {},
+    h("div", { class: "row", style: "margin-bottom:12px" },
+      h("span", { class: `pulse${ok ? "" : agentInfo ? " warn" : " off"}` }),
+      h("div", { style: "flex:1" }, h("b", {}, "Antigravity CLI: "),
+        agentInfo ? (ok ? `готовий${agentInfo.version ? ` · ${agentInfo.version}` : ""}` : agentInfo.problem) : "перевіряю…"),
+      check),
+    agentInfo && !ok && h("ol", { class: "steps", style: "margin-bottom:12px" },
+      h("li", {}, h("div", {}, "Встанови Antigravity CLI за інструкцією на ", h("a", { href: "https://antigravity.google", target: "_blank", rel: "noopener" }, "antigravity.google"), " (потрібна підписка Google з Antigravity).")),
+      h("li", {}, h("div", {}, `Відкрий ${windows ? "PowerShell" : "термінал"}, введи `, h("code", {}, "agy"), " і увійди Google-акаунтом з підпискою. Один раз.")),
+      h("li", {}, h("div", {}, "Натисни «Перевірити». Пише, що не знайдено, — вкажи повний шлях у «Більше налаштувань» → «Команда»."))));
+}
+
+sections.study = () => {
+  const university = { duikt: "Державний університет інформаційно-комунікаційних технологій", kpi: "КПІ ім. Ігоря Сікорського" }[get("schedule.university") || "duikt"];
+  const preview = h("small", { class: "hint" }, `Приклад: ${fileNamePreview()}`);
+  const fileName = textField("study.file_name", "Назва звіту",
+    "{short} — Ляшко_Д.О., {kind} — Лб/Пр/СР…, {n} — номер роботи, {work} — Лб3, а також {surname} {name} {group} {title} {course}.",
+    { placeholder: "{short}_{work}" });
+  fileName.addEventListener("input", () => { preview.textContent = `Приклад: ${fileNamePreview()}`; });
+  const windows = (meta.platform || "").startsWith("win");
+  return [
+    h("div", { class: "card" },
+      agentLine(),
+      checkField("study.enabled", "Виконувати завдання з Classroom", "Між парами. Здає лише після твого «так». Тести й захисти не чіпає."),
+      h("div", { class: "grid" },
+        textField("study.full_name", "ПІБ повністю", "Для титульної сторінки.", { placeholder: "Прізвище Ім'я По батькові" }),
+        textField("study.group", "Група", "Порожньо — з розкладу.", { placeholder: get("schedule.group") || "" })),
+      listNumberControl(),
+      h("div", { style: "margin:4px 0 8px;font-weight:600" }, "Коли братися за нове завдання"),
+      choiceField("study.start_mode", [
+        { value: "auto", label: "Одразу", hint: "Тобі приходить уже готова робота." },
+        { value: "ask", label: "Спершу спитати «робити?»", hint: "Курсові й проєкти — питає завжди." },
+      ]),
+      checkField("study.ask_questions", "Агент може питати мене через бота", "Коли без тебе не обійтися: незрозумілий варіант, суперечлива умова, потрібен твій акаунт."),
+      more(
+        h("h2", { style: "margin-top:6px" }, "Титульна сторінка"),
+        textField("study.university", "Університет", "Порожньо — за розкладом.", { placeholder: university }),
+        h("div", { class: "grid" },
+          textField("study.faculty", "Факультет / інститут", "Порожньо — з матеріалів курсу."),
+          textField("study.department", "Кафедра", "Порожньо — з матеріалів курсу.")),
+        h("div", { class: "grid" },
+          textField("study.specialty", "Спеціальність", "", { placeholder: "121 Інженерія програмного забезпечення" }),
+          numberField("study.year", "Курс", "Порожньо — з розкладу.", { optional: true })),
+        h("div", { class: "grid" },
+          textField("study.city", "Місто", ""),
+          textField("study.student_id", "Номер залікової", "Бувають варіанти за ним.")),
+        textField("study.variant_rule", "Як рахувати варіант, якщо в умові не сказано", "Порожньо — номер у списку. Або: «остача від ділення номера на 15».", { placeholder: "номер у списку групи" }),
+        h("h2", {}, "Оформлення"),
+        h("div", { class: "grid" },
+          selectField("study.file_format", "Формат звіту", "", [["pdf", "PDF"], ["docx", "Word (DOCX)"]]),
+          textField("study.language", "Мова звітів", "", { placeholder: "українська" })),
+        fileName, preview,
+        textareaField("study.style", "Побажання до всіх робіт", "", "Пиши просто, без води. Код з коментарями."),
+        textField("study.examples", "Тека зі зразками твоїх звітів", "Агент оформлюватиме так само.", { placeholder: windows ? "C:\\Users\\Ім'я\\Documents\\Звіти" : "~/Документи/Звіти" }),
+        h("h2", {}, "Classroom"),
+        h("div", { class: "grid" },
+          textField("study.account", "Акаунт Classroom", "Порожньо — той, що для Meet.", { placeholder: get("join.meet_account") || "" }),
+          numberField("study.check_hours", "Перевіряти кожні, год", "", { min: 1 })),
+        chipsField("study.ask_first", "Завжди спершу питати, якщо в назві є", "", "слово і Enter"),
+        h("div", { class: "grid" },
+          numberField("study.overdue_days", "Прострочені — не старші за, днів", "0 — не робити прострочені."),
+          numberField("study.remind_hours", "Нагадувати за, год до терміну", "0 — не нагадувати.")),
+        chipsField("study.skip_courses", "Курси, які не чіпати", "", "назва курсу і Enter"),
+        checkField("study.lecture_notes", "Вижимки лекцій після пар", ""),
+        checkField("study.watch_grades", "Писати про оцінки й повернені роботи", ""),
+        h("div", { class: "grid" },
+          numberField("study.quiet_from", "Тихі години: з", "Повідомлення — без звуку.", { min: 0 }),
+          numberField("study.quiet_to", "до", "", { min: 0 })),
+        h("h2", {}, "Агент"),
+        h("div", { class: "grid" },
+          textField("agent.command", "Команда", "agy або повний шлях до нього.", { placeholder: "agy" }),
+          numberField("agent.daily_limit", "Запусків на день", "Одна робота — 2–6 запусків.", { min: 1 })),
+        h("div", { class: "grid" },
+          numberField("agent.timeout_minutes", "Хвилин на запуск", "", { min: 5 }),
+          numberField("agent.attempts", "Спроб довести до готового", "", { min: 1 })),
+        chipsField("agent.args", "Параметри запуску", "Без --dangerously-skip-permissions агент не зможе сам запускати код.", "параметр і Enter"),
+        textField("study.folder", "Тека для робіт і конспектів", "Роботи/<предмет>/Лб 3 …, Конспекти/<предмет>/…", { placeholder: (studyLatest && studyLatest.folder) || "" }))),
+    h("div", { class: "card" },
+      h("h2", {}, "Предмети"),
+      h("p", { class: "muted small", style: "margin-top:-6px" }, "Свій варіант чи побажання викладача для окремого предмета — агент врахує їх у кожній роботі з нього."),
+      courseRules()),
+  ];
+};
+
+// --- Налаштування -------------------------------------------------------------------------
+
+const SETTINGS_TABS = [["pairs", "Пари"], ["accounts", "Акаунти"], ["assistant", "Помічник"], ["telegram", "Telegram"], ["study", "Навчання"], ["general", "Загальне"]];
+const SETTINGS_ALIASES = { group: "pairs", links: "pairs", accounts: "accounts", assistant: "assistant", telegram: "telegram", behaviour: "general" };
+const SETTINGS_LEADS = {
+  pairs: "Твоя група й куди заходити на кожну пару.",
+  accounts: "З яких акаунтів заходити на пари.",
+  assistant: "Стежить за парою, поки тебе немає: відмічається на перекличці, кличе тебе, шле звіт після пари.",
+  telegram: "Твій особистий бот: сповіщення, кнопки-відповіді, звіти. Токен лишається лише на цьому комп'ютері.",
+  study: "Агент Antigravity робить завдання з Classroom; здає програма лише після твого «так».",
+  general: "Запуск, поведінка на парі, перевірка й перенесення налаштувань.",
+};
+let settingsTab = "pairs";
+try { settingsTab = localStorage.getItem("autopara-settings-tab") || "pairs"; } catch (e) { /* не страшно */ }
+sections.pairs = () => [...sections.group(), ...sections.links()];
+
+function goSettings(tab) {
+  settingsTab = tab;
+  try { localStorage.setItem("autopara-settings-tab", tab); } catch (e) { /* не страшно */ }
+  if (page === "settings") { render(); window.scrollTo(0, 0); } else go("settings");
+}
+
+pages.settings = () => {
+  if (!sections[settingsTab]) settingsTab = "pairs";
+  const body = [sections[settingsTab]()].flat().filter((item) => !(item instanceof Element && (item.tagName === "H1" || item.classList.contains("lead"))));
+  return [
+    h("h1", {}, "Налаштування"),
+    h("div", { class: "tabs" }, SETTINGS_TABS.map(([key, label]) => h("button", { class: settingsTab === key ? "on" : "", onclick: () => goSettings(key) }, label))),
+    h("p", { class: "lead" }, SETTINGS_LEADS[settingsTab]),
+    ...body,
+  ];
 };
 
 let logAfter = 0;
@@ -1822,19 +1749,24 @@ function render() {
   if (!cfg) return;
   const focused = document.activeElement;
   if (page === "home" && focused && main.contains(focused) && focused.tagName === "INPUT") return;  // не збивати введення
-  main.classList.toggle("wide", page === "study");
+  main.classList.toggle("wide", page === "notes");
   main.replaceChildren(...[pages[page]()].flat());
 }
 
 function go(name) {
+  if (SETTINGS_ALIASES[name]) {  // старі назви сторінок — тепер вкладки «Налаштувань»
+    settingsTab = SETTINGS_ALIASES[name];
+    name = "settings";
+  }
   page = name;
-  for (const button of document.querySelectorAll("#nav button")) button.classList.toggle("active", button.dataset.page === name);
+  for (const button of document.querySelectorAll(".sidebar [data-page]")) button.classList.toggle("active", button.dataset.page === name);
   try { localStorage.setItem("autopara-page", name); } catch (e) { /* не страшно */ }
   render();
+  drawDrawer();
   window.scrollTo(0, 0);
 }
 
-document.getElementById("nav").addEventListener("click", (event) => {
+document.querySelector(".sidebar").addEventListener("click", (event) => {
   if (event.target.dataset.page) go(event.target.dataset.page);
 });
 document.getElementById("save").addEventListener("click", save);
@@ -1855,7 +1787,7 @@ window.addEventListener("beforeunload", (event) => {
     return;
   }
   try { page = localStorage.getItem("autopara-page") || "home"; } catch (e) { page = "home"; }
-  if (!pages[page]) page = "home";
+  if (!pages[page] && !SETTINGS_ALIASES[page]) page = "home";
   go(page);
   await refreshState();
   setInterval(refreshState, 5000);

@@ -187,12 +187,13 @@ def test_window_edits_and_saves_settings(running_app, tmp_path):
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(server.url)
-            page.get_by_role("heading", name="Головна").wait_for()
+            page.get_by_role("heading", name="Сьогодні").wait_for()
 
-            page.click("#nav button[data-page=group]")
+            page.click("#nav button[data-page=settings]")
+            page.click(".tabs >> text=Пари")
             assert page.get_by_label("Група").first.input_value() == "ТЦР-32"
 
-            page.click("#nav button[data-page=behaviour]")
+            page.click(".tabs >> text=Загальне")
             assert page.locator("#savebar").is_hidden()
             page.get_by_label("За скільки хвилин до пари заходити").fill("7")
             page.locator("#savebar").wait_for(state="visible")
@@ -283,7 +284,8 @@ def test_telegram_wizard_pairs_only_whoever_has_the_code(running_app, tmp_path, 
                 page = browser.new_page()
                 page.route("https://t.me/**", lambda route: route.fulfill(body="telegram"))
                 page.goto(server.url)
-                page.click("#nav button[data-page=telegram]")
+                page.click("#nav button[data-page=settings]")
+                page.click(".tabs >> text=Telegram")
                 page.get_by_placeholder("123456789:AAH…").fill(token)
                 page.get_by_role("button", name="Перевірити").click()
                 page.get_by_text("@ivan_autopara_bot").first.wait_for()
@@ -385,3 +387,33 @@ def test_study_notes_api(running_app):
     transcript = call(server, "GET", f"/api/study/note?id={quote('Java/2026-09-30 13-15')}")[1]["text"]
     assert "колекції" in transcript and "Інструкція агентові" not in transcript  # лише розшифровка, без службового
     assert call(server, "GET", f"/api/study/note?id={quote('../../config.toml')}")[0] == 404  # за межі теки — ні
+
+
+def test_window_sections_open_without_errors(running_app):
+    """Нова структура: 5 розділів, вкладки «Налаштувань», старі назви сторінок ведуть у потрібну вкладку."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    server, _, _ = running_app
+    with sync_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.goto(server.url)
+            page.get_by_role("heading", name="Сьогодні").wait_for()
+            labels = [button.inner_text() for button in page.locator(".sidebar [data-page]").all()]
+            assert labels == ["Сьогодні", "Розклад", "Навчання", "Конспекти", "Налаштування", "Журнал"]
+            for target, heading in (("study", "Навчання"), ("notes", "Конспекти"), ("settings", "Налаштування"), ("log", "Журнал")):
+                page.click(f".sidebar [data-page={target}]")
+                page.get_by_role("heading", name=heading, exact=True).first.wait_for()
+            page.click(".sidebar [data-page=settings]")
+            for tab in ("Пари", "Акаунти", "Помічник", "Telegram", "Навчання", "Загальне"):
+                page.click(f".tabs >> text={tab}")
+                page.locator(".tabs button.on", has_text=tab).wait_for()
+            page.get_by_text("Більше налаштувань").first.click()
+            page.evaluate("localStorage.setItem('autopara-page', 'telegram')")  # так сторінку звали раніше
+            page.reload()
+            page.locator(".tabs button.on", has_text="Telegram").wait_for()
+            assert errors == []
+        finally:
+            browser.close()

@@ -516,6 +516,9 @@ def api_state(server: AppServer, query: dict, body: dict):
     state = server.controller.snapshot()
     state["configured"] = configured(config)
     state["university"] = UNIVERSITIES.get(config.schedule.university, "")
+    state["study"] = {"enabled": config.study.enabled}
+    if (study := server.controller.study) is not None:
+        state["study"].update(study.attention())
     return 200, state
 
 
