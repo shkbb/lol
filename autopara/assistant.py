@@ -42,37 +42,68 @@ ROLL_CALL_COOLDOWN = timedelta(minutes=3)
 # (варіанти «а», «1» тощо) — ніколи: це вирішуєш ти.
 ECHO_GROUPS = [
     (re.compile(r"^\+$"), "+"),
-    (re.compile(r"^(присутн\w*|тут|я тут|є|here|present)$"), None),
-    (re.compile(r"^(дякую|дякуємо|спасибі)( за пару| вам)?$"), "Дякую!"),
-    (re.compile(r"^до побачення$"), "До побачення!"),
-    (re.compile(r"^(добр\w+ (день|ранок|вечір|дня)|вітаю|здрастуйте)$"), "Добрий день!"),
+    (re.compile(r"^(присутн\w*|присутству\w*|тут|тута|я тут|є|я є|здесь|есть|here|present)$"), None),
+    (re.compile(r"^(дякую|дякуємо|спасибі|спасибо)( за пару| вам)?$"), "Дякую!"),
+    (re.compile(r"^(до побачення|до свидания)$"), "До побачення!"),
+    (re.compile(r"^(добр\w+ (день|ранок|вечір|дня|утро|вечер)|вітаю|здрастуйте|здравствуйте)$"), "Добрий день!"),
 ]
+# Жива мова на парах — українська вперемішку з суржиком, російською й англіцизмами, тож
+# ключові слова нижче — в усіх цих варіантах. Вони не вирішують самі, а лише підказують:
+# остаточно рішення спирається на поведінку групи (див. _consider, _voice_roll_call).
+
 # Що в мові викладача схоже на перекличку.
-ROLL_CALL_RE = re.compile(r"плюс|перекличк|відміч|відміт|присутн|хто (є|тут|зараз)", re.I)
-# Масовий «+» буває не лише на перекличці: ним записуються на проєкти, голосують, кажуть «зрозуміло».
-# Тож перш ніж ставити «+», дивимось, що саме просили.
-ATTENDANCE_RE = re.compile(r"перекличк|відміт|відміч|присутн|хто (є|тут|зараз)|хто на пар|чи всі (є|тут)|attendance", re.I)
+ROLL_CALL_RE = re.compile(
+    r"плюс|перекличк|відміч|відміт|отмет|присутн|присутств|хто (є|тут|зараз)|кто (есть|тут|здесь)", re.I
+)
+ATTENDANCE_RE = re.compile(
+    r"перекличк|відміт|відміч|отмет|присутн|присутств|хто (є|тут|зараз)|кто (есть|тут|здесь|сейчас)|"
+    r"хто на пар|кто на пар|чи всі (є|тут)|все (ли )?(здесь|тут)|attendance",
+    re.I,
+)
+# «+», яким нічого не підписуєш: перевірка звуку чи екрана.
+HARMLESS_RE = re.compile(
+    r"чути|чуєте|чутно|слышно|слышите|бачите (екран|презентац|дошк|мій|демонстрац)|видно (екран|презентац)|"
+    r"видите (экран|презентац)|зв'?язок (є|норм)",
+    re.I,
+)
+# «+», який щось означає: запис чи згода, голосування, «зрозуміло», «я вже зробив», борги.
+# Такий «+» помічник ніколи не ставить сам — це твоє рішення.
 NOT_ATTENDANCE_RE = re.compile(
-    r"хто (хоче|бажає|готов|може|зможе|згод|за\b|проти|візьм|піде|поїде|братиме)|бажаюч|охоч|добровол|запиш|"
-    r"запис|візьм|додатков|проєкт|проект|доповід|реферат|презентац|конференц|олімпіад|конкурс|хакатон|участь|"
-    r"голосу|згодні|хочете|зрозуміл|якщо (так|згодні|ок)",
+    r"хто (хоче|бажає|готов|може|зможе|згод|за\b|проти|візьм|піде|поїде|братиме)|"
+    r"кто (хочет|желает|готов|может|сможет|соглас|за\b|против|возьм|пойд)|бажаюч|желающ|охоч|добровол|"
+    r"запиш|запис|візьм|додатков|дополнит|проєкт|проект|доповід|доклад|реферат|конференц|олімпіад|олимпиад|"
+    r"конкурс|хакатон|участь|участи|голосу|согласн|згодні|хочете|хотите|зрозуміл|понятн|"
+    r"якщо (так|згодні|ок)|если (да|согласн)|"
+    r"зробив|зробила|зробили|сделал|виконав|виконали|выполнил|здав|здала|здали|сдал|"
+    r"борг|боржник|заборгован|долг|должник|хвіст|хвост|перездач|незадовільн|двійк|двойк|неатестован|не атестован",
     re.I,
 )
 PLUS_REQUEST_RE = re.compile(r"плюс|\+", re.I)
-NAME_REQUEST_RE = re.compile(r"прізвищ|ім'я|імена|піб", re.I)
+NAME_REQUEST_RE = re.compile(r"прізвищ|ім'я|імена|піб|фамили|имя|фио", re.I)
+# Що відповідають на перекличці голосом чи в чаті.
+PRESENCE_ANSWER_RE = re.compile(
+    r"^\W*(є|я|я є|тут|тута|я тут|присутн\w*|присутству\w*|здесь|я здесь|есть|here|present|\++)\W*$", re.I
+)
+# Викладач питає саме тебе, чи ти на парі: «Ляшко, ви тут?», «Ляшко, чуєте?».
+PRESENCE_QUESTION_RE = re.compile(
+    r"\b(ви|ти|вы|ты)\s+(тут|є|з нами|с нами|здесь|на зв'?язку|на связи|чуєте|чуєш|слышите|слышишь)|"
+    r"присутн\w*\s*\?|\bє\s*\?|\bесть\s*\?|\bтут\s*\?",
+    re.I,
+)
 BRAIN_ANSWER_TIMEOUT = timedelta(seconds=90)
 CHUNK_CHARS = 2500  # скільки розшифровки віддавати мозку на конспект за раз
 # Скільки чекаємо на твоє «ні», перш ніж діяти самостійно, коли сигнали за, але не всі.
 VETO_WINDOW = timedelta(seconds=45)
 # Як довго мозкове «схоже, перекличка» чекає на підтвердження від групи в чаті.
 EXPECT_WINDOW = timedelta(minutes=5)
-# Перекличка голосом: стільки різних однокурсників мають прозвучати за ці хвилини до тебе.
-VOICE_ROLL_CALL_NAMES = 3
+# Перекличка голосом: на стільки прізвищ однокурсників мають відповісти «є/тут», щоб відповісти й за тебе.
+VOICE_ROLL_CALL_ANSWERS = 2
 VOICE_ROLL_CALL_WINDOW = timedelta(minutes=4)
 # Що варто показати «мозку»: прохання до всіх щось зробити.
 ATTENTION_RE = re.compile(
-    r"плюс|перекличк|відміч|відміт|присутн|хто (є|тут|зараз)|напишіть|поставте|відпишіть|"
-    r"увімкніть|ввімкніть|включіть|камер|здайте|надішліть|дедлайн|контрольн",
+    r"плюс|перекличк|відміч|відміт|отмет|присутн|присутств|хто (є|тут|зараз)|кто (есть|тут|здесь)|"
+    r"напишіть|напишите|поставте|поставьте|відпишіть|увімкніть|ввімкніть|включіть|включите|камер|"
+    r"здайте|сдайте|надішліть|скиньте|киньте|дедлайн|контрольн|модульн",
     re.I,
 )
 ME_AUTHOR_RE = re.compile(r"^(you|ви|вы)$", re.I)
@@ -341,7 +372,7 @@ class Assistant:
                 meeting.chunk = []
             mentioned = self._check_mention(meeting, text, now, "на парі")
             if mentioned:
-                self._voice_roll_call(meeting, now)
+                self._voice_roll_call(meeting, text, confident, now)
             if not mentioned and ATTENTION_RE.search(text):
                 if self.wake_brain:
                     self.wake_brain(meeting.key)
@@ -369,28 +400,80 @@ class Assistant:
         if self._cooled(self._last_mention, now, MENTION_COOLDOWN):
             self._last_mention = now
             lead = "🚨 Тебе кличуть" if any(hits) else "❗ Можливо, звертаються до тебе"
-            self.notify(f"{lead} {where} на «{meeting.title}»: «{_snippet(text)}»", urgent=True)
+            self._alert(f"{lead} {where} на «{meeting.title}»: «{_snippet(text)}»", self._quick_buttons())
             if self.wake_brain:
                 self.wake_brain(meeting.key)
             if self.on_moment:
                 self.on_moment(meeting.key, f"🎬 Момент з «{meeting.title}», {now:%H:%M}", now)
         return True
 
-    def _voice_roll_call(self, meeting: Meeting, now: datetime) -> None:
-        """Викладач читає список групи вголос і дійшов до тебе — відмічаємось у чаті.
+    def _voice_roll_call(self, meeting: Meeting, text: str, confident: bool, now: datetime) -> None:
+        """Тебе назвали голосом. Чи треба (і чи можна) відповісти за тебе в чаті?
 
-        Одне розпізнане «Ляшко» нічого не доводить, а от кілька різних прізвищ однокурсників поспіль
-        перед ним — так звучить лише перекличка. Відповісти голосом ти не можеш, тож пишемо в чат.
+        Кількість прізвищ нічого не доводить: викладач так само перелічує боржників чи розподіляє
+        доповіді. Перекличку видно з того, як реагує група: після прізвищ однокурсників хтось
+        відповідає «є», «тут» голосом чи «+» у чаті. Тож:
+        - на прізвища відповідали (≥2) і ніхто не казав про борги, запис, «не здали» → відповідаємо;
+        - викладач питає саме тебе «Ляшко, ви тут?» (розпізнано впевнено) → відповідаємо;
+        - прізвища звучать, але ніхто не відповідає, або поруч борги чи запис → лише питаємо тебе.
         """
+        sentences = [
+            (t, sentence.strip())
+            for t, said, _ in meeting.heard
+            if now - t <= VOICE_ROLL_CALL_WINDOW
+            for sentence in re.split(r"(?<=[.!?])\s+", said)
+            if sentence.strip()
+        ]
+        mine = next((s for _, s in reversed(sentences) if self._patterns and self._patterns[0][0].search(s)), text)
+        veto = next((s for _, s in sentences if NOT_ATTENDANCE_RE.search(s)), None)
+
+        if PRESENCE_QUESTION_RE.search(mine) and confident and not NOT_ATTENDANCE_RE.search(mine):
+            if "__here__" not in meeting.reacted and "__voice__" not in meeting.reacted:
+                self.propose_chat(meeting, self.me.here, f"Викладач питає, чи ти тут: «{_snippet(mine, 120)}»", now, mark="__here__")
+            return
         if not self._classmates or "__voice__" in meeting.reacted:
             return
-        recent = " ".join(text for t, text, _ in meeting.heard if now - t <= VOICE_ROLL_CALL_WINDOW)
-        named = sum(1 for pattern in self._classmates if pattern.search(recent))
-        if named >= VOICE_ROLL_CALL_NAMES:
-            self.propose_chat(
-                meeting, self.me.present, f"Викладач читає список групи ({named} прізвищ) і назвав тебе",
-                now, mark="__voice__",
+        named, answered = set(), set()
+        for index, (t, sentence) in enumerate(sentences):
+            for number, pattern in enumerate(self._classmates):
+                found = pattern.search(sentence)
+                if found is None:
+                    continue
+                named.add(number)
+                after = sentence[found.end():]
+                following = sentences[index + 1][1] if index + 1 < len(sentences) else ""
+                if PRESENCE_ANSWER_RE.match(after) or PRESENCE_ANSWER_RE.match(following) or self._chat_answer_near(meeting, t):
+                    answered.add(number)
+        if len(named) < 2:
+            return  # це не перелік — звичайна згадка, про неї вже сповістили
+        meeting.reacted.add("__voice__")
+        if veto is not None:
+            self._offer(
+                meeting, self.me.present,
+                f"Викладач перелічує прізвища разом з твоїм, але це схоже не на перекличку («{_snippet(veto, 120)}»)",
+                now, ask=True,
             )
+        elif len(answered) >= VOICE_ROLL_CALL_ANSWERS:
+            self._offer(
+                meeting, self.me.present,
+                "Перекличка голосом: на прізвища однокурсників відповідали «є/тут», назвали й тебе", now,
+                context=_snippet(mine, 120),
+            )
+        else:
+            self._offer(
+                meeting, self.me.present,
+                f"Викладач називає прізвища ({len(named)}) і твоє, але ніхто не відповідав «є/тут» — "
+                "може, це не перекличка", now, ask=True, context=_snippet(mine, 120),
+            )
+
+    def _chat_answer_near(self, meeting: Meeting, moment: datetime) -> bool:
+        """Хтось відповів у чаті «+» / «тут» приблизно тоді, коли назвали прізвище."""
+        return any(
+            abs((t - moment).total_seconds()) <= 40
+            and not self._is_me(m.author)
+            and any(pattern.match(_norm(m.text)) for pattern, _ in ECHO_GROUPS[:2])
+            for t, m in meeting.chat
+        )
 
     def _speech_clean(self, meeting: Meeting, since: datetime, now: datetime) -> bool:
         """Вуха працюють і все, що прозвучало навколо хвилі, розпізнано впевнено.
@@ -488,7 +571,7 @@ class Assistant:
         def verdict(sentence: str) -> str | None:
             if NOT_ATTENDANCE_RE.search(sentence):
                 return "not_attendance"
-            if ATTENDANCE_RE.search(sentence):
+            if ATTENDANCE_RE.search(sentence) or HARMLESS_RE.search(sentence):
                 return "attendance"
             return None
 
@@ -597,14 +680,17 @@ class Assistant:
         elif act_on_timeout and policy == "auto":
             meeting.pending = Pending(text, now + VETO_WINDOW, reason, act_on_timeout=True)
             seconds = int(VETO_WINDOW.total_seconds())
-            self.notify(
+            self._alert(
                 f"{reason} на «{meeting.title}».{quote}\nНапишу «{text}» за {seconds} с, якщо не відповіси «ні» "
                 "(«так» — одразу).",
-                urgent=True,
+                [[("✅ Так, одразу", "так"), ("✋ Ні, не пиши", "ні")]],
             )
         elif ask or policy == "ask":
             meeting.pending = Pending(text, now + ASK_TIMEOUT, reason, act_on_timeout=False)
-            self.notify(f"{reason} на «{meeting.title}».{quote}\nНаписати «{text}»? Відповідай: так / ні", urgent=True)
+            self._alert(
+                f"{reason} на «{meeting.title}».{quote}\nНаписати «{text}»? Відповідай: так / ні",
+                [[(f"✅ Написати «{text}»", "так"), ("❌ Ні", "ні")]],
+            )
         else:
             because = f"{reason}: «{context}»" if context else reason
             self._actions.append(Action("chat", meeting.key, text, because))
@@ -740,6 +826,15 @@ class Assistant:
                 pending, meeting.pending = meeting.pending, None
                 self._actions.append(Action("chat", meeting.key, pending.text, f"{pending.reason}; ти підтвердив"))
                 return f"Пишу «{pending.text}»."
+            if low in ("так", "yes", "ок", "ok", "давай"):
+                return "Це питання вже неактуальне."
+            if low.startswith("say:"):  # кнопка з готовою відповіддю
+                try:
+                    reply = self.me.quick_replies[int(low[4:])]
+                except (ValueError, IndexError):
+                    return "Такої відповіді вже немає."
+                self._actions.append(Action("chat", meeting.key, reply, "ти натиснув кнопку"))
+                return f"Пишу «{reply}»."
             if low in ("ні", "no", "не треба", "не пиши"):
                 meeting.pending = None
                 return "Добре, не пишу."
@@ -766,6 +861,17 @@ class Assistant:
             lines.append(f"{when} {m.author or '?'}: {m.text}")
         lines.append("\n↩️ Відповідай на це повідомлення — і я напишу твій текст у чат.")
         return "\n".join(lines)
+
+    def _alert(self, text: str, buttons: list | None = None) -> None:
+        """Термінове сповіщення; з кнопками, якщо їх уміє показати Telegram."""
+        if buttons and self.media is not None and hasattr(self.media, "ask"):
+            self.media.ask(text, buttons)
+        else:
+            self.notify(text, urgent=True)
+
+    def _quick_buttons(self) -> list:
+        replies = [(f"💬 {reply}", f"say:{index}") for index, reply in enumerate(self.me.quick_replies[:3])]
+        return [replies, [("📋 Чат", "чат"), ("🖥 Екран", "екран")]] if replies else [[("📋 Чат", "чат"), ("🖥 Екран", "екран")]]
 
     def photo(self, content: bytes, caption: str) -> None:
         if self.media is not None:

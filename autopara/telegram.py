@@ -28,6 +28,10 @@ class Incoming:
     chat_id: int
     text: str
     is_reply: bool  # відповідь на якесь повідомлення бота
+    callback_id: str = ""  # натиснута кнопка під повідомленням бота
+
+
+Buttons = list[list[tuple[str, str]]]  # рядки кнопок: (підпис, що «написати» боту при натисканні)
 
 
 class TelegramBot:
@@ -52,8 +56,13 @@ class TelegramBot:
             raise TelegramError(f"Telegram: {data.get('description', 'помилка')}")
         return data["result"]
 
-    def send(self, text: str) -> None:
-        self._call("sendMessage", chat_id=self.chat_id, text=text[:4000])
+    def send(self, text: str, buttons: Buttons | None = None) -> None:
+        params = {"chat_id": self.chat_id, "text": text[:4000]}
+        if buttons:
+            params["reply_markup"] = {
+                "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]
+            }
+        self._call("sendMessage", **params)
 
     def _send_file(self, method: str, field: str, filename: str, content: bytes, caption: str) -> None:
         self._call(method, files={field: (filename, content)}, chat_id=self.chat_id, caption=caption[:CAPTION_LIMIT])
@@ -73,7 +82,11 @@ class TelegramBot:
     def updates(self, wait: int = 30) -> list[Incoming]:
         """Нові текстові повідомлення боту."""
         result = self._call(
-            "getUpdates", http_timeout=wait + 10, offset=self._offset, timeout=wait, allowed_updates=["message"]
+            "getUpdates",
+            http_timeout=wait + 10,
+            offset=self._offset,
+            timeout=wait,
+            allowed_updates=["message", "callback_query"],
         )
         messages = []
         for update in result:
@@ -81,6 +94,9 @@ class TelegramBot:
             message = update.get("message") or {}
             if "text" in message:
                 messages.append(Incoming(message["chat"]["id"], message["text"], "reply_to_message" in message))
+            if callback := update.get("callback_query"):
+                chat_id = (callback.get("message") or {}).get("chat", {}).get("id", 0)
+                messages.append(Incoming(chat_id, callback.get("data", ""), False, callback["id"]))
         return messages
 
     def listen(self, handle: Callable[[str, bool], str | None], stop: threading.Event) -> None:
@@ -91,6 +107,8 @@ class TelegramBot:
                     if incoming.chat_id != self.chat_id:
                         log.warning("Ігнорую повідомлення боту з чужого чату %s", incoming.chat_id)
                         continue
+                    if incoming.callback_id:  # прибрати «годинник» на кнопці
+                        self._call("answerCallbackQuery", callback_query_id=incoming.callback_id)
                     if reply := handle(incoming.text, incoming.is_reply):
                         self.send(reply)
             except TelegramError as e:
@@ -122,6 +140,21 @@ class Notifier:
                 )
             if self.bot:
                 self.bot.send(text)
+
+        self._queue.put(job)
+
+    def ask(self, text: str, buttons: Buttons, urgent: bool = True) -> None:
+        """Сповіщення з кнопками: відповісти можна одним дотиком."""
+        log.info("🔔 %s", text)
+
+        def job() -> None:
+            if self.desktop:
+                subprocess.run(
+                    ["notify-send", "-a", "autopara", "-u", "critical" if urgent else "normal", "autopara", text],
+                    check=False,
+                )
+            if self.bot:
+                self.bot.send(text, buttons)
 
         self._queue.put(job)
 

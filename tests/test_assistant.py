@@ -99,7 +99,7 @@ def test_ask_mode_times_out():
     chat(assistant, "10:00", ("Іван Коваль", "+"), ("Олена Бойко", "+"), ("Марко Лис", "+"))
     assistant.tick(at("10:06"))
     assert "Не дочекався" in inbox.text()
-    assert assistant.on_command("так", at("10:07")) == "Не зрозумів.\n\n" + assistant.on_command("/help", at("10:07"))
+    assert assistant.on_command("так", at("10:07")) == "Це питання вже неактуальне."
 
 
 def test_off_mode_only_notifies():
@@ -384,15 +384,95 @@ def test_ask_mode_never_acts_on_its_own():
     assert assistant.take_actions() == [] and "Не дочекався відповіді" in inbox.text()
 
 
-def test_voice_roll_call_by_surnames():
+GROUP = ["Бойко Олена", "Коваль Іван", "Лис Марко", "Ткач Ліна", "Ляшко Денис"]
+
+
+def say(assistant, *lines, start="10:00:00", confident=True):
+    base = datetime.fromisoformat(f"2026-10-05T{start}").replace(tzinfo=TZ)
+    for i, line in enumerate(lines):
+        assistant.on_heard(line, base + timedelta(seconds=10 * i), confident=confident)
+
+
+def test_voice_roll_call_with_answers():
     assistant, inbox = listening()
-    assistant.set_classmates(["Бойко Олена", "Коваль Іван", "Лис Марко", "Ткач Ліна", "Ляшко Денис"])
-    for t, name in [("10:00:10", "Бойко."), ("10:00:20", "Коваль. Є."), ("10:00:30", "Лис."), ("10:00:40", "Ткач.")]:
-        assistant.on_heard(name, at(t))
+    assistant.set_classmates(GROUP)
+    say(assistant, "Бойко.", "Є.", "Коваль — тут.", "Лис.", "Я тут.")
     assert assistant.take_actions() == []
-    assistant.on_heard("Ляшко.", at("10:00:50"))
+    say(assistant, "Ляшко.", start="10:01:00")
     [action] = assistant.take_actions()
-    assert action.text == "Присутній" and "читає список групи" in action.reason
+    assert action.text == "Присутній" and "відповідали «є/тут»" in action.reason
+
+
+def test_voice_roll_call_answered_in_chat():
+    assistant, inbox = listening()
+    assistant.set_classmates(GROUP)
+    say(assistant, "Бойко.", "Коваль.")
+    chat(assistant, "10:00:20", ("Олена Бойко", "+"), ("Іван Коваль", "тут"))
+    say(assistant, "Ляшко.", start="10:00:30")
+    assert [a.text for a in assistant.take_actions()] == ["Присутній"]
+
+
+def test_russian_roll_call():
+    assistant, inbox = listening()
+    assistant.set_classmates(GROUP)
+    say(assistant, "Так, отмечаемся. Бойко.", "Есть.", "Коваль.", "Здесь.", "Ляшко.")
+    assert [a.text for a in assistant.take_actions()] == ["Присутній"]
+
+
+def test_debtors_list_is_not_a_roll_call():
+    # Викладач перелічує, хто не здав лабу, — «Присутній» тут був би приколом.
+    assistant, inbox = listening()
+    assistant.set_classmates(GROUP)
+    say(assistant, "Лабораторну номер три досі не здали: Бойко, Коваль, Лис і Ляшко.")
+    assert assistant.take_actions() == []
+    assert "схоже не на перекличку" in inbox.text() and "Тебе кличуть" in inbox.text()
+
+
+def test_names_without_answers_only_ask():
+    assistant, inbox = listening()
+    assistant.set_classmates(GROUP)
+    say(assistant, "Бойко.", "Коваль.", "Лис.", "Ляшко.")
+    assert assistant.take_actions() == [] and "ніхто не відповідав" in inbox.text()
+
+
+def test_teacher_asks_you_directly():
+    assistant, inbox = listening()
+    say(assistant, "Ляшко, ви з нами?")
+    [action] = assistant.take_actions()
+    assert action.text == "Так, я тут" and "питає, чи ти тут" in action.reason
+
+
+def test_unclear_direct_question_is_not_answered():
+    assistant, inbox = listening()
+    say(assistant, "Ляшко, ви тут?", confident=False)
+    assert assistant.take_actions() == [] and "Тебе кличуть" in inbox.text()
+
+
+def test_content_question_is_never_answered():
+    assistant, inbox = listening()
+    say(assistant, "Ляшко, яка складність у бінарного пошуку?")
+    assert assistant.take_actions() == [] and "Тебе кличуть" in inbox.text()
+
+
+def test_surzhyk_signup_is_recognised():
+    assistant, inbox, _ = make()
+    chat(assistant, "09:59", ("Петренко П.П.", "Кто хочет доклад на следующую пару — плюсаните"))
+    plus_wave(assistant)
+    assert assistant.take_actions() == [] and "не перекличка" in inbox.text()
+
+
+def test_sound_check_plus_is_harmless():
+    assistant, inbox = listening()
+    assistant.on_heard("Якщо мене чути, поставте плюс у чат.", at("09:59:30"))
+    plus_wave(assistant)
+    assert [a.text for a in assistant.take_actions()] == ["+"]
+
+
+def test_plus_for_already_done_is_a_claim():
+    assistant, inbox = listening()
+    assistant.on_heard("Поставте плюс, хто вже здав лабу.", at("09:59:30"))
+    plus_wave(assistant)
+    assert assistant.take_actions() == [] and "не перекличка" in inbox.text()
 
 
 def test_single_mention_is_not_a_roll_call():
@@ -400,3 +480,34 @@ def test_single_mention_is_not_a_roll_call():
     assistant.set_classmates(["Бойко Олена", "Коваль Іван", "Лис Марко"])
     assistant.on_heard("Ляшко, як ви думаєте?", at("10:00"))
     assert assistant.take_actions() == [] and "Тебе кличуть" in inbox.text()
+
+
+
+# --- Кнопки в Telegram -------------------------------------------------------
+
+
+class Media:
+    def __init__(self):
+        self.asked = []
+
+    def ask(self, text, buttons, urgent=True):
+        self.asked.append((text, buttons))
+
+
+def test_mention_comes_with_quick_reply_buttons():
+    assistant, inbox, _ = make()
+    assistant.media = Media()
+    assistant.on_heard("Ляшко, яка відповідь?", at("10:00"))
+    [(text, buttons)] = assistant.media.asked
+    assert text.startswith("🚨 Тебе кличуть")
+    assert buttons[0] == [("💬 Присутній", "say:0"), ("💬 Так, я тут", "say:1")]
+    assert assistant.on_command("say:1", at("10:00:10")) == "Пишу «Так, я тут»."
+    assert [a.text for a in assistant.take_actions()] == ["Так, я тут"]
+
+
+def test_questions_come_with_yes_no_buttons():
+    assistant, inbox, _ = make()
+    assistant.media = Media()
+    plus_wave(assistant)
+    [(text, buttons)] = assistant.media.asked
+    assert buttons == [[("✅ Написати «+»", "так"), ("❌ Ні", "ні")]]

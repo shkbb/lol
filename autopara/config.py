@@ -51,7 +51,10 @@ class JoinSettings:
 class MeSettings:
     name: str = ""  # «Прізвище Ім'я» — щоб помічати, коли тебе кличуть, і відповідати на перекличку
     chat_reply: str = "auto"  # "auto" | "ask" | "off": чи відповідати в чат, коли група масово пише «+»
-    present: str = "Присутній"  # що писати, коли група відмічається словами «присутній», «тут»
+    present: str = "Присутній"  # що писати на перекличці, коли група відмічається «присутній», «тут»
+    here: str = "Так, я тут"  # відповідь на «Ляшко, ви тут?»
+    # Готові відповіді-кнопки в Telegram, коли тебе кличуть: натиснув — і це пішло в чат пари.
+    quick_replies: list = field(default_factory=lambda: ["Присутній", "Так, я тут"])
 
 
 @dataclass
@@ -144,6 +147,8 @@ def parse_config(data: dict) -> Config:
     me = _build(MeSettings, data.get("me", {}), "me")
     if me.chat_reply not in ("auto", "ask", "off"):
         raise ConfigError('[me] chat_reply має бути "auto", "ask" або "off"')
+    if not all(isinstance(reply, str) and reply.strip() for reply in me.quick_replies):
+        raise ConfigError("[me] quick_replies — це список непорожніх рядків")
     telegram = _build(TelegramSettings, data.get("telegram", {}), "telegram")
     if telegram.token and ":" not in telegram.token:
         raise ConfigError("[telegram] token виглядає неправильно — візьми його в @BotFather")
