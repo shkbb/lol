@@ -10,6 +10,8 @@ from .links import LinkRule, platform_of, resolve
 from .rozklad import Lesson
 
 # Пари з одним посиланням, між якими перерва не довша за це, проводимо в одному дзвінку.
+# Лише коли виходимо за розкладом: з розумним виходом кожна пара — окремий візит,
+# а фоновий цикл сам продовжить відкриту зустріч, якщо на перерві з неї не вийшли.
 MERGE_GAP = timedelta(minutes=30)
 
 
@@ -70,7 +72,8 @@ def build_plan(
             plan.visits.append(visit)
             continue
         last = previous.lessons[-1]
-        if visit.url == previous.url and lesson.starts_at(tz) - last.ends_at(tz) <= MERGE_GAP:
+        gap = lesson.starts_at(tz) - last.ends_at(tz)
+        if visit.url == previous.url and (gap < timedelta(0) or (not settings.smart_leave and gap <= MERGE_GAP)):
             previous.lessons.append(lesson)
             previous.leave_at = max(previous.leave_at, visit.leave_at)
         elif lesson.starts_at(tz) < last.ends_at(tz):

@@ -9,6 +9,7 @@ pytest.importorskip("playwright")
 
 from autopara.config import JoinSettings  # noqa: E402
 from autopara.joiner import LOGIN_HINT, Joiner  # noqa: E402
+from autopara.leaving import Observation  # noqa: E402
 from autopara.planner import Visit  # noqa: E402
 from autopara.session import JoinError  # noqa: E402
 
@@ -26,8 +27,10 @@ FAKE_MEET = """<!doctype html>
 <div id="denied" hidden>You can't join this video call</div>
 <div id="call" hidden>
   <div id="mic2" role="button" tabindex="0" data-is-muted="true" aria-label="Turn on microphone (ctrl + d)">🎤</div>
+  <button aria-label="People"><i>people</i><div class="badge">7</div></button>
   <button aria-label="Leave call"><i>call_end</i></button>
 </div>
+<div id="ended" hidden>You left the meeting <button>Rejoin</button><button>Return to home screen</button></div>
 <script>
 const scenario = location.pathname.slice(1);
 const $ = (id) => document.getElementById(id);
@@ -65,6 +68,7 @@ navigator.permissions.query({name: "microphone"}).then((p) => {
   }
 });
 
+window.endCall = () => { $("call").hidden = true; $("ended").hidden = false; };
 $("join").onclick = () => {
   window.joinedWith = {
     mic: $("mic").dataset.isMuted, cam: $("cam").dataset.isMuted,
@@ -144,3 +148,15 @@ def test_login_required(joiner):
         joiner.join(visit("login"))
     assert not error.value.retry
     assert LOGIN_HINT in str(error.value)
+
+
+def test_observe_counts_people_and_sees_the_end(joiner):
+    session = joiner.join(visit("normal"))
+    try:
+        assert joiner.observe(session) == Observation(participants=7)
+        session.page.click("#mic2")  # ти сам увімкнув мікрофон
+        assert joiner.observe(session).mic_on
+        session.page.evaluate("endCall()")
+        assert joiner.observe(session) == Observation(ended=True)
+    finally:
+        joiner.leave(session)

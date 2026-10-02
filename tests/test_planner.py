@@ -27,15 +27,29 @@ def test_past_lessons_dropped_current_kept(lesson):
     assert [v.url for v in plan.visits] == [ZOOM]
 
 
-def test_back_to_back_pairs_with_same_link_are_one_call(lesson):
+def test_back_to_back_pairs_with_same_link_are_one_call_when_leaving_by_schedule(lesson):
     lessons = [lesson(start="09:30", end="10:50"), lesson(start="11:10", end="12:30", type="Пз")]
-    plan = build_plan(lessons, RULES, JoinSettings(), TZ, at("08:00"))
+    settings = JoinSettings(smart_leave=False)
+    plan = build_plan(lessons, RULES, settings, TZ, at("08:00"))
     [visit] = plan.visits
     assert visit.leave_at == at("12:30")
     assert visit.title == "Бази даних + Бази даних (Пз)"
     # Перша пара вже скінчилась, друга йде — візит той самий (той самий ключ), а не новий.
-    later = build_plan(lessons, RULES, JoinSettings(), TZ, at("11:30"))
+    later = build_plan(lessons, RULES, settings, TZ, at("11:30"))
     assert [v.key for v in later.visits] == [visit.key]
+
+
+def test_smart_leave_keeps_pairs_separate(lesson):
+    # На перерві люди виходять — рішення «коли виходити» приймаємо для кожної пари окремо.
+    lessons = [lesson(start="09:30", end="10:50"), lesson(start="11:10", end="12:30", type="Пз")]
+    plan = build_plan(lessons, RULES, JoinSettings(), TZ, at("08:00"))
+    assert [(v.join_at, v.leave_at) for v in plan.visits] == [(at("09:28"), at("10:50")), (at("11:08"), at("12:30"))]
+
+
+def test_same_link_overlapping_entries_are_one_call(lesson):
+    lessons = [lesson(type="Лк"), lesson(start="10:00", end="11:20", type="Лк")]
+    plan = build_plan(lessons, RULES, JoinSettings(), TZ, at("08:00"))
+    assert len(plan.visits) == 1 and plan.conflicts == []
 
 
 def test_different_links_back_to_back(lesson):

@@ -9,7 +9,9 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from .config import Config
+from .leaving import LeaveDecider
 from .planner import Plan, Visit, build_plan
+from .power import SleepGuard
 from .rozklad import RozkladClient, RozkladError, Target
 from .session import JoinError, Session
 
@@ -34,7 +36,14 @@ def resolve_target(client: RozkladClient, config: Config) -> Target:
 
 
 class Runner:
-    def __init__(self, config: Config, client: RozkladClient, joiner, clock: Callable[[], datetime] | None = None):
+    def __init__(
+        self,
+        config: Config,
+        client: RozkladClient,
+        joiner,
+        clock: Callable[[], datetime] | None = None,
+        sleep_guard: SleepGuard | None = None,
+    ):
         self.config = config
         self.client = client
         self.joiner = joiner
@@ -47,6 +56,7 @@ class Runner:
         self.attempts: dict[str, int] = {}
         self.retry_at: dict[str, datetime] = {}
         self.next_refresh: datetime | None = None
+        self.sleep_guard = sleep_guard or SleepGuard()
         self._warned: set[str] = set()
 
     # Розклад
@@ -97,14 +107,35 @@ class Runner:
             if not self.joiner.alive(session):
                 log.info("Вкладку «%s» закрито вручну", session.visit.title)
                 del self.active[key]
-            elif self.config.join.auto_leave and now >= session.leave_at:
-                log.info("Пара «%s» скінчилась — виходжу", session.visit.title)
-                self.joiner.leave(session)
-                del self.active[key]
+            elif self.config.join.auto_leave and (reason := self._leave_reason(session, now)):
+                self._leave(key, reason)
 
         for visit in self.plan.visits:
             if self._due(visit, now):
                 self._join(visit, now)
+
+        self.sleep_guard.hold(self._lessons_left_today(now))
+
+    def _leave_reason(self, session: Session, now: datetime) -> str | None:
+        if session.decider is not None:
+            return session.decider.update(now, self.joiner.observe(session))
+        return "пара скінчилась за розкладом" if now >= session.leave_at else None
+
+    def _leave(self, key: str, reason: str) -> None:
+        session = self.active.pop(key)
+        log.info("Виходжу з «%s»: %s", session.visit.title, reason)
+        self.joiner.leave(session)
+
+    def _lessons_left_today(self, now: datetime) -> bool:
+        if self.active:
+            return True
+        return any(
+            visit.join_at.date() == now.date() and visit.leave_at > now and visit.key not in self.finished
+            for visit in self.plan.visits
+        )
+
+    def _window(self, visit: Visit) -> tuple[datetime, datetime]:
+        return visit.lessons[0].starts_at(self.tz), visit.lessons[-1].ends_at(self.tz)
 
     def _due(self, visit: Visit, now: datetime) -> bool:
         if visit.key in self.finished or visit.key in self.active:
@@ -118,8 +149,15 @@ class Runner:
         for session in self.active.values():
             if session.url == visit.url:
                 session.leave_at = max(session.leave_at, visit.leave_at)
+                if session.decider is not None:
+                    session.decider.next_lesson(*self._window(visit))
                 self.finished.add(visit.key)
+                log.info("Лишаюсь у тій самій зустрічі на «%s»", visit.title)
                 return
+        # Почалася наступна пара за іншим посиланням — у двох дзвінках одночасно не сидимо.
+        if self.config.join.auto_leave:
+            for key in list(self.active):
+                self._leave(key, f"починається наступна пара «{visit.title}»")
         log.info("Заходжу на «%s» (%s): %s", visit.title, visit.platform, visit.url)
         try:
             session = self.joiner.join(visit)
@@ -137,11 +175,16 @@ class Runner:
             log.info("Відкрив «%s» у Zoom-клієнті (мікрофон і камера — за налаштуваннями Zoom)", visit.title)
         else:
             log.info("Зайшов на «%s»", visit.title)
+            if self.config.join.smart_leave:
+                session.decider = LeaveDecider(*self._window(visit), self.config.join)
         self.finished.add(visit.key)
         self.active[visit.key] = session
 
     def run_forever(self, poll_seconds: float = 20) -> None:
         log.info("autopara запущено. Не вимикай комп'ютер і не давай йому заснути під час пар.")
-        while True:
-            self.tick()
-            sleep(poll_seconds)
+        try:
+            while True:
+                self.tick()
+                sleep(poll_seconds)
+        finally:
+            self.sleep_guard.release()

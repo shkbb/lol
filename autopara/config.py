@@ -37,11 +37,14 @@ class JoinSettings:
     camera_off: bool = True
     mute_sound: bool = True
     auto_leave: bool = True
+    smart_leave: bool = True
+    max_overtime_minutes: int = 20
     leave_after_minutes: int = 0
     zoom_mode: str = "app"
     display_name: str = ""
     meet_account: str = ""
     browser_channel: str = "chrome"
+    browser_path: str = ""
 
 
 @dataclass
@@ -87,7 +90,7 @@ def parse_config(data: dict) -> Config:
     join = _build(JoinSettings, data.get("join", {}), "join")
     if join.zoom_mode not in ("app", "browser"):
         raise ConfigError('[join] zoom_mode має бути "app" або "browser"')
-    if join.minutes_before < 0 or join.leave_after_minutes < 0:
+    if min(join.minutes_before, join.leave_after_minutes, join.max_overtime_minutes) < 0:
         raise ConfigError("[join] хвилини не можуть бути від'ємними")
 
     rules = []

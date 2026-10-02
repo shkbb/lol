@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -89,7 +90,9 @@ def cmd_schedule(args, config: Config) -> None:
 def cmd_login(args, config: Config) -> None:
     from .joiner import Browser
 
-    browser = Browser(config.profile_dir, config.join.browser_channel, mute_sound=False)
+    browser = Browser(
+        config.profile_dir, config.join.browser_channel, mute_sound=False, executable_path=config.join.browser_path
+    )
     try:
         browser.new_page().goto("https://accounts.google.com/")
         if config.join.zoom_mode == "browser":
@@ -113,7 +116,14 @@ def cmd_join(args, config: Config) -> None:
     visit = Visit(args.url, platform_of(args.url), [lesson], now, leave_at)
     joiner = Joiner(config.join, config.profile_dir)
     try:
-        joiner.join(visit)
+        session = joiner.join(visit)
+        if session.page is not None:
+            session.page.wait_for_timeout(3000)  # лічильник учасників з'являється не одразу
+            seen = joiner.observe(session)
+            if seen.participants:
+                print(f"Бачу учасників: {seen.participants} — розумний вихід працюватиме.")
+            else:
+                print("Не бачу лічильника учасників — з цієї зустрічі програма виходитиме за розкладом.")
         input("Зайшов. Перевір мікрофон/камеру у вікні. Натисни Enter, щоб вийти... ")
     except JoinError as e:
         print(f"Не вдалося зайти: {e}", file=sys.stderr)
@@ -125,6 +135,9 @@ def cmd_join(args, config: Config) -> None:
 def cmd_run(args, config: Config) -> None:
     from .joiner import Joiner
 
+    # systemctl stop і kill шлють SIGTERM: перетворюємо його на звичайний вихід, щоб закрити браузер
+    # і зняти заборону сну.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     joiner = Joiner(config.join, config.profile_dir)
     try:
         Runner(config, _client(config), joiner).run_forever()

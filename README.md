@@ -10,7 +10,9 @@
 - за 2 хвилини до пари відкриває посилання, яке ти заздалегідь вказав для цього предмета;
 - заходить з вимкненими мікрофоном і камерою, браузер без звуку;
 - якщо ввімкнено зал очікування, чекає, поки впустять;
-- після пари виходить. Дві пари поспіль з тим самим посиланням проводить в одному дзвінку.
+- виходить **разом з групою**, а не рівно за розкладом: якщо пару відпустили раніше,
+  не висітиме в зустрічі сам, а якщо затягнулась — не вийде першим
+  (див. [«Коли програма виходить з пари»](#коли-програма-виходить-з-пари)).
 
 ## Як це влаштовано
 
@@ -29,10 +31,33 @@
   «Відкрити Zoom?». Мікрофон, камеру й звук вимикають налаштування самого Zoom (див. нижче).
   Інший варіант — веб-версія Zoom у тому ж браузері (`zoom_mode = "browser"`, експериментально).
 
+## Коли програма виходить з пари
+
+Розклад не знає, коли пара закінчиться насправді, але це видно з кількості учасників
+зустрічі: наприкінці люди масово виходять. Програма раз на 20 секунд дивиться на лічильник
+учасників (значок на кнопці «Учасники» в Meet, лічильник у Zoom) і:
+
+- **пару відпустили раніше** — коли вийшло ~60 % людей, виходить і вона, з випадковою
+  паузою 20–60 с, щоб не першою й не останньою;
+- **пара затягнулась** — після кінця за розкладом лишається, поки люди не почнуть виходити
+  (~30 % вийшло), але не довше ніж `max_overtime_minutes` (20 хв);
+- **лишилась сама** — виходить за кілька секунд. На початку пари бути самому нормально, тож
+  перші 15 хвилин це правило не діє. Якщо за 15 хвилин так ніхто й не прийшов, вона теж виходить;
+- **викладач завершив зустріч** — закриває вкладку;
+- **ти сам увімкнув мікрофон** — значить, ти за ноутом, і програма з зустрічі не вийде;
+- **починається наступна пара** за іншим посиланням — переходить туди.
+
+Якщо порахувати учасників не вдалося (Google змінив інтерфейс), програма виходить за
+розкладом (`leave_after_minutes` після кінця). Вимкнути розумний вихід: `smart_leave = false`.
+
+Нейромережа тут не потрібна: рішення приймається за тими самими цифрами, і прості правила
+працюють передбачувано, миттєво й без навантаження на ноут.
+
 ## Встановлення
 
 Потрібні **Python 3.11+** ([python.org](https://www.python.org/downloads/); на Windows під час
 встановлення постав галочку *Add python.exe to PATH*) і **Google Chrome**.
+Для Arch Linux є [окремий розділ](#arch-linux).
 
 ```bash
 git clone https://github.com/shkbb/lol.git autopara
@@ -80,6 +105,8 @@ playwright install chromium   # запасний браузер, якщо Chrome
    ```
    autopara join https://meet.google.com/xxx-xxxx-xxx
    ```
+   Програма також напише, чи бачить вона кількість учасників. Від цього залежить
+   [розумний вихід](#коли-програма-виходить-з-пари).
 
 ### Підгрупи
 
@@ -116,6 +143,8 @@ autopara run
 Програма працює, поки відкрите вікно терміналу. Комп'ютер має бути ввімкнений і **не засинати**
 під час пар:
 
+- Linux: програма сама не дає системі заснути від бездіяльності, поки сьогодні ще є пари
+  (`systemd-inhibit`). Закрита кришка ноута, як і раніше, присипляє його;
 - Windows: *Параметри → Система → Живлення → Перехід у режим сну → Ніколи*;
 - macOS: запускай як `caffeinate -i autopara run`.
 
@@ -141,14 +170,71 @@ cd /d C:\шлях\до\autopara
 cd ~/autopara && caffeinate -i .venv/bin/autopara run
 ```
 
-**Linux.** Файл `~/.config/autostart/autopara.desktop`:
+**Linux.** Див. [Arch Linux](#arch-linux): там є systemd-сервіс і рядки для Hyprland/sway.
+
+## Arch Linux
+
+```bash
+sudo pacman -S --needed python git
+# Браузер: або Google Chrome з AUR...
+yay -S google-chrome
+# ...або chromium з офіційних репозиторіїв (тоді в config.toml: browser_path = "/usr/bin/chromium")
+sudo pacman -S chromium
+# Zoom-клієнт (якщо пари бувають у Zoom)
+yay -S zoom
+
+git clone https://github.com/shkbb/lol.git ~/autopara
+cd ~/autopara
+python -m venv .venv          # на Arch pip поза venv заборонений (PEP 668)
+source .venv/bin/activate
+pip install -e .
+playwright install chromium   # запасний браузер; --with-deps на Arch не потрібен
+```
+
+Перевір, що посилання `zoommtg://` відкриваються в Zoom:
+
+```bash
+xdg-mime query default x-scheme-handler/zoommtg     # має вивести Zoom.desktop
+xdg-mime default Zoom.desktop x-scheme-handler/zoommtg   # якщо вивело порожнє
+```
+
+**Автозапуск (GNOME, KDE Plasma, Hyprland через uwsm)** — systemd-сервіс користувача
+`~/.config/systemd/user/autopara.service`:
 
 ```ini
-[Desktop Entry]
-Type=Application
-Name=autopara
-Exec=sh -c "cd $HOME/autopara && .venv/bin/autopara run"
+[Unit]
+Description=autopara — автоматичний вхід на пари
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+WorkingDirectory=%h/autopara
+ExecStart=%h/autopara/.venv/bin/autopara run
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=graphical-session.target
 ```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now autopara
+journalctl --user -u autopara -f     # лог
+```
+
+Якщо в лозі сервісу браузер не запускається через відсутній `DISPLAY`/`WAYLAND_DISPLAY`
+(буває на «голих» композиторах), використай варіант нижче.
+
+**Hyprland без uwsm / sway / i3** — просто додай у конфіг композитора:
+
+```
+exec-once = cd ~/autopara && .venv/bin/autopara run    # hyprland.conf
+exec cd ~/autopara && .venv/bin/autopara run           # sway / i3
+```
+
+Ресурсів потрібно небагато: Chrome з однією зустріччю — близько 1–1,5 ГБ ОЗП і трохи процесора
+(відео з камер у Meet декодується, навіть коли звук вимкнено).
 
 ## Обмеження
 
@@ -158,6 +244,9 @@ Exec=sh -c "cd $HOME/autopara && .venv/bin/autopara run"
 - Поки `mute_sound = true`, браузер повністю без звуку. Щоб слухати пару, постав
   `mute_sound = false` і перезапусти програму.
 - Програма тільки заходить. На перекличку відповідати доведеться самому.
+- Розумний вихід бачить учасників лише в браузері. З Zoom-клієнтом (`zoom_mode = "app"`)
+  програма його не контролює: зазвичай викладач завершує конференцію для всіх, і Zoom
+  закривається сам. Якщо хочеш розумний вихід і в Zoom — постав `zoom_mode = "browser"`.
 - Сайт розкладу не має офіційного API. Якщо його переробять, `autopara schedule` покаже
   помилку, і треба буде оновити `autopara/rozklad.py`.
 - Посилання в самому розкладі викладачі заповнюють не завжди, тому краще вписати свої в `[[links]]`.
@@ -178,7 +267,9 @@ pytest
 | `autopara/rozklad.py` | клієнт сайту розкладу: форма, CSRF, розбір `var events` |
 | `autopara/links.py` | правила посилань, посилання Meet/Zoom |
 | `autopara/planner.py` | розклад → список «візитів» (коли зайти і вийти) |
-| `autopara/joiner.py` | вхід у Meet/Zoom з вимкненими мікрофоном і камерою |
+| `autopara/joiner.py` | вхід у Meet/Zoom з вимкненими мікрофоном і камерою, підрахунок учасників |
+| `autopara/leaving.py` | коли виходити: разом з групою, а не за розкладом |
+| `autopara/power.py` | не дає ноуту заснути, поки сьогодні є пари (Linux) |
 | `autopara/runner.py` | фоновий цикл |
 | `autopara/cli.py` | команди `find-group`, `schedule`, `login`, `join`, `run` |
 

@@ -2,6 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from autopara.config import Config, JoinSettings, ScheduleSettings
+from autopara.leaving import Observation
 from autopara.links import LinkRule
 from autopara.rozklad import RozkladError, Target
 from autopara.runner import Runner
@@ -11,6 +12,7 @@ from .conftest import make_lesson
 
 TZ = ZoneInfo("Europe/Kyiv")
 MEET = "https://meet.google.com/aaa-bbbb-ccc"
+ZOOM = "https://zoom.us/j/12345678901"
 
 
 def at(hhmm):
@@ -37,6 +39,10 @@ class FakeJoiner:
     def __init__(self):
         self.joined, self.left = [], []
         self.errors = []
+        self.seen = Observation()
+
+    def observe(self, session):
+        return self.seen
 
     def join(self, visit):
         if self.errors:
@@ -51,14 +57,24 @@ class FakeJoiner:
         self.left.append(session.visit.title)
 
 
-def make_runner(lessons):
+class FakeGuard:
+    holding = False
+
+    def hold(self, needed):
+        self.holding = needed
+
+    def release(self):
+        self.holding = False
+
+
+def make_runner(lessons, **join):
     config = Config(
         schedule=ScheduleSettings(group="ТЦР-32"),
-        join=JoinSettings(minutes_before=2),
-        links=[LinkRule(subject="Бази", url=MEET)],
+        join=JoinSettings(**{"minutes_before": 2, "smart_leave": False, **join}),
+        links=[LinkRule(subject="Бази", url=MEET), LinkRule(subject="Мережі", url=ZOOM)],
     )
     client, joiner = FakeClient(lessons), FakeJoiner()
-    return Runner(config, client, joiner), client, joiner
+    return Runner(config, client, joiner, sleep_guard=FakeGuard()), client, joiner
 
 
 def test_joins_once_on_time_and_leaves_after():
@@ -138,3 +154,62 @@ def test_open_meeting_is_reused_for_the_next_pair():
     runner.tick(at("14:28"))
     assert joiner.joined == ["Бази даних"]
     assert [s.leave_at for s in runner.active.values()] == [at("15:50")]
+
+
+# --- Розумний вихід ----------------------------------------------------------
+
+
+def test_smart_leave_leaves_with_the_crowd_when_pair_ends_early():
+    runner, _, joiner = make_runner([make_lesson()], smart_leave=True)
+    joiner.seen = Observation(participants=2)
+    runner.tick(at("09:28"))
+    joiner.seen = Observation(participants=25)
+    runner.tick(at("09:45"))
+    # Пару відпустили о 10:15 — люди виходять, а за розкладом ще 35 хвилин.
+    joiner.seen = Observation(participants=6)
+    runner.tick(at("10:15"))
+    assert joiner.left == []  # не першими: спершу невелика пауза
+    runner.tick(at("10:16"))
+    assert joiner.left == ["Бази даних"]
+
+
+def test_smart_leave_stays_while_pair_runs_over():
+    runner, _, joiner = make_runner([make_lesson()], smart_leave=True)
+    joiner.seen = Observation(participants=25)
+    runner.tick(at("09:28"))
+    runner.tick(at("10:58"))  # за розкладом пара скінчилась о 10:50, але всі ще тут
+    assert joiner.left == []
+    joiner.seen = Observation(participants=10)
+    runner.tick(at("11:02"))
+    runner.tick(at("11:03"))
+    assert joiner.left == ["Бази даних"]
+
+
+def test_next_pair_with_other_link_closes_the_previous_one():
+    lessons = [make_lesson(), make_lesson(subject="Мережі", start="11:10", end="12:30")]
+    runner, _, joiner = make_runner(lessons, smart_leave=True)
+    joiner.seen = Observation(participants=25)
+    runner.tick(at("09:28"))
+    runner.tick(at("11:08"))  # Бази даних затягнулись, а вже треба на Мережі
+    assert joiner.left == ["Бази даних"]
+    assert joiner.joined == ["Бази даних", "Мережі"]
+
+
+def test_same_meeting_next_pair_restarts_the_decision():
+    lessons = [make_lesson(), make_lesson(start="11:10", end="12:30", type="Пз")]
+    runner, _, joiner = make_runner(lessons, smart_leave=True)
+    joiner.seen = Observation(participants=25)
+    runner.tick(at("09:28"))
+    runner.tick(at("11:08"))  # на перерві ніхто не вийшов — лишаємось, а не заходимо вдруге
+    assert joiner.joined == ["Бази даних"] and joiner.left == []
+    [session] = runner.active.values()
+    assert session.decider.end == at("12:30")
+
+
+def test_sleep_is_blocked_only_while_lessons_remain_today():
+    runner, _, joiner = make_runner([make_lesson()])
+    runner.tick(at("07:00"))
+    assert runner.sleep_guard.holding
+    runner.tick(at("09:28"))
+    runner.tick(at("10:50"))
+    assert not runner.sleep_guard.holding

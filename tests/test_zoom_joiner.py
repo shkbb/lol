@@ -9,6 +9,7 @@ pytest.importorskip("playwright")
 
 from autopara.config import JoinSettings  # noqa: E402
 from autopara.joiner import Joiner  # noqa: E402
+from autopara.leaving import Observation  # noqa: E402
 from autopara.planner import Visit  # noqa: E402
 
 from .conftest import make_lesson  # noqa: E402
@@ -21,13 +22,18 @@ FRAME = """<!doctype html><body>
 <button id="preview-audio-control-button" aria-label="Mute">mic</button>
 <button id="preview-video-control-button" aria-label="Stop Video">cam</button>
 <button class="preview-join-button">Join</button>
-<div id="call" hidden><button class="footer__leave-btn">Leave</button></div>
+<div id="call" hidden>
+  <button aria-label="Participants"><span class="footer-button__number-counter">12</span></button>
+  <button class="footer__leave-btn">Leave</button>
+</div>
+<div id="ended" hidden>This meeting has been ended by host</div>
 <script>
 const $ = (id) => document.getElementById(id);
 $("preview-audio-control-button").onclick = (e) =>
   e.target.setAttribute("aria-label", e.target.getAttribute("aria-label") === "Mute" ? "Unmute" : "Mute");
 $("preview-video-control-button").onclick = (e) =>
   e.target.setAttribute("aria-label", e.target.getAttribute("aria-label") === "Stop Video" ? "Start Video" : "Stop Video");
+top.endCall = () => { $("call").hidden = true; $("ended").hidden = false; };
 document.querySelector(".preview-join-button").onclick = () => {
   top.joinedWith = {
     mic: $("preview-audio-control-button").getAttribute("aria-label"),
@@ -70,5 +76,8 @@ def test_zoom_web_mode_mutes_inside_iframe(tmp_path):
             "cam": "Start Video",
             "name": "Тест Тестович",
         }
+        assert joiner.observe(session) == Observation(participants=12)
+        session.page.evaluate("endCall()")
+        assert joiner.observe(session) == Observation(ended=True)
     finally:
         joiner.close()

@@ -20,6 +20,7 @@ class Session:
     visit: Visit
     leave_at: datetime
     page: Any = None  # playwright Page; None — Zoom-клієнт, ним ми не керуємо
+    decider: Any = None  # LeaveDecider, якщо виходимо разом з групою, а не за розкладом
 
     @property
     def url(self) -> str:

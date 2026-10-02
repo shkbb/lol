@@ -22,6 +22,7 @@ from playwright.sync_api import BrowserContext, Locator, Page, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
 from .config import JoinSettings
+from .leaving import Observation
 from .links import meet_url, zoom_app_url, zoom_web_url
 from .planner import Visit
 from .session import JoinError, Session
@@ -51,6 +52,19 @@ DENIED_RE = re.compile(
 NOT_STARTED_RE = re.compile(r"hasn.?t started|not started yet|ще не почал|ещ[её] не начал", re.I)
 PASSCODE_RE = re.compile(r"passcode|код доступу|пароль", re.I)
 
+# Кнопка «Учасники» в Meet, на якій висить значок з їхньою кількістю.
+PEOPLE_RE = re.compile(r"people|everyone|participant|учасник|люди|всіх|усіх|всех|участник", re.I)
+# Кнопки екрана, який Meet показує після кінця зустрічі (або коли тебе з неї видалили).
+MEET_ENDED_RE = re.compile(
+    r"^\s*(return to home screen|rejoin|повернутися на головний екран|приєднатися знову|повторно приєднатися"
+    r"|вернуться на главный экран|присоединиться (снова|ещ[её] раз))\s*$",
+    re.I,
+)
+ZOOM_ENDED_RE = re.compile(
+    r"ended by (the )?host|meeting has (been )?ended|завершив організатор|зустріч завершено|конференцію завершено"
+    r"|встреча завершена|конференция завершена",
+    re.I,
+)
 ZOOM_MIC_RE = re.compile(r"micro|мікрофон|микрофон|\b(un)?mute\b|звук", re.I)
 ZOOM_CAM_RE = re.compile(r"camera|video|камер|відео|видео", re.I)
 # Підпис кнопки описує дію, а не стан: «Увімкнути мікрофон» означає, що зараз він вимкнений.
@@ -205,6 +219,31 @@ def _meet_in_call(page: Page) -> bool:
     )
 
 
+def _count_in(text: str) -> int | None:
+    numbers = re.findall(r"\d+", text)
+    return int(numbers[-1]) if numbers else None
+
+
+def meet_participants(page: Page) -> int | None:
+    """Кількість учасників (разом з тобою) зі значка на кнопці «Учасники»."""
+    buttons = page.get_by_role("button", name=PEOPLE_RE)
+    for index in range(min(buttons.count(), 5)):
+        button = buttons.nth(index)
+        if button.is_visible() and (count := _count_in(button.inner_text(timeout=1000))):
+            return count
+    if badge := _first_visible(page.locator(".uGOf1d")):  # клас значка в інтерфейсі Meet 2022–2024
+        return _count_in(badge.inner_text(timeout=1000))
+    return None
+
+
+def observe_meet(page: Page) -> Observation:
+    if _meet_in_call(page):
+        mic = MEET_MIC(page)
+        return Observation(participants=meet_participants(page), mic_on=mic is not None and _is_off(mic) is False)
+    ended = _first_visible(page.get_by_role("button", name=MEET_ENDED_RE)) is not None
+    return Observation(ended=ended)
+
+
 def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime) -> Locator:
     """Чекає на кнопку «Приєднатися», попутно закриваючи діалоги та заповнюючи ім'я гостя."""
     stuck_since = monotonic()
@@ -275,6 +314,22 @@ def _zoom_in_call(page: Page) -> bool:
     )
 
 
+def zoom_participants(page: Page) -> int | None:
+    if counter := _find(page, lambda f: f.locator(".footer-button__number-counter")):
+        return _count_in(counter.inner_text(timeout=1000))
+    if button := _find(page, lambda f: f.get_by_role("button", name=re.compile(r"participant|учасник|участник", re.I))):
+        return _count_in(f"{_label(button)} {button.inner_text(timeout=1000)}")
+    return None
+
+
+def observe_zoom(page: Page) -> Observation:
+    if _zoom_in_call(page):
+        mic = ZOOM_MIC(page)
+        return Observation(participants=zoom_participants(page), mic_on=mic is not None and _is_off(mic) is False)
+    ended = "postattendee" in page.url or _visible_text(page, ZOOM_ENDED_RE)
+    return Observation(ended=ended)
+
+
 def _zoom_prejoin(page: Page, settings: JoinSettings) -> Locator:
     started = monotonic()
     while monotonic() - started < 90:
@@ -332,9 +387,17 @@ ANCHOR_PAGE = """<!doctype html><meta charset="utf-8"><title>autopara</title>
 class Browser:
     """Один Chrome з окремим постійним профілем: логін у Google зберігається між запусками."""
 
-    def __init__(self, profile_dir: Path, channel: str = "chrome", mute_sound: bool = True, headless: bool = False):
+    def __init__(
+        self,
+        profile_dir: Path,
+        channel: str = "chrome",
+        mute_sound: bool = True,
+        headless: bool = False,
+        executable_path: str = "",
+    ):
         self.profile_dir = profile_dir
         self.channel = channel
+        self.executable_path = executable_path
         self.mute_sound = mute_sound
         self.headless = headless
         self._playwright = None
@@ -368,16 +431,20 @@ class Browser:
             ignore_default_args=["--enable-automation"],
             no_viewport=True,
         )
-        if self.channel:
+        preferred = {"executable_path": self.executable_path} if self.executable_path else {}
+        if not preferred and self.channel:
+            preferred = {"channel": self.channel}
+        if preferred:
             try:
-                return self._playwright.chromium.launch_persistent_context(channel=self.channel, **options)
+                return self._playwright.chromium.launch_persistent_context(**preferred, **options)
             except PlaywrightError as e:
+                which = next(iter(preferred.values()))
                 log.warning(
                     "Не вдалося запустити браузер %r (%s). Беру вбудований Chromium — "
                     "логін у Google, зроблений у %r, там може не зберегтися.",
-                    self.channel,
+                    which,
                     str(e).splitlines()[0],
-                    self.channel,
+                    which,
                 )
         return self._playwright.chromium.launch_persistent_context(**options)
 
@@ -396,7 +463,9 @@ class Browser:
 class Joiner:
     def __init__(self, settings: JoinSettings, profile_dir: Path, headless: bool = False, opener=open_uri):
         self.settings = settings
-        self.browser = Browser(profile_dir, settings.browser_channel, settings.mute_sound, headless)
+        self.browser = Browser(
+            profile_dir, settings.browser_channel, settings.mute_sound, headless, settings.browser_path
+        )
         self._open_uri = opener
 
     def join(self, visit: Visit) -> Session:
@@ -419,6 +488,20 @@ class Joiner:
             self._discard(page)
             raise JoinError(f"помилка браузера: {str(e).splitlines()[0]}") from e
         return Session(visit, visit.leave_at, page)
+
+    def observe(self, session: Session) -> Observation:
+        """Що зараз у зустрічі. Якщо щось пішло не так — «нічого не відомо», і ніхто нікуди не виходить."""
+        page = session.page
+        if page is None:
+            return Observation()
+        try:
+            if session.visit.platform == "meet":
+                return observe_meet(page)
+            if session.visit.platform == "zoom":
+                return observe_zoom(page)
+        except PlaywrightError as e:
+            log.debug("Не вдалося роздивитись зустріч: %s", e)
+        return Observation()
 
     def alive(self, session: Session) -> bool:
         return session.page is None or not session.page.is_closed()
