@@ -11,7 +11,7 @@ EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
 def test_example_config_is_valid():
     config = load_config(str(EXAMPLE))
     assert config.schedule.group == "ТЦР-32"
-    assert config.join.zoom_mode == "app"
+    assert config.join.zoom_mode == "auto"
     assert config.links[0].type == "Лк"
     assert config.links[-1].skip
 

@@ -45,6 +45,7 @@ def install_hint(linux: str, windows: str, mac: str) -> str:
 def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
     from .brain import OllamaBrain
     from .ears import list_input_devices, pick_source, pulse_available, whisper_available
+    from .media import ffmpeg_available
     from .telegram import TelegramBot, TelegramError
 
     checks = []
@@ -68,11 +69,8 @@ def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
         hint = install_hint("встанови Zoom (Arch: yay -S zoom)", download, download)
         checks.append(Check(bool(zoom), "Zoom", "клієнт знайдено" if zoom else hint))
     if config.telegram.clips and config.telegram.mentions:
-        has_ffmpeg = shutil.which("ffmpeg") is not None
-        hint = install_hint(
-            "sudo pacman -S ffmpeg (Ubuntu: sudo apt install ffmpeg)", "winget install Gyan.FFmpeg", "brew install ffmpeg"
-        )
-        checks.append(Check(has_ffmpeg, "відеовирізки", "ffmpeg є" if has_ffmpeg else f"немає ffmpeg — {hint}"))
+        has_ffmpeg = ffmpeg_available()
+        checks.append(Check(has_ffmpeg, "відеовирізки", "ffmpeg є" if has_ffmpeg else "немає ffmpeg — перевстанови autopara"))
     if config.telegram.token and config.telegram.chat_id:
         try:
             if telegram_ping:

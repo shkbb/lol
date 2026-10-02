@@ -235,6 +235,41 @@ def _letters(text: str) -> str:
     return re.sub(r"[^\w]+", " ", text.casefold()).strip()
 
 
+def total_ram_gb() -> float:
+    """Скільки оперативної пам'яті в комп'ютері (0 — не вдалося дізнатися)."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                    (name, ctypes.c_ulonglong)
+                    for name in ("total", "available", "total_page", "available_page", "total_virtual", "available_virtual", "extended")
+                ]
+
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(MemoryStatus)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))  # type: ignore[attr-defined]
+            return status.total / 2**30
+        if sys.platform == "darwin":
+            return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout) / 2**30
+        with open("/proc/meminfo", encoding="ascii") as f:
+            return int(f.readline().split()[1]) / 2**20
+    except (OSError, ValueError, AttributeError):
+        return 0.0
+
+
+def resolve_model(model: str) -> str:
+    """"auto" → модель за потужністю: точна large-v3-turbo там, де вона встигатиме, інакше small.
+
+    Якщо все ж не встигатиме за мовою, вуха самі перейдуть на легшу (див. LIGHTER_MODEL).
+    """
+    if model != "auto":
+        return model
+    strong = (os.cpu_count() or 1) >= 8 and total_ram_gb() >= 12
+    return "large-v3-turbo" if strong else "small"
+
+
 class WhisperTranscriber:
     """Whisper (faster-whisper, локально на процесорі). Для кожного шматка повертає ще й упевненість.
 
@@ -250,7 +285,7 @@ class WhisperTranscriber:
         self.language = language
         self.hints = hints
         self._hotwords = True
-        self._load(model)
+        self._load(resolve_model(model))
 
     def _load(self, model: str) -> None:
         log.info("Завантажую модель розпізнавання мови %r (перший раз — кілька хвилин)...", model)
@@ -464,6 +499,14 @@ def _sounddevice():
     return sounddevice
 
 
+CABLE_RE = re.compile(r"cable output|blackhole|vb-audio", re.I)
+
+
+def find_cable() -> str:
+    """Встановлений віртуальний кабель (VB-Cable, BlackHole) — щоб не вибирати його вручну."""
+    return next((name for name in list_input_devices() if CABLE_RE.search(name)), "")
+
+
 def list_input_devices() -> list[str]:
     """Назви пристроїв запису — для вибору віртуального кабелю у вікні програми."""
     try:
@@ -546,12 +589,18 @@ class Ears:
 
     def __init__(
         self,
-        transcribe: Callable[[bytes], list[Heard]],
+        transcribe: Callable[[bytes], list[Heard]] | None,
         on_text: Callable[[str, bool], None],
         source: str | AudioStream,
         on_audio: Callable[[bytes], None] | None = None,
+        load: Callable[[], Callable[[bytes], list[Heard]]] | None = None,
+        on_ready: Callable[[], None] | None = None,
     ):
+        # Модель можна передати готову (transcribe) або завантажити у фоні (load): перший раз це
+        # кілька хвилин завантаження, і програма тим часом уже працює.
         self.transcribe = transcribe
+        self.load = load
+        self.on_ready = on_ready
         self.on_text = on_text
         self.source = source
         self.on_audio = on_audio  # сирий звук — для відеовирізок
@@ -573,6 +622,20 @@ class Ears:
         return PulseStream(self.source) if isinstance(self.source, str) else self.source
 
     def _run(self) -> None:
+        while self.transcribe is None and not self._stop.is_set():
+            try:
+                self.transcribe = self.load()
+                log.info("Вуха готові (модель %s)", getattr(self.transcribe, "name", "?"))
+            except EarsError as e:
+                log.warning("Вуха вимкнено: %s", e)
+                return
+            except Exception as e:  # noqa: BLE001 — модель не завантажилась (ще немає інтернету тощо)
+                log.warning("Вуха: не вдалося завантажити модель розпізнавання (%s) — спробую ще раз за 10 хв", e)
+                self._stop.wait(600)
+        if self._stop.is_set():
+            return
+        if self.on_ready:
+            self.on_ready()
         chunk_bytes = RATE * 2 * CHUNK_SECONDS
         while not self._stop.is_set():
             self._stream = self._record()
@@ -648,10 +711,13 @@ def decode_file(path: Path, seconds: float) -> bytes:
     """Перші ``seconds`` секунд звуку з будь-якого аудіо- чи відеофайла (через ffmpeg) — для listen-test."""
     if not path.is_file():
         raise EarsError(f"файл {path} не знайдено")
-    if shutil.which("ffmpeg") is None:
+    from .media import ffmpeg_path
+
+    ffmpeg = ffmpeg_path()
+    if ffmpeg is None:
         raise EarsError("щоб читати файли, потрібен ffmpeg")
     result = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(path), "-t", str(seconds), "-f", "s16le", "-ac", "1", "-ar", str(RATE), "-"],
+        [ffmpeg, "-v", "error", "-i", str(path), "-t", str(seconds), "-f", "s16le", "-ac", "1", "-ar", str(RATE), "-"],
         capture_output=True,
     )
     if result.returncode != 0:

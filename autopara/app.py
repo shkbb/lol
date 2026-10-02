@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from zoneinfo import ZoneInfo
 from . import autostart
 from .checks import find_chrome, run_checks
 from .config import UNIVERSITIES, Config, ConfigError, config_to_dict, parse_config, save_config, user_config_dir
+from .ears import whisper_available
 from .links import platform_of, resolve
 from .planner import Visit
 from .rozklad import Lesson, RozkladError
@@ -142,7 +144,7 @@ class Controller:
         info = stack.enter_context(assistant_stack(self.config, self.clock))
         joiner = Joiner(
             self.config.join, self.config.profile_dir, audio_sink=info.audio_sink, frames=info.frames,
-            audio_tap=info.audio_tap,
+            audio_tap=info.audio_tap, zoom_app_heard=info.zoom_app_heard,
         )
         runner = Runner(
             self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant,
@@ -249,6 +251,17 @@ class Controller:
         runner.next_refresh = None
         self._next_tick = None
         return "applied"
+
+    def _do_restart(self) -> str:
+        """Перезапустити помічника (наприклад, щойно встановили розпізнавання мови), не рвучи пару."""
+        if self.runner is None:
+            return "saved"
+        if self.runner.active:
+            self._restart_pending = True
+            return "after_lesson"
+        self._do_stop()
+        self._do_start()
+        return "restarted"
 
     def _do_test_join(self, url: str, minutes: int) -> str:
         if self.runner is None:
@@ -378,6 +391,17 @@ class AppServer(ThreadingHTTPServer):
         self.logs = logs or LogBuffer()
         self.sources: dict[str, object] = {}  # кеш клієнтів розкладу для пошуку груп
         self.targets: dict[tuple, object] = {}  # уже знайдені групи — щоб гортати тижні без зайвих запитів
+        self.autostart = autostart
+
+    def autostart_once(self) -> bool:
+        """Щойно налаштували вперше — вмикаємо запуск разом із комп'ютером (вимкнути можна у «Поведінці»)."""
+        try:
+            state = self.autostart.status()
+            if state["supported"] and not state["enabled"]:
+                return bool(self.autostart.set_enabled(True)["enabled"])
+        except OSError as e:
+            log.warning("Не вдалося ввімкнути автозапуск: %s", e)
+        return False
 
     @property
     def port(self) -> int:
@@ -488,15 +512,17 @@ def api_get_config(server: AppServer, query: dict, body: dict):
         "path": str(controller.config_path),
         "profiles": list_profiles(),
         "platform": sys.platform,
-        "autostart": autostart.status(),
+        "autostart": server.autostart.status(),
+        "ears_installed": whisper_available() is None,
     }
 
 
 def api_put_config(server: AppServer, query: dict, body: dict):
     config = parse_config(body.get("config") or {})
+    first_time = not configured(server.controller.config) and configured(config)
     save_config(config, server.controller.config_path)
     result = server.controller.call("reload", config)
-    return 200, {"ok": True, "result": result, "config": config_to_dict(config)}
+    return 200, {"ok": True, "result": result, "config": config_to_dict(config), "autostart": first_time and server.autostart_once()}
 
 
 def api_import(server: AppServer, query: dict, body: dict):
@@ -513,9 +539,10 @@ def api_import(server: AppServer, query: dict, body: dict):
     controller = server.controller
     if controller.config.telegram.token and not config.telegram.token:
         config.telegram = controller.config.telegram  # не губимо вже налаштований бот
+    first_time = not configured(controller.config) and configured(config)
     save_config(config, controller.config_path)
     result = controller.call("reload", config)
-    return 200, {"ok": True, "result": result, "config": config_to_dict(config)}
+    return 200, {"ok": True, "result": result, "config": config_to_dict(config), "autostart": first_time and server.autostart_once()}
 
 
 def api_groups(server: AppServer, query: dict, body: dict):
@@ -639,9 +666,23 @@ def api_audio_devices(server: AppServer, query: dict, body: dict):
     return 200, {"devices": list_input_devices()}
 
 
+def api_install_ears(server: AppServer, query: dict, body: dict):
+    """Доставити розпізнавання мови в те саме середовище Python, де працює програма, і перезапустити вуха."""
+    packages = ["faster-whisper>=1.0"] + ([] if sys.platform.startswith("linux") else ["sounddevice>=0.4"])
+    log.info("Встановлюю розпізнавання мови (%s) — 1–3 хвилини...", ", ".join(packages))
+    result = subprocess.run([sys.executable, "-m", "pip", "install", *packages], capture_output=True, text=True)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout).strip().splitlines()[-3:]
+        log.error("Не вдалося встановити розпізнавання мови: %s", " / ".join(tail))
+        return 500, {"error": "не вдалося встановити: " + " ".join(tail)[-300:]}
+    importlib.invalidate_caches()
+    log.info("Розпізнавання мови встановлено")
+    return 200, {"ok": True, "result": server.controller.call("restart", timeout=300)}
+
+
 def api_autostart(server: AppServer, query: dict, body: dict):
     try:
-        return 200, autostart.set_enabled(bool(body.get("enabled")))
+        return 200, server.autostart.set_enabled(bool(body.get("enabled")))
     except OSError as e:
         return 400, {"error": f"не вдалося змінити автозапуск: {e}"}
 
@@ -670,6 +711,7 @@ ROUTES = {
     ("GET", "/api/log"): api_log,
     ("POST", "/api/autostart"): api_autostart,
     ("GET", "/api/audio-devices"): api_audio_devices,
+    ("POST", "/api/install-ears"): api_install_ears,
 }
 
 

@@ -1,3 +1,7 @@
 # Особисті профілі не потрапляють в архіви (git archive, «Download ZIP» на GitHub),
 # якими зручно ділитися з друзями.
 /profiles export-ignore
+
+# Windows-скрипти встановлення — з віндовими кінцями рядків, як є.
+*.bat -text
+*.ps1 -text

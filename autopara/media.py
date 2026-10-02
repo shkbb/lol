@@ -79,15 +79,27 @@ def _offset(seconds: float) -> int:
     return position - position % 2
 
 
+def ffmpeg_path() -> str | None:
+    """ffmpeg з системи, а якщо його немає — той, що йде разом з програмою (imageio-ffmpeg)."""
+    if found := shutil.which("ffmpeg"):
+        return found
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ImportError, RuntimeError, OSError):
+        return None
+
+
 def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return ffmpeg_path() is not None
 
 
 def build_clip(frames: list[tuple[float, bytes]], pcm: bytes, start: float, end: float, folder: Path) -> Path | None:
     """MP4 з кадрів і звуку (або OGG-голосове, якщо кадрів немає). None — якщо нема з чого або нема ffmpeg."""
     if not ffmpeg_available() or (not frames and not pcm):
         return None
-    command = ["ffmpeg", "-y", "-loglevel", "error"]
+    command = [ffmpeg_path(), "-y", "-loglevel", "error"]
     if frames:
         # Кадри приходять нерівно — розкладаємо їх у рівну сітку FPS, дублюючи, де треба.
         index = 0
@@ -134,7 +146,7 @@ class Clipper:
         self.before = before
         self.after = after
         if not ffmpeg_available():
-            log.warning("Немає ffmpeg — замість відеовирізок надсилатиму кадр і цитату (sudo pacman -S ffmpeg)")
+            log.warning("Немає ffmpeg — замість відеовирізок надсилатиму кадр і цитату (перевстанови autopara)")
 
     def capture(self, key: str, headline: str, when: datetime) -> None:
         threading.Thread(target=self._make, args=(key, headline, when, monotonic()), daemon=True).start()

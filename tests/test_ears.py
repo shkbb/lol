@@ -314,3 +314,46 @@ def test_missing_cable_is_reported_not_fatal(monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, "sounddevice", fake)
     ears.DeviceAppCapture(ears.AudioQueue(), "CABLE Output").start()
     assert "не знайдено" in caplog.text
+
+
+def test_model_is_picked_by_computer_power(monkeypatch):
+    monkeypatch.setattr(ears.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(ears, "total_ram_gb", lambda: 16)
+    assert ears.resolve_model("auto") == "large-v3-turbo"
+    monkeypatch.setattr(ears, "total_ram_gb", lambda: 8)
+    assert ears.resolve_model("auto") == "small"
+    assert ears.resolve_model("medium") == "medium"
+    assert ears.total_ram_gb.__module__  # справжня функція теж працює на цій ОС
+    monkeypatch.undo()
+    assert ears.total_ram_gb() > 0
+
+
+def test_model_download_is_retried_until_it_works(monkeypatch):
+    """Ноут увімкнули ще без інтернету — модель не завантажилась; вуха спробують ще раз, а не здадуться."""
+    tries = []
+
+    def load():
+        tries.append(1)
+        if len(tries) == 1:
+            raise OSError("немає мережі")
+        return lambda chunk: []
+
+    ready = []
+    listener = Ears(None, lambda text, confident: None, ears.AudioQueue(), load=load)
+    listener.on_ready = lambda: (ready.append(True), listener._stop.set())  # готово — далі не слухаємо
+    monkeypatch.setattr(listener._stop, "wait", lambda seconds: None)
+    listener._run()
+    assert len(tries) == 2 and ready == [True]
+
+
+def test_cable_is_found_without_asking(monkeypatch):
+    devices = [
+        {"name": "Microphone Array", "max_input_channels": 2},
+        {"name": "BlackHole 2ch", "max_input_channels": 2},
+    ]
+    fake = types.ModuleType("sounddevice")
+    fake.query_devices = lambda index=None: devices
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    assert ears.find_cable() == "BlackHole 2ch"
+    devices.pop()
+    assert ears.find_cable() == ""

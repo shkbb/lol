@@ -66,7 +66,7 @@ def test_voice_when_no_frames(tmp_path):
 
 
 def test_frame_and_quote_without_ffmpeg(monkeypatch):
-    monkeypatch.setattr(media.shutil, "which", lambda name: None)
+    monkeypatch.setattr(media, "ffmpeg_path", lambda: None)
     sent = []
 
     class Media:

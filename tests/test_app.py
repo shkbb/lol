@@ -37,6 +37,18 @@ class IdleJoiner(FakeJoiner):
         self.closed = True
 
 
+class FakeAutostart:
+    def __init__(self):
+        self.enabled = False
+
+    def status(self):
+        return {"supported": True, "enabled": self.enabled, "note": ""}
+
+    def set_enabled(self, enabled):
+        self.enabled = enabled
+        return self.status()
+
+
 @pytest.fixture
 def running_app(tmp_path):
     clock = lambda: datetime.fromisoformat("2026-10-05T08:00").replace(tzinfo=TZ)  # noqa: E731
@@ -51,6 +63,7 @@ def running_app(tmp_path):
 
     controller = Controller(config, tmp_path / "config.toml", clock=clock, runner_parts=parts)
     server = AppServer(controller)
+    server.autostart = FakeAutostart()  # не чіпати справжній автозапуск системи
     site = FakeSite()
     site.events = [dict(EVENT, date="05.10.2026", disciplineFullName="Бази даних", info="")]
     server.sources["duikt"] = RozkladClient(session=site)
@@ -122,7 +135,9 @@ def test_saving_respects_the_off_switch(running_app):
     config["schedule"] = {}
     assert call(server, "PUT", "/api/config", {"config": config})[1]["result"] == "saved"  # групи ще немає
     config["schedule"] = {"group": "ТЦР-32"}
-    assert call(server, "PUT", "/api/config", {"config": config})[1]["result"] == "started"
+    saved = call(server, "PUT", "/api/config", {"config": config})[1]
+    assert saved["result"] == "started"
+    assert saved["autostart"] is True and server.autostart.enabled  # уперше налаштували — автозапуск сам
     assert call(server, "POST", "/api/stop")[1]["result"] == "stopped"
     config["join"]["minutes_before"] = 4
     assert call(server, "PUT", "/api/config", {"config": config})[1]["result"] == "saved"  # вимкнули кнопкою — не вмикаємо

@@ -131,6 +131,10 @@ async function save() {
       started: "Збережено — автоматичний вхід на пари увімкнено",
     };
     toast(messages[result.result] || "Збережено");
+    if (result.autostart) {
+      meta.autostart = { ...(meta.autostart || {}), enabled: true };
+      setTimeout(() => toast("Програма тепер запускатиметься разом із комп'ютером (вимкнути — «Поведінка»)"), 3600);
+    }
     render();
     refreshState();
   });
@@ -588,8 +592,9 @@ pages.accounts = () => {
     h("div", { class: "card" },
       h("h2", {}, "Zoom"),
       choiceField("join.zoom_mode", [
-        { value: "app", label: "Zoom-клієнт", hint: "Надійніше. Мікрофон і камеру вимикають налаштування самого Zoom (вимкнення при вході)." },
-        { value: "browser", label: "Zoom у браузері", hint: "Експериментально, але працює розумний вихід і помічник." },
+        { value: "auto", label: "Автоматично (рекомендовано)", hint: "Zoom-клієнт, якщо вуха можуть його чути (Linux або віртуальний кабель); інакше Zoom у браузері, а якщо там не пустять — таки клієнт, і це посилання програма запам'ятає." },
+        { value: "app", label: "Завжди Zoom-клієнт", hint: "Мікрофон і камеру вимикають налаштування самого Zoom (вимкнення при вході)." },
+        { value: "browser", label: "Завжди Zoom у браузері", hint: "Працюють розумний вихід і кадри у вирізках; деякі викладачі вхід через браузер вимикають." },
       ]),
       textField("join.display_name", "Ім'я для входу гостем", "Якщо Zoom чи Meet пустять лише як гостя.", { placeholder: "Прізвище Ім'я Група" })),
     h("div", { class: "card" },
@@ -747,10 +752,23 @@ function resourcesCard() {
       "На батареї з вухами й мозком ноутбук сідає помітно швидше — краще бути на зарядці."));
 }
 
+function earsInstallBanner() {
+  const install = h("button", { class: "primary" }, "Встановити розпізнавання мови");
+  install.onclick = () => busy(install, "Встановлюю… (1–3 хв)", async () => {
+    await api("POST", "/api/install-ears");
+    meta.ears_installed = true;
+    render();
+    toast("Готово — вуха запрацюють, щойно завантажиться модель (перший раз кілька хвилин)");
+  });
+  return h("div", { class: "banner warn", style: "display:flex;gap:12px;align-items:center;flex-wrap:wrap" },
+    h("span", { style: "flex:1;min-width:220px" }, "Для вух потрібен ще один пакет (~200 МБ). Програма встановить його сама."), install);
+}
+
 let audioDevices = null;  // пристрої запису (для віртуального кабелю Zoom), завантажуються раз
 
 function zoomEars(linux) {
-  if (get("join.zoom_mode") !== "app") {
+  const mode = get("join.zoom_mode") || "auto";
+  if (mode === "browser") {
     return h("small", { class: "hint" }, "Zoom відкривається в браузері — вуха чують його так само, як Meet.");
   }
   if (linux) {
@@ -766,7 +784,7 @@ function zoomEars(linux) {
   const current = get("ears.app_device") || "";
   const names = [...new Set([...audioDevices, current].filter(Boolean))];
   const select = h("select", { onchange: (event) => set("ears.app_device", event.target.value || undefined) },
-    h("option", { value: "" }, "— не слухати Zoom-клієнт —"),
+    h("option", { value: "" }, "автоматично (знайду встановлений кабель сам)"),
     names.map((name) => h("option", { value: name, selected: name === current }, name)));
   const mac = (meta.platform || "") === "darwin";
   const cable = mac
@@ -774,12 +792,13 @@ function zoomEars(linux) {
     : h("a", { href: "https://vb-audio.com/Cable/", target: "_blank", rel: "noopener" }, "VB-Cable");
   return h("div", { class: "card", style: "background:var(--panel-2);box-shadow:none;margin:6px 0 14px" },
     h("b", {}, "Zoom-клієнт"),
-    h("div", { class: "muted small", style: "margin-bottom:8px" }, "Щоб вуха чули пари в Zoom-клієнті, обери одне:"),
-    h("ol", { class: "small", style: "margin:0 0 8px;padding-left:20px" },
-      h("li", { style: "margin-bottom:6px" }, "Найпростіше — заходити в Zoom через браузер. ",
-        h("button", { class: "soft", onclick: () => { set("join.zoom_mode", "browser"); render(); toast("Збережи зміни"); } }, "Заходити через браузер")),
-      h("li", {}, "Або віртуальний кабель: встанови ", cable, mac ? ", у Zoom → Налаштування → Аудіо → Динамік обери BlackHole," : ", у Zoom → Налаштування → Аудіо → Динамік обери «CABLE Input»,",
-        " а тут — пристрій запису кабелю:", h("div", { style: "margin-top:6px" }, select))),
+    h("div", { class: "muted small", style: "margin-bottom:8px" },
+      mode === "auto"
+        ? "Поки віртуального кабелю немає, Zoom відкриватиметься в браузері — так вуха його чують. Щоб і в Zoom-клієнті:"
+        : "Щоб вуха чули пари в Zoom-клієнті:"),
+    h("div", { class: "small", style: "margin-bottom:8px" }, "встанови ", cable,
+      mac ? ", у Zoom → Налаштування → Аудіо → Динамік обери BlackHole (або Multi-Output з ним)." : ", у Zoom → Налаштування → Аудіо → Динамік обери «CABLE Input».",
+      " Програма знайде кабель сама і заходитиме Zoom-клієнтом.", h("div", { style: "margin-top:6px" }, select)),
     h("small", { class: "hint" }, "Так вуха чують лише Zoom, а не YouTube чи музику. Як при цьому чути пару й самому — README, розділ «Вуха»."));
 }
 
@@ -818,8 +837,9 @@ pages.assistant = () => {
       h("h2", {}, "Вуха й мозок"),
       checkField("ears.enabled", "Слухати пару",
         "Розпізнає мову локально, без інтернету: кличуть тебе, перекличка голосом, розшифровка для звіту. Потрібен пакет autopara[ears]."),
-      selectField("ears.model", "Модель розпізнавання", "large-v3-turbo — точніша для української; якщо комп'ютер не встигатиме, програма сама перейде на small.",
-        [["small", "small — швидка"], ["medium", "medium"], ["large-v3-turbo", "large-v3-turbo — точна"]]),
+      get("ears.enabled") && !meta.ears_installed && earsInstallBanner(),
+      selectField("ears.model", "Модель розпізнавання", "Якщо комп'ютер не встигатиме за мовою, програма сама перейде на легшу модель.",
+        [["auto", "автоматично за потужністю комп'ютера"], ["small", "small — швидка"], ["medium", "medium"], ["large-v3-turbo", "large-v3-turbo — точна"]]),
       linux && selectField("ears.source", "Пари в браузері: звідки брати звук", "Зі вкладки пари — вуха чують лише пару, навіть із вимкненим звуком. Весь звук браузера — запасний шлях: чує й інші вкладки браузера програми.",
         [["auto", "зі вкладки пари (рекомендовано)"], ["pulse", "весь звук браузера програми (PipeWire/PulseAudio)"]]),
       get("ears.enabled") && zoomEars(linux),

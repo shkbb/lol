@@ -36,8 +36,9 @@ max_overtime_minutes = 20 # але не довше, ніж стільки хви
 # (або smart_leave = false).
 leave_after_minutes = 0
 
-# "app" — відкривати Zoom-клієнт (надійніше), "browser" — веб-версія Zoom у браузері (експериментально).
-zoom_mode = "app"
+# "auto" — Zoom-клієнт, якщо вуха можуть його чути (Linux, віртуальний кабель), інакше Zoom у браузері,
+# а якщо там не пустять — клієнт; "app" — завжди клієнт; "browser" — завжди браузер.
+zoom_mode = "auto"
 
 # Ім'я для входу гостем (Zoom у браузері, або Meet без логіну).
 display_name = ""
@@ -74,14 +75,14 @@ joins = true              # повідомляти, коли зайшов чи �
 desktop = true            # дублювати сповіщення на робочий стіл (Linux)
 
 [ears]                    # слухати пару (локальне розпізнавання мови, будь-яка ОС)
-enabled = false
-model = "small"           # small — швидко, але плутає прізвища; large-v3-turbo — значно точніше (autopara listen-test)
+enabled = true
+model = "auto"            # auto — за потужністю комп'ютера; або small (швидко) / large-v3-turbo (точніше, autopara listen-test)
 language = "uk"
 source = "auto"           # пари в браузері: "auto" — звук лише з вкладки пари; "pulse" — увесь звук браузера програми (Linux)
 app_device = ""           # Zoom-клієнт на Windows/macOS: віртуальний кабель, напр. "CABLE Output" чи "BlackHole" (README → «Вуха»)
 
 [brain]                   # локальна мовна модель через Ollama
-enabled = false
+enabled = true            # працює, щойно встановлена Ollama; модель програма завантажить сама
 model = "gemma3:4b"
 url = "http://127.0.0.1:11434"
 

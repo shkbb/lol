@@ -60,7 +60,9 @@ class JoinSettings:
     smart_leave: bool = True
     max_overtime_minutes: int = 20
     leave_after_minutes: int = 0
-    zoom_mode: str = "app"
+    # "auto" — Zoom-клієнт, якщо вуха можуть його чути (Linux, віртуальний кабель), інакше Zoom у браузері,
+    # а якщо там не пустять — таки клієнт; "app" — завжди клієнт; "browser" — завжди браузер.
+    zoom_mode: str = "auto"
     display_name: str = ""
     meet_account: str = ""
     browser_channel: str = "chrome"
@@ -95,8 +97,8 @@ class TelegramSettings:
 
 @dataclass
 class EarsSettings:
-    enabled: bool = False
-    model: str = "small"
+    enabled: bool = True
+    model: str = "auto"  # "auto" — за потужністю комп'ютера: large-v3-turbo на потужному, інакше small
     language: str = "uk"
     # Пари в браузері: "auto"/"browser" — звук лише з вкладки пари (будь-яка ОС); "pulse" — увесь звук
     # браузера програми через PipeWire/PulseAudio (Linux, запасний шлях).
@@ -108,7 +110,7 @@ class EarsSettings:
 
 @dataclass
 class BrainSettings:
-    enabled: bool = False
+    enabled: bool = True  # працює, щойно встановлена Ollama; модель програма завантажить сама
     model: str = "gemma3:4b"
     url: str = "http://127.0.0.1:11434"
 
@@ -158,8 +160,8 @@ def parse_config(data: dict) -> Config:
     if schedule.university not in UNIVERSITIES:
         raise ConfigError(f"[schedule] university має бути одним з: {', '.join(UNIVERSITIES)}")
     join = _build(JoinSettings, data.get("join", {}), "join")
-    if join.zoom_mode not in ("app", "browser"):
-        raise ConfigError('[join] zoom_mode має бути "app" або "browser"')
+    if join.zoom_mode not in ("auto", "app", "browser"):
+        raise ConfigError('[join] zoom_mode має бути "auto", "app" або "browser"')
     if min(join.minutes_before, join.leave_after_minutes, join.max_overtime_minutes) < 0:
         raise ConfigError("[join] хвилини не можуть бути від'ємними")
 

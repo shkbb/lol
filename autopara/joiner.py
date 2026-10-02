@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import re
@@ -553,9 +554,14 @@ class Joiner:
         audio_sink: str = "",
         frames=None,
         audio_tap: Callable[[str], None] | None = None,
+        zoom_app_heard: bool = True,
     ):
         self.settings = settings
         self.frames = frames  # FrameBuffer для відеовирізок, або None
+        # zoom_mode = "auto": клієнт, якщо вуха його чують; інакше браузер. Посилання, де браузер
+        # не пустив, запам'ятовуємо — туди надалі одразу клієнтом.
+        self.zoom_app_heard = zoom_app_heard
+        self._app_links_file = profile_dir.parent / "zoom-app-links.json"
         self.browser = Browser(
             profile_dir, settings.browser_channel, settings.mute_sound, headless, settings.browser_path, audio_sink,
             audio_tap,
@@ -563,27 +569,54 @@ class Joiner:
         self._open_uri = opener
 
     def join(self, visit: Visit) -> Session:
-        if visit.platform == "zoom" and self.settings.zoom_mode == "app":
-            self._open_uri(zoom_app_url(visit.url) or visit.url)
-            return Session(visit, visit.leave_at)
+        if visit.platform == "zoom" and self._zoom_in_app(visit.url):
+            return self._open_zoom_app(visit)
         page = self.browser.new_page()
         try:
-            if visit.platform == "meet":
-                join_meet(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
-            elif visit.platform == "zoom":
-                join_zoom_web(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
-            else:
-                page.goto(visit.url, wait_until="domcontentloaded")
-                log.warning("%s — не Meet і не Zoom: сторінку відкрито, мікрофон перевір сам", visit.url)
-        except JoinError:
+            try:
+                if visit.platform == "meet":
+                    join_meet(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
+                elif visit.platform == "zoom":
+                    join_zoom_web(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
+                else:
+                    page.goto(visit.url, wait_until="domcontentloaded")
+                    log.warning("%s — не Meet і не Zoom: сторінку відкрито, мікрофон перевір сам", visit.url)
+            except PlaywrightError as e:
+                raise JoinError(f"помилка браузера: {str(e).splitlines()[0]}") from e
+        except JoinError as e:
             self._discard(page)
+            if visit.platform == "zoom" and self.settings.zoom_mode == "auto":
+                # На пару важливіше потрапити: якщо браузер не пустив — Zoom-клієнт.
+                log.warning("Zoom у браузері не пустив (%s) — відкриваю Zoom-клієнт", e)
+                if not e.retry:
+                    self._remember_app_link(visit.url)
+                return self._open_zoom_app(visit)
             raise
-        except PlaywrightError as e:
-            self._discard(page)
-            raise JoinError(f"помилка браузера: {str(e).splitlines()[0]}") from e
         self._screencast(page)
         self._enable_ears(page)
         return Session(visit, visit.leave_at, page)
+
+    def _open_zoom_app(self, visit: Visit) -> Session:
+        self._open_uri(zoom_app_url(visit.url) or visit.url)
+        return Session(visit, visit.leave_at)
+
+    def _zoom_in_app(self, url: str) -> bool:
+        if self.settings.zoom_mode != "auto":
+            return self.settings.zoom_mode == "app"
+        return self.zoom_app_heard or url in self._app_links()
+
+    def _app_links(self) -> list[str]:
+        try:
+            return json.loads(self._app_links_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+
+    def _remember_app_link(self, url: str) -> None:
+        links = self._app_links()
+        if url not in links:
+            self._app_links_file.parent.mkdir(parents=True, exist_ok=True)
+            self._app_links_file.write_text(json.dumps(links + [url], ensure_ascii=False), encoding="utf-8")
+            log.info("Запам'ятав: на %s надалі заходжу Zoom-клієнтом", url)
 
     def _enable_ears(self, page: Page) -> None:
         """Вуха слухають лише вкладку пари, куди зайшла програма, — не YouTube чи інші вкладки."""

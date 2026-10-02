@@ -130,11 +130,76 @@ class OllamaBrain:
         try:
             tags = self.session.get(f"{self.url}/api/tags", timeout=5).json()
         except (requests.RequestException, ValueError):
-            return f"Ollama не відповідає на {self.url} — запусти: sudo systemctl enable --now ollama"
+            return "Ollama не встановлена чи не запущена — ollama.com/download (на Arch: sudo pacman -S ollama)"
         names = {model.get("name") for model in tags.get("models", [])}
         if self.model not in names and f"{self.model}:latest" not in names:
-            return f"модель {self.model} не завантажена — виконай: ollama pull {self.model}"
+            return f"модель {self.model} ще не завантажена — програма завантажить її сама під час запуску"
         return None
+
+    def reachable(self) -> bool:
+        try:
+            return self.session.get(f"{self.url}/api/tags", timeout=5).ok
+        except requests.RequestException:
+            return False
+
+    def pull(self) -> bool:
+        """Завантажити модель через саму Ollama (кілька гігабайтів), показуючи поступ у лозі."""
+        log.info("Мозок: завантажую модель %s (перший раз — кілька ГБ, це може тривати)...", self.model)
+        shown = -1
+        try:
+            with self.session.post(
+                f"{self.url}/api/pull", json={"model": self.model, "stream": True}, stream=True, timeout=(10, 600)
+            ) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    status = json.loads(line)
+                    if status.get("error"):
+                        raise BrainError(status["error"])
+                    total, done = status.get("total") or 0, status.get("completed") or 0
+                    if total and (percent := int(done * 100 / total) // 10 * 10) != shown:
+                        shown = percent
+                        log.info("Мозок: модель %s — %d%%", self.model, percent)
+                    if status.get("status") == "success":
+                        return True
+        except (requests.RequestException, ValueError, BrainError) as e:
+            log.warning("Мозок: не вдалося завантажити модель %s (%s) — працюю без нього", self.model, e)
+            return False
+        return self.check() is None
+
+
+class BrainConnector:
+    """Підключає мозок, щойно він готовий: Ollama запущена й модель є (немає — завантажує сама).
+
+    Перевіряє у фоні й повторює раз на кілька хвилин: Ollama могла ще не встигнути запуститися після
+    входу в систему, або її встановили вже тоді, коли програма працювала. До того працюють рефлекси.
+    """
+
+    def __init__(self, brain: OllamaBrain, on_ready: Callable[[], None], retry_seconds: float = 300):
+        self.brain = brain
+        self.on_ready = on_ready
+        self.retry_seconds = retry_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="brain-connect", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        told = False
+        while not self._stop.is_set():
+            if self.brain.check() is None or (self.brain.reachable() and self.brain.pull()):
+                if not self._stop.is_set():
+                    self.on_ready()
+                return
+            if not told and not self.brain.reachable():
+                told = True
+                log.info("Мозок: Ollama не знайдена — працюю без нього, а щойно вона з'явиться, підключу сам")
+            self._stop.wait(self.retry_seconds)
 
 
 class BrainWorker:

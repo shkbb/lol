@@ -153,7 +153,8 @@ def cmd_join(args, config: Config) -> None:
     logging.getLogger("autopara.ears").setLevel(logging.DEBUG)  # показувати розпізнану мову
     with assistant_stack(config, clock) as stack:
         joiner = Joiner(
-            config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames, audio_tap=stack.audio_tap
+            config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames, audio_tap=stack.audio_tap,
+            zoom_app_heard=stack.zoom_app_heard,
         )
         runner = Runner(config, _client(config), joiner, clock=clock, assistant=stack.assistant, app_audio=stack.app_audio)
         runner.plan = Plan(visits=[visit])
