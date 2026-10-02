@@ -53,7 +53,9 @@ def test_plus_burst_is_mirrored_once():
     chat(assistant, "10:00", ("Петренко П.П.", "Поставте + хто є"), ("Іван Коваль", "+"), ("Олена Бойко", "+"))
     assert assistant.take_actions() == []  # лише двоє — ще не «група»
     chat(assistant, "10:01", ("Марко Лис", "++"))
-    assert assistant.take_actions() == [Action("chat", KEY, "+", "Група ставить «+» у чат — це перекличка")]
+    assert assistant.take_actions() == [
+        Action("chat", KEY, "+", "Група ставить «+» у чат — це перекличка: «💬 Петренко П.П.: Поставте + хто є»")
+    ]
     chat(assistant, "10:02", ("Ще Хтось", "+"))
     assert assistant.take_actions() == []
 
@@ -142,15 +144,18 @@ def test_attention_wakes_brain_instead():
     assert woken == [KEY] and inbox.messages == []
 
 
-def test_brain_decisions_are_constrained():
+def test_brain_alone_never_acts_in_the_meeting():
+    # Мозок спирається лише на розпізнану мову: «плюс» з лекції про C++ не має нічого запускати.
     assistant, inbox, _ = make()
-    assistant.apply_decision(KEY, Decision("chat_plus", reason="викладач просить +"), at("10:00"))
-    assert [a.text for a in assistant.take_actions()] == ["+"]
-    assistant.apply_decision(KEY, Decision("leave", reason="попрощались"), at("09:50"))
-    assert assistant.take_actions() == [] and "пара ще в розпалі" in inbox.text()
-    assistant.apply_decision(KEY, Decision("leave", reason="попрощались"), at("10:30"))
-    assert [a.kind for a in assistant.take_actions()] == ["leave"]
-    assistant.apply_decision(KEY, Decision("notify", message="Викладач просить увімкнути камери"), at("10:31"))
+    assistant.on_heard("Ця мова має плюси й мінуси, наприклад C плюс плюс.", at("10:00"))
+    assistant.apply_decision(KEY, Decision("chat_plus", reason="викладач сказав «плюс»"), at("10:00:30"))
+    assert assistant.take_actions() == []
+    assert "Відмічусь, щойно в чаті відмітяться інші" in inbox.text()
+    assistant.tick(at("10:10"))
+    assert assistant.take_actions() == []  # група не підтвердила — нічого не пишемо
+    assistant.apply_decision(KEY, Decision("leave", reason="почулось «на сьогодні все»"), at("10:40"))
+    assert assistant.take_actions() == [] and "Напиши «вийди»" in inbox.text()
+    assistant.apply_decision(KEY, Decision("notify", message="Викладач просить увімкнути камери"), at("10:41"))
     assert "увімкнути камери" in inbox.text()
 
 
@@ -191,11 +196,48 @@ def test_plus_for_a_project_is_never_automatic():
     assert assistant.on_command("так", at("10:01")) == "Пишу «+»."  # але ти можеш погодитись
 
 
-def test_roll_call_heard_in_speech():
+def test_roll_call_said_clearly_in_one_sentence():
     assistant, _, _ = make()
-    assistant.on_heard("Так, давайте перевіримо, хто на парі. Поставте плюс у чат.", at("09:59:30"))
+    assistant.on_heard("Поставте плюс у чат, хто на парі.", at("09:59:30"))
     plus_wave(assistant)
     assert [a.text for a in assistant.take_actions()] == ["+"]
+
+
+def test_neighbour_sentence_can_not_approve():
+    # «Хто на парі» і «плюс» у різних реченнях — Whisper міг їх склеїти з чогось іншого. Питаємо.
+    assistant, inbox, _ = make()
+    assistant.on_heard("Так, давайте перевіримо, хто на парі. Поставте плюс у чат.", at("09:59:30"))
+    plus_wave(assistant)
+    assert assistant.take_actions() == [] and "так / ні" in inbox.text()
+
+
+def test_unconfident_speech_can_not_approve():
+    assistant, inbox, _ = make()
+    assistant.on_heard("Поставте плюс у чат, хто на парі.", at("09:59:30"), confident=False)
+    plus_wave(assistant)
+    assert assistant.take_actions() == [] and "так / ні" in inbox.text()
+
+
+def test_unconfident_speech_still_vetoes():
+    assistant, inbox, _ = make()
+    chat(assistant, "09:59", ("Петренко П.П.", "Перекличка, ставте +"))
+    assistant.on_heard("Хто хоче проєкт? Ставте плюс.", at("09:59:40"), confident=False)
+    plus_wave(assistant)
+    assert assistant.take_actions() == [] and "не перекличка" in inbox.text()
+
+
+def test_previous_sentence_signup_vetoes():
+    assistant, inbox, _ = make()
+    assistant.on_heard("Хто хоче взяти додатковий проєкт? Ставте плюс у чат.", at("09:59:30"))
+    plus_wave(assistant)
+    assert assistant.take_actions() == [] and "не перекличка" in inbox.text()
+
+
+def test_unconfident_speech_is_marked_for_the_brain_and_the_report():
+    assistant, _, _ = make()
+    assistant.on_heard("щось нерозбірливе", at("10:00"), confident=False)
+    assert "[?] щось нерозбірливе" in assistant.snapshot(KEY, at("10:00"))
+    assert assistant.meetings[KEY].transcript[-1][1] == "[?] щось нерозбірливе"
 
 
 def test_signup_heard_in_speech_wins_over_lecture_topic():
@@ -235,18 +277,19 @@ def test_brain_saying_its_a_vote_turns_into_a_question():
     assert "Голосують за перенесення пари" in inbox.text() and "так / ні" in inbox.text()
 
 
-def test_brain_too_slow_turns_into_a_question():
+def test_brain_too_slow_falls_back_to_the_same_rules():
     assistant, inbox, _ = make(brain=True)
     plus_wave(assistant)
     assistant.tick(at("10:02"))
-    assert "Мозок не встиг" in inbox.text()
+    assert "мозок не встиг" in inbox.text() and "так / ні" in inbox.text()  # вуха вимкнені — лише питаємо
 
 
 def test_brain_plus_is_guarded_against_signups():
     assistant, inbox, _ = make(brain=True)
     assistant.on_heard("Хто бажає поїхати на конференцію — плюс у чат.", at("10:00"))
     assistant.apply_decision(KEY, Decision("chat_plus", reason="просять плюс"), at("10:00:20"))
-    assert assistant.take_actions() == [] and "так / ні" in inbox.text()
+    chat(assistant, "10:01", ("Іван Коваль", "+"), ("Олена Бойко", "+"))
+    assert assistant.take_actions() == [] and "не перекличка" in inbox.text()
 
 
 # --- Telegram: чат, екран, відповіді --------------------------------------
@@ -279,3 +322,81 @@ def test_screenshot_command():
     assistant, _, _ = make()
     assert assistant.on_command("екран", at("10:00")) == "Роблю скріншот..."
     assert assistant.take_actions() == [Action("screenshot", KEY)]
+
+
+
+# --- Автономність: діємо, коли незалежні сигнали згодні ----------------------
+
+
+def listening(chat_reply="auto"):
+    assistant, inbox, woken = make(chat_reply)
+    assistant.ears_on = True
+    assistant.on_heard("Отже, сьогодні розбираємо нормалізацію таблиць.", at("09:58"))
+    return assistant, inbox
+
+
+def test_brain_and_group_together_act_without_asking():
+    assistant, inbox, _ = make(brain=True)
+    assistant.apply_decision(KEY, Decision("chat_plus", reason="викладач просить відмітитись"), at("10:00"))
+    chat(assistant, "10:01", ("Іван Коваль", "+"), ("Олена Бойко", "+"))  # досить двох
+    assert [a.text for a in assistant.take_actions()] == ["+"]
+
+
+def test_unclear_wave_with_clean_hearing_acts_after_veto_window():
+    assistant, inbox = listening()
+    plus_wave(assistant)
+    assert assistant.take_actions() == []
+    assert "Напишу «+» за 45 с, якщо не відповіси «ні»" in inbox.text()
+    assistant.tick(at("10:00:30"))
+    assert assistant.take_actions() == []
+    assistant.tick(at("10:00:50"))
+    [action] = assistant.take_actions()
+    assert action.text == "+" and action.reason.endswith("ти не заперечив")
+
+
+def test_you_can_veto_in_time():
+    assistant, inbox = listening()
+    plus_wave(assistant)
+    assert assistant.on_command("ні", at("10:00:20")) == "Добре, не пишу."
+    assistant.tick(at("10:01"))
+    assert assistant.take_actions() == []
+
+
+def test_unclear_wave_with_garbled_hearing_only_asks():
+    assistant, inbox = listening()
+    assistant.on_heard("хто хо про ект", at("09:59:40"), confident=False)  # могли сказати що завгодно
+    plus_wave(assistant)
+    assistant.tick(at("10:02"))
+    assert assistant.take_actions() == [] and "Не зрозумів, навіщо" in inbox.text()
+
+
+def test_unclear_wave_without_ears_only_asks():
+    assistant, inbox, _ = make()
+    plus_wave(assistant)
+    assistant.tick(at("10:02"))
+    assert assistant.take_actions() == []
+
+
+def test_ask_mode_never_acts_on_its_own():
+    assistant, inbox = listening(chat_reply="ask")
+    plus_wave(assistant)
+    assistant.tick(at("10:06"))
+    assert assistant.take_actions() == [] and "Не дочекався відповіді" in inbox.text()
+
+
+def test_voice_roll_call_by_surnames():
+    assistant, inbox = listening()
+    assistant.set_classmates(["Бойко Олена", "Коваль Іван", "Лис Марко", "Ткач Ліна", "Ляшко Денис"])
+    for t, name in [("10:00:10", "Бойко."), ("10:00:20", "Коваль. Є."), ("10:00:30", "Лис."), ("10:00:40", "Ткач.")]:
+        assistant.on_heard(name, at(t))
+    assert assistant.take_actions() == []
+    assistant.on_heard("Ляшко.", at("10:00:50"))
+    [action] = assistant.take_actions()
+    assert action.text == "Присутній" and "читає список групи" in action.reason
+
+
+def test_single_mention_is_not_a_roll_call():
+    assistant, inbox = listening()
+    assistant.set_classmates(["Бойко Олена", "Коваль Іван", "Лис Марко"])
+    assistant.on_heard("Ляшко, як ви думаєте?", at("10:00"))
+    assert assistant.take_actions() == [] and "Тебе кличуть" in inbox.text()

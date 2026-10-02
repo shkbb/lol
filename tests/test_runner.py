@@ -246,7 +246,10 @@ def test_assistant_mirrors_plus_through_the_browser():
     joiner.chat += [ChatMessage(str(i), name, "+") for i, name in enumerate(["Іван Коваль", "Олена Бойко", "Марко Лис"], 1)]
     runner.tick(at("10:00"))
     assert joiner.written == ["+"]
-    assert inbox[-1] == "💬 Написав «+» у чат «Бази даних» (Група ставить «+» у чат — це перекличка)"
+    assert inbox[-1] == (
+        "💬 Написав «+» у чат «Бази даних» "
+        "(Група ставить «+» у чат — це перекличка: «💬 Петренко П.П.: Перекличка, поставте +»)"
+    )
 
 
 def test_leave_command_from_telegram():
@@ -280,3 +283,13 @@ def test_screenshot_reaches_telegram():
     runner.assistant.on_command("екран", at("09:40"))
     runner.tick(at("09:40"))
     assert photos == [(b"jpeg", "🖥 «Бази даних», 09:40")]
+
+
+def test_classmates_are_loaded_for_voice_roll_calls():
+    runner, client, joiner = make_runner([make_lesson()])
+    runner.assistant = Assistant(MeSettings(name="Ляшко Денис"), lambda text, urgent=False: None)
+    client.students = lambda faculty, course, group: [
+        type("S", (), {"name": n})() for n in ("Бойко Олена", "Коваль Іван", "Ляшко Денис")
+    ]
+    runner.tick(at("07:00"))
+    assert len(runner.assistant._classmates) == 2  # себе не рахуємо

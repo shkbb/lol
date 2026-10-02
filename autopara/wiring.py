@@ -76,18 +76,19 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             sink = NullSink(loopback=not config.join.mute_sound)
             try:
                 sink.create()
-                transcriber = WhisperTranscriber(config.ears.model, config.ears.language)
+                transcriber = WhisperTranscriber(config.ears.model, config.ears.language, hints=assistant.whisper_hints)
             except EarsError as e:
                 sink.close()
                 log.warning("Вуха вимкнено: %s", e)
             else:
                 ears = Ears(
                     transcriber,
-                    lambda text: assistant.on_heard(text, clock()),
+                    lambda text, confident: assistant.on_heard(text, clock(), confident),
                     sink.monitor,
                     on_audio=audio.add if audio else None,
                 )
                 ears.start()
+                assistant.ears_on = True
                 stoppers += [sink.close, ears.stop]
                 stack.audio_sink = sink.name
                 log.info("Вуха: слухаю пари (модель %s)", config.ears.model)

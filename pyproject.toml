@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ears = ["faster-whisper>=1.0"]  # «вуха»: локальне розпізнавання мови
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "numpy"]
 
 [project.scripts]
 autopara = "autopara.cli:main"

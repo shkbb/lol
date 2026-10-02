@@ -75,6 +75,7 @@ class Runner:
             self.target = resolve_target(self.client, self.config)
             who = self.target.student_name or self.target.group_name or self.config.schedule.group
             log.info("Тягну розклад для: %s", who)
+            self._load_classmates()
         today = now.date()
         lessons = self.client.schedule(self.target, today, today + timedelta(days=self.config.schedule.days_ahead))
         self.plan = build_plan(
@@ -94,6 +95,19 @@ class Runner:
             log.info("Розклад оновлено. Найближча пара: %s — зайду %s", v.title, v.join_at.strftime("%d.%m о %H:%M"))
         else:
             log.info("Розклад оновлено. Найближчими %d днями пар з посиланнями немає", self.config.schedule.days_ahead)
+
+    def _load_classmates(self) -> None:
+        """Список групи з сайту розкладу — щоб помічник упізнавав перекличку голосом."""
+        if self.assistant is None:
+            return
+        target = self.target
+        try:
+            students = self.client.students(target.faculty_id, target.course, target.group_id)
+        except (RozkladError, AttributeError) as e:
+            log.debug("Не вдалося взяти список групи: %s", e)
+            return
+        self.assistant.set_classmates([student.name for student in students])
+        log.info("Список групи: %d студентів", len(students))
 
     def _warn_once(self, key: str, message: str) -> None:
         if key not in self._warned:

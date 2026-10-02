@@ -253,6 +253,45 @@ def cmd_check(args, config: Config) -> None:
         line(None, "вуха вимкнено ([ears] enabled = false)")
 
 
+def cmd_listen_test(args, config: Config) -> None:
+    """Порівняти моделі розпізнавання на справжньому звуці, що зараз грає на ноуті."""
+    from time import monotonic
+
+    from .ears import RATE, EarsError, WhisperTranscriber, clean_text, ears_available, record
+
+    if problem := ears_available():
+        print(f"Помилка: {problem}", file=sys.stderr)
+        sys.exit(1)
+    models = [model.strip() for model in (args.models or config.ears.model).split(",") if model.strip()]
+    print(f"Записую {args.seconds} с того, що грає на ноуті. Увімкни, наприклад, лекцію українською на YouTube...")
+    pcm = record("@DEFAULT_MONITOR@", args.seconds)
+    seconds = len(pcm) / (RATE * 2)
+    if seconds < 1:
+        print("Нічого не записалось — перевір, що звук грає.", file=sys.stderr)
+        sys.exit(1)
+    hint = config.me.name
+    for model in models:
+        try:
+            transcriber = WhisperTranscriber(model, config.ears.language, hints=lambda: hint)
+        except EarsError as e:
+            print(f"Помилка: {e}", file=sys.stderr)
+            sys.exit(1)
+        started = monotonic()
+        heard = transcriber(pcm)
+        took = monotonic() - started
+        speed = seconds / took if took else float("inf")
+        verdict = "встигає" if speed >= 2 else ("ледь встигає" if speed >= 1.2 else "НЕ встигає")
+        print(f"\n=== {model}: {took:.1f} с на {seconds:.0f} с звуку — у {speed:.1f} раза швидше за мову, {verdict} ===")
+        for item in heard:
+            if text := clean_text(item.text):
+                print(("   " if item.confident else "[?] ") + text)
+    print(
+        "\n[?] — модель сама не впевнена в цьому шматку. Такі шматки ніколи не підтверджують дій, "
+        "лише потрапляють у сповіщення й звіт з позначкою.\n"
+        "Для живої пари модель має бути щонайменше вдвічі швидшою за мову."
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autopara",
@@ -286,6 +325,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     check = sub.add_parser("check", help="перевірити, що все налаштовано")
     check.set_defaults(func=cmd_check)
+
+    listen = sub.add_parser("listen-test", help="порівняти моделі розпізнавання мови на звуці з ноута")
+    listen.add_argument("--seconds", type=int, default=30, help="скільки секунд записати")
+    listen.add_argument("--models", help="моделі через кому, наприклад small,large-v3-turbo")
+    listen.set_defaults(func=cmd_listen_test)
     return parser
 
 
