@@ -1,7 +1,8 @@
 import json
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
@@ -173,7 +174,7 @@ def test_window_edits_and_saves_settings(running_app, tmp_path):
             page.goto(server.url)
             page.get_by_role("heading", name="Головна").wait_for()
 
-            page.click("#nav button[data-page=schedule]")
+            page.click("#nav button[data-page=group]")
             assert page.get_by_label("Група").first.input_value() == "ТЦР-32"
 
             page.click("#nav button[data-page=behaviour]")
@@ -213,3 +214,100 @@ def test_second_copy_finds_the_running_one(running_app, tmp_path, monkeypatch):
     assert not lock.exists()
     lock.write_text(json.dumps({"port": server.port, "token": "stale-token", "pid": 1}), encoding="utf-8")
     assert app_module.running_instance() is None  # застарілий файл не плутаємо з живою програмою
+
+
+class FakeTelegram(ThreadingHTTPServer):
+    """Імітація api.telegram.org: getMe, getUpdates з черги, sendMessage."""
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), FakeTelegramHandler)
+        self.updates = []
+        self.sent = []
+        self.lock = threading.Lock()
+
+
+class FakeTelegramHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):  # noqa: N802
+        method = self.path.rsplit("/", 1)[1]
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        params = json.loads(body or b"{}")
+        if method == "getMe":
+            result = {"id": 1, "is_bot": True, "first_name": "Мій autopara", "username": "ivan_autopara_bot"}
+        elif method == "getUpdates":
+            with self.server.lock:
+                result = [u for u in self.server.updates if u["update_id"] >= params.get("offset", 0)]
+            if not result and params.get("timeout"):
+                time.sleep(0.2)
+        else:
+            self.server.sent.append((method, params))
+            result = {}
+        data = json.dumps({"ok": True, "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def test_telegram_wizard_pairs_only_whoever_has_the_code(running_app, tmp_path, monkeypatch):
+    sync_api = pytest.importorskip("playwright.sync_api")
+    from autopara import telegram
+
+    server, controller, _ = running_app
+    fake = FakeTelegram()
+    threading.Thread(target=fake.serve_forever, daemon=True).start()
+    monkeypatch.setattr(telegram, "API", f"http://127.0.0.1:{fake.server_address[1]}/bot{{token}}/{{method}}")
+    token = "123456789:AAHfakefakefakefakefakefakefake12345"
+    try:
+        with sync_api.sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.route("https://t.me/**", lambda route: route.fulfill(body="telegram"))
+                page.goto(server.url)
+                page.click("#nav button[data-page=telegram]")
+                page.get_by_placeholder("123456789:AAH…").fill(token)
+                page.get_by_role("button", name="Перевірити").click()
+                page.get_by_text("@ivan_autopara_bot").first.wait_for()
+                page.get_by_role("button", name="Підключити").click()
+                code = page.locator(".code").inner_text()
+                with fake.lock:
+                    fake.updates += [
+                        {"update_id": 7, "message": {"chat": {"id": 666}, "text": "/start 000000"}},  # чужий, без коду
+                        {"update_id": 8, "message": {"chat": {"id": 42}, "text": f"/start {code}"}},
+                    ]
+                page.get_by_text("Підключено!").wait_for(timeout=15000)
+            finally:
+                browser.close()
+    finally:
+        fake.shutdown()
+    saved = read_config(tmp_path / "config.toml")
+    assert (saved.telegram.token, saved.telegram.chat_id) == (token, 42)
+    assert any(params.get("chat_id") == 42 and params["text"].startswith("👋 Готово") for _, params in fake.sent)
+
+
+def test_timetable_tab_shows_the_week(running_app):
+    sync_api = pytest.importorskip("playwright.sync_api")
+    server, controller, _ = running_app
+    today = date.today()
+    monday = today + timedelta(days=1 if today.weekday() == 6 else -today.weekday())
+    site = server.sources["duikt"].session
+    site.events = [dict(EVENT, date=f"{monday:%d.%m.%Y}", disciplineFullName="Бази даних", info="")]
+    with sync_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.goto(server.url)
+            page.click("#nav button[data-page=timetable]")
+            card = page.locator(".days .card").first
+            card.get_by_text("Бази даних").wait_for()
+            assert f"Понеділок, {monday:%d.%m}" in card.inner_text()
+            assert "Meet" in card.inner_text()  # посилання з правила
+            page.get_by_role("button", name="→").click()
+            page.get_by_text("Пар немає").first.wait_for()
+            assert page.get_by_text("Бази даних").count() == 0
+        finally:
+            browser.close()

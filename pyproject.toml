@@ -23,6 +23,9 @@ dev = ["pytest>=8", "numpy"]
 [project.scripts]
 autopara = "autopara.cli:main"
 
+[project.gui-scripts]
+autopara-window = "autopara.cli:window"  # на Windows — без вікна консолі (для ярлика)
+
 [tool.setuptools]
 packages = ["autopara", "autopara.ui"]
 

@@ -85,6 +85,7 @@ let meta = { universities: {}, profiles: [], path: "" };
 let state = {};
 let page = "home";
 let lessonsCache = null;
+let timetableCache = new Map();  // понеділок → дані тижня
 
 function get(path) {
   return path.split(".").reduce((value, key) => (value == null ? undefined : value[key]), cfg);
@@ -121,6 +122,7 @@ async function save() {
     savedJson = JSON.stringify(cfg);
     changed();
     lessonsCache = null;
+    timetableCache = new Map();
     const messages = {
       applied: "Збережено й застосовано",
       saved: "Збережено",
@@ -175,9 +177,9 @@ function numberField(path, label, hint, options = {}) {
   }));
 }
 
-function checkField(path, label, hint) {
+function checkField(path, label, hint, options = {}) {
   return h("label", { class: "check" },
-    h("input", { type: "checkbox", checked: !!get(path), onchange: (event) => set(path, event.target.checked) }),
+    h("input", { type: "checkbox", checked: !!get(path), disabled: options.disabled, onchange: (event) => set(path, event.target.checked) }),
     h("div", {}, h("b", {}, label), hint && h("span", { class: "hint" }, hint)));
 }
 
@@ -230,12 +232,13 @@ pages.home = () => {
     content.push(h("div", { class: "card" },
       h("h2", {}, "Почнімо"),
       h("ol", { class: "steps" },
-        h("li", {}, h("div", {}, h("b", {}, "Обери університет і групу"), h("div", { class: "muted" }, "Вкладка «Розклад»."))),
+        h("li", {}, h("div", {}, h("b", {}, "Обери університет і групу"), h("div", { class: "muted" }, "Вкладка «Група»."))),
         h("li", {}, h("div", {}, h("b", {}, "Додай посилання на пари"), h("div", { class: "muted" }, "Вкладка «Посилання»: програма сама покаже предмети з твого розкладу."))),
         h("li", {}, h("div", {}, h("b", {}, "Увійди в Google"), h("div", { class: "muted" }, "Вкладка «Акаунти» → «Увійти в Google»."))),
+        h("li", {}, h("div", {}, h("b", {}, "За бажанням — підключи Telegram"), h("div", { class: "muted" }, "Вкладка «Telegram»: свій бот за хвилину, сповіщення лише тобі."))),
       ),
       h("div", { class: "row" },
-        h("button", { class: "primary", onclick: () => go("schedule") }, "Обрати групу"),
+        h("button", { class: "primary", onclick: () => go("group") }, "Обрати групу"),
         importControls()),
     ));
   }
@@ -357,7 +360,7 @@ function actionsCard() {
     checks);
 }
 
-pages.schedule = () => {
+pages.group = () => {
   const university = get("schedule.university") || "duikt";
   const switcher = h("div", { class: "segmented" }, Object.entries(meta.universities).map(([code, name]) =>
     h("button", { class: code === university ? "on" : "", onclick: () => {
@@ -421,7 +424,7 @@ pages.schedule = () => {
   }
 
   const content = [
-    h("h1", {}, "Розклад"),
+    h("h1", {}, "Група"),
     h("p", { class: "lead" }, "Звідки брати розклад і чий."),
     h("div", { class: "card" },
       h("h2", {}, "Університет і група"), switcher,
@@ -435,7 +438,10 @@ pages.schedule = () => {
         numberField("schedule.refresh_minutes", "Оновлювати кожні, хв", "Пари іноді переносять.", { min: 5 })),
       checkField("schedule.use_schedule_links", "Брати посилання з самого розкладу", "Якщо для пари немає твого посилання, а викладач вписав Meet чи Zoom у розклад."),
     ),
-    previewCard(),
+    h("div", { class: "card row" },
+      h("div", { style: "flex:1" }, h("b", {}, "Перевір, що розклад правильний"),
+        h("div", { class: "muted small" }, JSON.stringify(cfg) !== savedJson ? "Спершу збережи зміни." : "Пари на тиждень з позначками, куди програма заходитиме.")),
+      h("button", { class: "soft", onclick: () => go("timetable") }, "Відкрити розклад")),
   ];
   return content;
 };
@@ -465,31 +471,6 @@ function lessonBadge(lesson) {
   return h("span", { class: "badge ok", title: lesson.url }, text);
 }
 
-function previewCard() {
-  const body = h("div");
-  const button = h("button", { class: "soft" }, "Показати розклад на тиждень");
-  button.onclick = () => busy(button, "Завантажую…", async () => {
-    const data = await api("GET", "/api/lessons?days=7");
-    let day = "";
-    body.replaceChildren(...(data.lessons.length ? data.lessons.flatMap((lesson) => {
-      const rows = [];
-      if (lesson.date !== day) {
-        day = lesson.date;
-        rows.push(h("div", { class: "day" }, `${lesson.weekday} ${lesson.date.slice(8, 10)}.${lesson.date.slice(5, 7)}`));
-      }
-      rows.push(h("div", { class: "item" },
-        h("span", { class: "time" }, `${lesson.start}–${lesson.end}`),
-        h("div", {}, h("div", { class: "title" }, lesson.subject, lesson.type && h("span", { class: "muted" }, ` (${lesson.type})`)),
-          h("div", { class: "muted small" }, [lesson.teacher, lesson.room].filter(Boolean).join(" · "))),
-        h("span", { class: "spacer" }), lessonBadge(lesson)));
-      return rows;
-    }) : [h("div", { class: "empty" }, "Пар немає.")]));
-  });
-  return h("div", { class: "card" }, h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Перегляд"), h("span", { class: "spacer" }), button),
-    JSON.stringify(cfg) !== savedJson && h("small", { class: "hint" }, "Перегляд бере збережені налаштування — спершу збережи зміни."),
-    body);
-}
-
 pages.links = () => {
   const content = [
     h("h1", {}, "Посилання"),
@@ -512,7 +493,7 @@ pages.links = () => {
     subjects.replaceChildren(h("div", { class: "empty" }, "Завантажую пари…"));
     load().catch((e) => subjects.replaceChildren(h("div", { class: "banner bad" }, e.message)));
   } else {
-    subjects.replaceChildren(h("div", { class: "empty" }, "Спершу обери групу у вкладці «Розклад»."));
+    subjects.replaceChildren(h("div", { class: "empty" }, "Спершу обери групу у вкладці «Група»."));
   }
   content.push(subjectsCard, rulesCard());
   return content;
@@ -618,21 +599,157 @@ pages.accounts = () => {
   ];
 };
 
+// --- Розклад ------------------------------------------------------------------
+
+const DAY_NAMES = ["Неділя", "Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"];
+let weekStart = null;  // понеділок тижня, що показуємо (РРРР-ММ-ДД)
+
+function isoDate(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function addDays(iso, days) {
+  const date = new Date(`${iso}T12:00:00`);
+  date.setDate(date.getDate() + days);
+  return isoDate(date);
+}
+
+function thisWeek() {
+  const today = new Date();
+  const shift = today.getDay() === 0 ? 1 : 1 - today.getDay();  // у неділю — вже наступний тиждень
+  today.setDate(today.getDate() + shift);
+  return isoDate(today);
+}
+
+function shortDate(iso) {
+  return `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
+}
+
+function minutesOf(hhmm) {
+  const [hours, minutes] = hhmm.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function lessonItem(lesson, data) {
+  const today = lesson.date === data.today;
+  const now = today ? minutesOf(data.now) : null;
+  const past = lesson.date < data.today || (today && now >= minutesOf(lesson.end));
+  const current = today && now >= minutesOf(lesson.start) && now < minutesOf(lesson.end);
+  let join = null;
+  if (today && !past && lesson.url) {
+    join = h("button", { class: current ? "primary" : "ghost" }, "Зайти зараз");
+    join.onclick = () => busy(join, "…", async () => {
+      const minutes = Math.max(minutesOf(lesson.end) - now, 0) + 10;
+      await api("POST", "/api/join", { url: lesson.url, minutes });
+      toast(`Заходжу на «${lesson.subject}» — стежити можна на головній`);
+    });
+  }
+  return h("div", { class: `lesson${past ? " past" : ""}${current ? " now" : ""}` },
+    h("div", { class: "row" },
+      h("span", { class: "time" }, `${lesson.start}–${lesson.end}`),
+      current && h("span", { class: "badge accent" }, "зараз"),
+      h("span", { class: "spacer" }),
+      lessonBadge(lesson)),
+    h("div", { class: "title" }, lesson.subject, lesson.type && h("span", { class: "muted" }, ` (${lesson.type})`)),
+    h("div", { class: "muted small" }, [lesson.teacher, lesson.room].filter(Boolean).join(" · ")),
+    join && h("div", { style: "margin-top:8px" }, join));
+}
+
+pages.timetable = () => {
+  const start = weekStart || thisWeek();
+  const body = h("div", {}, h("div", { class: "empty" }, "Завантажую розклад…"));
+  const label = h("span", { class: "week-label" }, `${shortDate(start)} – ${shortDate(addDays(start, 6))}`);
+  const move = (days) => { weekStart = addDays(start, days); render(); };
+  const refresh = h("button", { class: "ghost" }, "Оновити");
+  refresh.onclick = () => busy(refresh, "…", async () => { timetableCache.delete(start); await load(); });
+  const header = h("div", { class: "row", style: "margin-bottom:16px" },
+    h("button", { class: "ghost", onclick: () => move(-7) }, "←"),
+    label,
+    h("button", { class: "ghost", onclick: () => move(7) }, "→"),
+    start !== thisWeek() && h("button", { class: "soft", onclick: () => { weekStart = null; render(); } }, "Цей тиждень"),
+    h("span", { class: "spacer" }),
+    refresh);
+
+  async function load() {
+    let data = timetableCache.get(start);
+    if (!data) {
+      data = await api("GET", `/api/lessons?start=${start}&days=6`);
+      timetableCache.set(start, data);
+    }
+    if (page !== "timetable" || (weekStart || thisWeek()) !== start) return;  // вже гортнули далі
+    const byDay = new Map();
+    for (const lesson of data.lessons) {
+      if (!byDay.has(lesson.date)) byDay.set(lesson.date, []);
+      byDay.get(lesson.date).push(lesson);
+    }
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const iso = addDays(start, i);
+      const lessons = byDay.get(iso) || [];
+      if (i === 6 && !lessons.length) continue;  // неділя без пар
+      const weekday = DAY_NAMES[new Date(`${iso}T12:00:00`).getDay()];
+      days.push(h("div", { class: `card${iso === data.today ? " today" : ""}` },
+        h("h2", {}, `${weekday}, ${shortDate(iso)}`, iso === data.today && h("span", { class: "badge accent" }, "сьогодні")),
+        lessons.length ? h("div", {}, lessons.map((lesson) => lessonItem(lesson, data)))
+          : h("div", { class: "empty" }, "Пар немає")));
+    }
+    const missing = data.lessons.filter((lesson) => !lesson.url && lesson.source !== "skip").length;
+    body.replaceChildren(
+      h("p", { class: "muted", style: "margin:-8px 0 14px" }, data.group,
+        missing ? ` · без посилання: ${missing} — додай у вкладці «Посилання»` : data.lessons.length ? " · усі пари з посиланнями" : ""),
+      h("div", { class: "days" }, days));
+  }
+
+  const content = [h("h1", {}, "Розклад"), h("p", { class: "lead" }, "Твої пари і куди програма заходитиме.")];
+  if (!get("schedule.group") && !get("schedule.group_uid")) {
+    content.push(h("div", { class: "card" }, h("p", {}, "Спершу обери групу."),
+      h("button", { class: "primary", onclick: () => go("group") }, "Обрати групу")));
+    return content;
+  }
+  load().catch((e) => body.replaceChildren(h("div", { class: "banner bad" }, e.message)));
+  content.push(header, body);
+  return content;
+};
+
+// --- Помічник -----------------------------------------------------------------
+
+const EARS_GB = { small: 1, medium: 1.5, "large-v3-turbo": 2 };
+
+function brainGb(model) {
+  const size = /(\d+(?:\.\d+)?)b\b/i.exec(model || "");
+  return size ? Math.round((parseFloat(size[1]) * 0.7 + 1) * 10) / 10 : null;
+}
+
+function resourcesCard() {
+  const linux = (meta.platform || "").startsWith("linux");
+  const gb = (value) => `≈ ${String(value).replace(".", ",")} ГБ`;
+  const rows = [["Браузер на парі (Meet)", 1.2, "процесор 10–25 %"], ["Сама програма", 0.15, "майже 0 %"]];
+  if (cfg.ears.enabled && linux) {
+    const model = cfg.ears.model || "small";
+    rows.push([`Вуха (${model})`, EARS_GB[model] ?? 1.5, "30–50 %, поки на парі говорять"]);
+  }
+  let unknown = false;
+  if (cfg.brain.enabled) {
+    const size = brainGb(cfg.brain.model);
+    unknown = size === null;
+    rows.push([`Мозок (${cfg.brain.model || "gemma3:4b"})`, size, "100 % на 10–30 с, коли щось сталося"]);
+  }
+  const total = rows.reduce((sum, row) => sum + (row[1] || 0), 0);
+  return h("div", { class: "card" },
+    h("h2", {}, "Скільки це їсть"),
+    h("table", { class: "estimate" },
+      rows.map(([name, size, cpu]) => h("tr", {}, h("td", {}, name, h("div", { class: "muted small" }, cpu)),
+        h("td", {}, size === null ? "залежить від моделі" : gb(size)))),
+      h("tr", { class: "total" }, h("td", {}, "Разом під час пари"), h("td", {}, `${gb(Math.round(total * 10) / 10)}${unknown ? " + мозок" : ""}`))),
+    h("small", { class: "hint" },
+      "Оцінка пам'яті для ноутбука на кшталт i5 11-го покоління з 16 ГБ. Між парами програма майже нічого не їсть, ",
+      "а Ollama сама вивантажує модель через 5 хв простою. Диск: whisper small — 0,5 ГБ, large-v3-turbo — 1,6 ГБ, gemma3:4b — 3,3 ГБ. ",
+      "На батареї з вухами й мозком ноутбук сідає помітно швидше — краще бути на зарядці."));
+}
+
 pages.assistant = () => {
-  const findChat = h("button", { class: "soft" }, "Знайти мій чат");
-  findChat.onclick = () => busy(findChat, "Напиши боту будь-що…", async () => {
-    toast("Напиши своєму боту в Telegram будь-що протягом хвилини");
-    const result = await api("POST", "/api/telegram/find", { token: get("telegram.token") || "" });
-    if (!result.chat_id) throw new Error("Не дочекався повідомлення — спробуй ще раз");
-    set("telegram.chat_id", result.chat_id);
-    render();
-    toast("Чат знайдено — збережи зміни");
-  });
-  const test = h("button", { class: "ghost" }, "Надіслати тест");
-  test.onclick = () => busy(test, "…", async () => {
-    await api("POST", "/api/telegram/test", { token: get("telegram.token"), chat_id: get("telegram.chat_id") });
-    toast("Надіслано — перевір Telegram");
-  });
+  const linux = (meta.platform || "").startsWith("linux");
   const check = h("button", { class: "ghost" }, "Перевірити мозок і вуха");
   const checks = h("div", { class: "list" });
   check.onclick = () => busy(check, "Перевіряю…", async () => {
@@ -653,34 +770,158 @@ pages.assistant = () => {
     h("div", { class: "card" },
       h("h2", {}, "Писати в чат пари самому"),
       choiceField("me.chat_reply", [
-        { value: "auto", label: "Так, де сигнали надійні", hint: "Перекличка, перевірка зв'язку. На запис, голосування, «я вже здав» — ніколи сам, лише питає." },
+        { value: "auto", label: "Так, де сигнали надійні", hint: "Коли не всі сигнали за — спитає в Telegram, а за 45 с без твого «ні» напише сам." },
         { value: "ask", label: "Лише після мого «так» у Telegram", hint: "Кожен раз питає кнопками." },
         { value: "off", label: "Ніколи", hint: "Лише сповіщає." },
-      ])),
-    h("div", { class: "card" },
-      h("h2", {}, "Telegram"),
-      h("small", { class: "hint", style: "margin:-6px 0 12px" }, "Створи бота: напиши ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener" }, "@BotFather"), " → /newbot. Він дасть токен."),
-      textField("telegram.token", "Токен бота", "Зберігається лише на цьому комп'ютері.", { type: "password", placeholder: "123456:ABC…" }),
-      h("div", { class: "row" },
-        h("div", { style: "max-width:220px" }, numberField("telegram.chat_id", "Твій chat_id", "", { optional: true })),
-        findChat, test),
-      checkField("telegram.clips", "Відеовирізка моменту", "Коли тебе згадали — хвилина відео з чатом і звуком (потрібен ffmpeg).")),
+      ]),
+      h("div", { style: "margin:4px 0 8px;font-weight:600" }, "Що саме можна писати"),
+      checkField("me.roll_call", "Відмічатися на перекличці", "«+», «Присутній» чи прізвище, коли відмічається група. Вимкнено — лише питає тебе."),
+      checkField("me.answer_here", "Відповідати, коли викладач питає саме тебе", "«Ляшко, ви тут?» → «Так, я тут». Вимкнено — лише питає."),
+      checkField("me.polite", "Дублювати за групою «Дякую», «Добрий день», «До побачення»", "Вимкнено — мовчить."),
+      h("small", { class: "hint" }, "На запис, голосування, «хто здав» чи «зрозуміло?» помічник сам не відповідає ніколи — це вирішуєш ти.")),
     h("div", { class: "card" },
       h("h2", {}, "Вуха й мозок"),
-      checkField("ears.enabled", "Слухати пару", "Локальне розпізнавання мови (Linux з PipeWire). Потрібен пакет autopara[ears]."),
-      selectField("ears.model", "Модель розпізнавання", "large-v3-turbo — точніша для української; якщо комп'ютер не встигатиме, програма сама перейде на small.",
+      checkField("ears.enabled", "Слухати пару",
+        linux ? "Локальне розпізнавання мови, без інтернету. Потрібен пакет autopara[ears]."
+          : "Поки лише на Linux (PipeWire/PulseAudio). Без вух усе інше працює: чат, учасники, сповіщення, звіт за чатом.",
+        { disabled: !linux && !get("ears.enabled") }),
+      linux && selectField("ears.model", "Модель розпізнавання", "large-v3-turbo — точніша для української; якщо комп'ютер не встигатиме, програма сама перейде на small.",
         [["small", "small — швидка"], ["medium", "medium"], ["large-v3-turbo", "large-v3-turbo — точна"]]),
-      checkField("brain.enabled", "Мозок (локальна мовна модель)", "Через Ollama. Розбирається в незапрограмованих ситуаціях і складає звіт після пари."),
+      checkField("brain.enabled", "Мозок (локальна мовна модель)", "Через Ollama (є для Linux, Windows і macOS). Розбирається в незапрограмованих ситуаціях і складає звіт після пари."),
       h("div", { class: "grid" },
         textField("brain.model", "Модель", "", { placeholder: "gemma3:4b" }),
         textField("brain.url", "Адреса Ollama", "", { placeholder: "http://127.0.0.1:11434" })),
       check, checks),
+    resourcesCard(),
   ];
 };
 
+// --- Telegram -----------------------------------------------------------------
+
+let botInfo = { token: "", username: "", error: "" };
+let pairing = null;  // { code } — поки чекаємо, що ти натиснеш Start
+
+async function checkBot(token) {
+  try {
+    const result = await api("POST", "/api/telegram/check", { token });
+    botInfo = { token, username: result.username, error: "" };
+  } catch (e) {
+    botInfo = { token, username: "", error: e.message };
+  }
+}
+
+function pairCode() {
+  const random = new Uint32Array(1);
+  crypto.getRandomValues(random);
+  return String(random[0] % 1000000).padStart(6, "0");
+}
+
+pages.telegram = () => {
+  const token = (get("telegram.token") || "").trim();
+  const chatId = get("telegram.chat_id") || 0;
+  const connected = chatId !== 0;
+  const known = token && botInfo.token === token;
+  const username = known ? botInfo.username : "";
+  if (token && !known) checkBot(token).then(() => { if (page === "telegram") render(); });
+
+  const tokenInput = h("input", { type: "password", value: token, placeholder: "123456789:AAH…", autocomplete: "off",
+    oninput: (event) => { set("telegram.token", event.target.value.trim()); set("telegram.chat_id", 0); } });
+  const checkButton = h("button", { class: "soft" }, "Перевірити");
+  checkButton.onclick = () => busy(checkButton, "…", async () => {
+    await checkBot((get("telegram.token") || "").trim());
+    render();
+  });
+
+  const connect = h("button", { class: "primary", disabled: !username }, connected ? "Підключити заново" : "Підключити");
+  connect.onclick = async () => {
+    pairing = { code: pairCode() };
+    render();
+    window.open(`https://t.me/${username}?start=${pairing.code}`, "_blank", "noopener");
+    try {
+      const result = await api("POST", "/api/telegram/pair", { token, code: pairing.code });
+      pairing = null;
+      if (!result.chat_id) throw new Error("Не дочекався — натисни «Підключити» ще раз");
+      set("telegram.chat_id", result.chat_id);
+      await save();
+      toast("Підключено! Бот уже привітався в Telegram");
+    } catch (e) {
+      pairing = null;
+      toast(e.message, true);
+      render();
+    }
+  };
+  const test = h("button", { class: "ghost" }, "Надіслати тест");
+  test.onclick = () => busy(test, "…", async () => {
+    await api("POST", "/api/telegram/test", { token, chat_id: chatId });
+    toast("Надіслано — перевір Telegram");
+  });
+
+  const botLink = (text) => h("a", { href: `https://t.me/${username}`, target: "_blank", rel: "noopener" }, text);
+  const steps = h("ol", { class: "steps" },
+    h("li", {}, h("div", {},
+      h("b", {}, "Створи свого бота"),
+      h("div", { class: "muted" }, "Відкрий ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener" }, "@BotFather"),
+        " → «Start» → надішли /newbot. Назва — будь-яка, ім'я — латиницею й закінчується на «bot» (наприклад, ivan_autopara_bot). ",
+        "У відповідь прийде токен: довгий рядок на кшталт 123456789:AAH…"))),
+    h("li", {}, h("div", { style: "flex:1" },
+      h("b", {}, "Встав токен"),
+      h("div", { class: "row", style: "margin-top:6px" }, h("div", { style: "flex:1;min-width:240px" }, tokenInput), checkButton),
+      known && username && h("div", { style: "margin-top:8px" }, h("span", { class: "badge ok" }, "✓ бот знайдено"), " ", botLink(`@${username}`)),
+      known && botInfo.error && h("div", { class: "banner bad", style: "margin:8px 0 0" }, botInfo.error))),
+    h("li", {}, h("div", { style: "flex:1" },
+      h("b", {}, "Підключи свій Telegram"),
+      h("div", { class: "muted" }, "Відкриється твій бот — натисни в ньому «Start». Сповіщення отримуватиме лише той, хто це зробить."),
+      pairing
+        ? h("div", { class: "waiting" },
+            h("div", {}, "Чекаю, поки ти натиснеш «Start» у ", botLink(`@${username}`), " (до 3 хвилин)."),
+            h("div", { class: "muted small", style: "margin-top:6px" }, "Telegram на телефоні? Знайди там бота й надішли йому код:"),
+            h("div", { class: "code" }, pairing.code))
+        : h("div", { class: "row", style: "margin-top:8px" }, connect, connected && test,
+            connected && h("span", { class: "badge ok" }, "✓ підключено")))));
+
+  const linux = (meta.platform || "").startsWith("linux");
+  return [
+    h("h1", {}, "Telegram"),
+    h("p", { class: "lead" }, "Твій особистий бот: пише, коли тебе кличуть, питає «написати «+»?» кнопками, шле звіт після пари. ",
+      "Токен лишається лише на цьому комп'ютері, тож твоїх сповіщень ніхто інший не бачить."),
+    h("div", { class: "card" }, steps),
+    h("div", { class: "card" },
+      h("h2", {}, "Що бот робить"),
+      checkField("telegram.commands", "Відповідати на команди й кнопки",
+        "«статус», «чат», «екран», «напиши …», «вийди», кнопки «Написати «+»?». Вимкни — і бот лише надсилатиме сповіщення, нічого не відповідаючи й нічого не роблячи за твоїми повідомленнями."),
+      checkField("telegram.mentions", "Сповіщати, коли тебе кличуть", "З цитатою й кнопками-відповідями."),
+      checkField("telegram.clips", "Відеовирізка моменту", "Хвилина відео з чатом (і звуком, якщо ввімкнені вуха), коли тебе згадали. Потрібен ffmpeg."),
+      checkField("telegram.reports", "Звіт після пари", "Про що була пара, завдання й дедлайни, чи тебе кликали. З мозком — з підсумком."),
+      checkField("telegram.joins", "Повідомляти, коли зайшов чи вийшов з пари", "Якщо зайти не вдалося — повідомить завжди."),
+      linux && checkField("telegram.desktop", "Дублювати сповіщення на робочий стіл", "")),
+  ];
+};
+
+// --- Запуск -------------------------------------------------------------------
+
+function autostartCard() {
+  const auto = meta.autostart || { supported: false, enabled: false, note: "" };
+  const box = h("input", { type: "checkbox", checked: !!auto.enabled, disabled: !auto.supported });
+  box.onchange = async () => {
+    try {
+      meta.autostart = await api("POST", "/api/autostart", { enabled: box.checked });
+      toast(meta.autostart.enabled ? "Запускатиметься разом із комп'ютером" : "Автозапуск вимкнено");
+    } catch (e) {
+      box.checked = !box.checked;
+      toast(e.message, true);
+    }
+  };
+  return h("div", { class: "card" },
+    h("h2", {}, "Запуск"),
+    h("label", { class: "check" }, box, h("div", {},
+      h("b", {}, "Запускати разом із комп'ютером"),
+      h("span", { class: "hint" }, auto.note || "У фоні, без вікна. Вікно — ярликом або командою autopara app."))));
+}
+
 pages.behaviour = () => [
   h("h1", {}, "Поведінка"),
-  h("p", { class: "lead" }, "Коли заходити й виходити."),
+  h("p", { class: "lead" }, "Коли запускатися, заходити й виходити."),
+  autostartCard(),
   h("div", { class: "card" },
     h("h2", {}, "Вхід"),
     numberField("join.minutes_before", "За скільки хвилин до пари заходити", ""),

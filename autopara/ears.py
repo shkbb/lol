@@ -55,7 +55,7 @@ class EarsError(Exception):
 def ears_available() -> str | None:
     """None, якщо можна слухати, інакше — чого бракує."""
     if not sys.platform.startswith("linux"):
-        return "слухати пару вміє лише на Linux"
+        return "слухати пару поки вміє лише на Linux (решта працює й без вух)"
     missing = [tool for tool in ("pactl", "parec") if shutil.which(tool) is None]
     if missing:
         return f"бракує {', '.join(missing)} — встанови пакет libpulse (працює і з PipeWire)"

@@ -293,3 +293,17 @@ def test_classmates_are_loaded_for_voice_roll_calls():
     ]
     runner.tick(at("07:00"))
     assert len(runner.assistant._classmates) == 2  # себе не рахуємо
+
+
+def test_join_and_leave_messages_can_be_switched_off():
+    runner, joiner, inbox = make_assisted_runner([make_lesson()])
+    runner.config.telegram.joins = False
+    runner.tick(at("09:28"))
+    runner.tick(at("10:50"))
+    assert joiner.left == ["Бази даних"] and inbox == []
+    joiner.errors = [JoinError("потрібно увійти в Google-акаунт", retry=False)]
+    runner.plan = None
+    runner.finished.clear()
+    runner.next_refresh = None
+    runner.tick(at("09:28"))
+    assert inbox and inbox[-1].startswith("❌")  # невдача — повідомляємо завжди

@@ -54,8 +54,11 @@ class Runner:
         self.last_error = ""
         self._warned: set[str] = set()
 
-    def notify(self, text: str, urgent: bool = False) -> None:
-        if self.assistant is not None:
+    def notify(self, text: str, urgent: bool = False, routine: bool = False) -> None:
+        """``routine`` — звичайне «зайшов/вийшов»: його можна вимкнути в налаштуваннях."""
+        if routine and not self.config.telegram.joins:
+            log.info(text)
+        elif self.assistant is not None:
             self.assistant.notify(text, urgent=urgent)
         else:
             log.info(text)
@@ -162,7 +165,7 @@ class Runner:
         log.info("Виходжу з «%s»: %s", session.visit.title, reason)
         self.joiner.leave(session)
         self._forget(key)
-        self.notify(f"👋 Вийшов з «{session.visit.title}»: {reason}")
+        self.notify(f"👋 Вийшов з «{session.visit.title}»: {reason}", routine=True)
 
     def _forget(self, key: str) -> None:
         self.active.pop(key, None)
@@ -235,9 +238,9 @@ class Runner:
                 self.finished.add(visit.key)
             return
         if session.page is None:
-            self.notify(f"✅ Відкрив «{visit.title}» у Zoom-клієнті (мікрофон і камера — за налаштуваннями Zoom)")
+            self.notify(f"✅ Відкрив «{visit.title}» у Zoom-клієнті (мікрофон і камера — за налаштуваннями Zoom)", routine=True)
         else:
-            self.notify(f"✅ Зайшов на «{visit.title}», мікрофон і камера вимкнені")
+            self.notify(f"✅ Зайшов на «{visit.title}», мікрофон і камера вимкнені", routine=True)
             if self.config.join.smart_leave:
                 session.decider = LeaveDecider(*self._window(visit), self.config.join)
             if self.assistant is not None:

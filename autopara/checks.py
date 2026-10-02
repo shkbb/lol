@@ -37,8 +37,10 @@ def find_chrome(config: Config | None = None) -> str | None:
     return next((path for path in CHROME_PATHS if Path(path).exists()), None)
 
 
-def install_hint(linux: str, other: str) -> str:
-    return linux if sys.platform.startswith("linux") else other
+def install_hint(linux: str, windows: str, mac: str) -> str:
+    if sys.platform == "win32":
+        return windows
+    return mac if sys.platform == "darwin" else linux
 
 
 def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
@@ -63,10 +65,14 @@ def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
     )
     if config.join.zoom_mode == "app":
         zoom = shutil.which("zoom") or (sys.platform != "linux" and "zoom")  # на Windows/Mac шукати незручно
-        checks.append(Check(bool(zoom), "Zoom", "клієнт знайдено" if zoom else install_hint("yay -S zoom", "встанови Zoom")))
-    if config.telegram.clips:
+        download = "встанови Zoom з zoom.us/download"
+        hint = install_hint("встанови Zoom (Arch: yay -S zoom)", download, download)
+        checks.append(Check(bool(zoom), "Zoom", "клієнт знайдено" if zoom else hint))
+    if config.telegram.clips and config.telegram.mentions:
         has_ffmpeg = shutil.which("ffmpeg") is not None
-        hint = install_hint("sudo pacman -S ffmpeg", "встанови ffmpeg")
+        hint = install_hint(
+            "sudo pacman -S ffmpeg (Ubuntu: sudo apt install ffmpeg)", "winget install Gyan.FFmpeg", "brew install ffmpeg"
+        )
         checks.append(Check(has_ffmpeg, "відеовирізки", "ffmpeg є" if has_ffmpeg else f"немає ffmpeg — {hint}"))
     if config.telegram.token and config.telegram.chat_id:
         try:

@@ -257,6 +257,8 @@ class Assistant:
         self._patterns = name_patterns(me.name)
         self._classmates: list[re.Pattern] = []  # прізвища однокурсників — для переклички голосом
         self.ears_on = False  # чи справді слухаємо пару (від цього залежить, чи можна діяти без питань)
+        self.can_ask = True  # чи можна спитати тебе: бот приймає відповіді й кнопки
+        self.alert_mentions = True  # сповіщати, коли тебе кличуть
         self._last_mention: datetime | None = None
         self._last_roll_call: datetime | None = None
 
@@ -405,12 +407,13 @@ class Assistant:
         meeting.mentions.append((now, text))
         if self._cooled(self._last_mention, now, MENTION_COOLDOWN):
             self._last_mention = now
-            lead = "🚨 Тебе кличуть" if any(hits) else "❗ Можливо, звертаються до тебе"
-            self._alert(f"{lead} {where} на «{meeting.title}»: «{_snippet(text)}»", self._quick_buttons())
+            if self.alert_mentions:
+                lead = "🚨 Тебе кличуть" if any(hits) else "❗ Можливо, звертаються до тебе"
+                self._alert(f"{lead} {where} на «{meeting.title}»: «{_snippet(text)}»", self._quick_buttons())
+                if self.on_moment:
+                    self.on_moment(meeting.key, f"🎬 Момент з «{meeting.title}», {now:%H:%M}", now)
             if self.wake_brain:
                 self.wake_brain(meeting.key)
-            if self.on_moment:
-                self.on_moment(meeting.key, f"🎬 Момент з «{meeting.title}», {now:%H:%M}", now)
         return True
 
     def _voice_roll_call(self, meeting: Meeting, text: str, confident: bool, now: datetime) -> None:
@@ -435,7 +438,10 @@ class Assistant:
 
         if PRESENCE_QUESTION_RE.search(mine) and confident and not NOT_ATTENDANCE_RE.search(mine):
             if "__here__" not in meeting.reacted and "__voice__" not in meeting.reacted:
-                self.propose_chat(meeting, self.me.here, f"Викладач питає, чи ти тут: «{_snippet(mine, 120)}»", now, mark="__here__")
+                self.propose_chat(
+                    meeting, self.me.here, f"Викладач питає, чи ти тут: «{_snippet(mine, 120)}»", now, mark="__here__",
+                    kind="here",
+                )
             return
         if not self._classmates or "__voice__" in meeting.reacted:
             return
@@ -538,7 +544,8 @@ class Assistant:
                 self._consider(meeting, reply, mark, "Група ставить «+» у чат", first[group], ids[group], PLUS_REQUEST_RE, now)
             else:
                 # «Присутній», «дякую», «добрий день» ні на що не підписують.
-                self.propose_chat(meeting, reply, f"Група пише «{sample[group]}» у чат", now, mark=mark)
+                kind = "roll_call" if group == 1 else "polite"
+                self.propose_chat(meeting, reply, f"Група пише «{sample[group]}» у чат", now, mark=mark, kind=kind)
             return
         # 2. Люди пишуть у чат свої прізвища — теж дивимось навіщо.
         by_name = [
@@ -662,27 +669,42 @@ class Assistant:
             return False
         return not meeting.sent or now - meeting.sent[-1][0] >= CHAT_COOLDOWN
 
-    def propose_chat(self, meeting: Meeting, text: str, reason: str, now: datetime, mark: str) -> None:
+    def propose_chat(
+        self, meeting: Meeting, text: str, reason: str, now: datetime, mark: str, kind: str = "roll_call"
+    ) -> None:
         if mark in meeting.reacted:
             return
         meeting.reacted.add(mark)
-        self._offer(meeting, text, reason, now)
+        self._offer(meeting, text, reason, now, kind=kind)
 
     def _offer(
         self, meeting: Meeting, text: str, reason: str, now: datetime, ask: bool = False, context: str = "",
-        act_on_timeout: bool = False,
+        act_on_timeout: bool = False, kind: str = "roll_call",
     ) -> None:
-        """Написати в чат сам, спитати тебе чи лише сповістити — за [me] chat_reply і лімітами.
+        """Написати в чат сам, спитати тебе чи лише сповістити — за налаштуваннями [me] і лімітами.
 
         ``act_on_timeout`` — «напишу, якщо за 45 с не скажеш ні»: для випадків, коли сигнали за,
-        але не всі. У режимі chat_reply = "ask" без твого «так» не пишемо ніколи.
+        але не всі. У режимі chat_reply = "ask" без твого «так» не пишемо ніколи. ``kind`` — що це
+        (roll_call | here | polite): кожне можна вимкнути окремо, і тоді помічник лише питає.
+        Якщо спитати нема як (бот не приймає відповідей), а сигнали не всі за — лише сповіщає.
         """
         quote = f"\nКонтекст: «{context}»" if context else ""
         policy = self.me.chat_reply
+        allowed = {"roll_call": self.me.roll_call, "here": self.me.answer_here, "polite": self.me.polite}.get(kind, True)
+        if not allowed:
+            if kind == "polite":
+                return  # «дякую» за групою не варте навіть сповіщення
+            ask, act_on_timeout = True, False
+        needs_you = ask or act_on_timeout or policy == "ask"
         if policy == "off":
-            self.notify(f"{reason} на «{meeting.title}».{quote}\nСам не пишу (chat_reply = \"off\").", urgent=True)
+            self.notify(f"{reason} на «{meeting.title}».{quote}\nСам не пишу — так налаштовано.", urgent=True)
         elif not self._can_chat(meeting, now):
             self.notify(f"{reason} на «{meeting.title}», але я вже писав у чат нещодавно — пропускаю.{quote}", urgent=True)
+        elif needs_you and not self.can_ask:
+            self.notify(
+                f"{reason} на «{meeting.title}».{quote}\nСам не пишу, а спитати тебе не можу: бот не приймає відповідей.",
+                urgent=True,
+            )
         elif act_on_timeout and policy == "auto":
             meeting.pending = Pending(text, now + VETO_WINDOW, reason, act_on_timeout=True)
             seconds = int(VETO_WINDOW.total_seconds())
@@ -812,7 +834,7 @@ class Assistant:
         low = command.casefold()
         with self._lock:
             meeting = self.current()
-            if low in ("/start", "/help", "help", "допомога", "?"):
+            if low in ("/start", "/help", "help", "допомога", "?") or low.startswith("/start "):
                 return HELP
             if low in ("/status", "статус"):
                 return self._status(meeting, now)
@@ -869,8 +891,8 @@ class Assistant:
         return "\n".join(lines)
 
     def _alert(self, text: str, buttons: list | None = None) -> None:
-        """Термінове сповіщення; з кнопками, якщо їх уміє показати Telegram."""
-        if buttons and self.media is not None and hasattr(self.media, "ask"):
+        """Термінове сповіщення; з кнопками, якщо їх уміє показати Telegram і бот приймає відповіді."""
+        if buttons and self.can_ask and self.media is not None and hasattr(self.media, "ask"):
             self.media.ask(text, buttons)
         else:
             self.notify(text, urgent=True)

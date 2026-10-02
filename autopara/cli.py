@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import secrets
 import signal
 import sys
 from datetime import date, datetime, timedelta
@@ -25,7 +26,8 @@ log = logging.getLogger("autopara")
 
 
 def setup_logging(config: Config | None, verbose: bool) -> None:
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    # Без консолі (pythonw на Windows) stderr немає — тоді лише у файл.
+    handlers: list[logging.Handler] = [logging.StreamHandler()] if sys.stderr is not None else []
     if config is not None:
         config.data_dir.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(config.data_dir / "autopara.log", encoding="utf-8"))
@@ -239,32 +241,35 @@ def cmd_import_config(args) -> None:
 
 
 def cmd_telegram(args, config: Config) -> None:
-    from .telegram import TelegramBot, TelegramError
+    from .telegram import TelegramBot, TelegramError, wait_for_code
 
     token = config.telegram.token
     if not token:
         print(
-            "Найпростіше — у вікні програми (`autopara app`), вкладка «Помічник». Або вручну:\n"
+            "Найпростіше — у вікні програми (`autopara app`), вкладка «Telegram». Або вручну:\n"
             "1. У Telegram напиши @BotFather → /newbot → придумай назву. Він дасть токен.\n"
-            "2. Створи config.local.toml поруч із файлом налаштувань (він не потрапляє в git):\n\n"
+            "2. Допиши його у файл налаштувань (або в config.local.toml поруч, він не потрапляє в git):\n\n"
             '   [telegram]\n   token = "123456:ABC..."\n\n'
             "3. Запусти `autopara telegram` ще раз."
         )
         return
-    bot = TelegramBot(token, config.telegram.chat_id)
     try:
+        bot = TelegramBot(token, config.telegram.chat_id)
+        username = bot.me().get("username", "")
         if not config.telegram.chat_id:
-            print("Напиши своєму боту будь-що в Telegram (наприклад, /start). Чекаю 2 хвилини...")
-            for _ in range(4):
-                for chat_id, _text in bot.updates(wait=30):
-                    print(f"Знайшов! Додай у [telegram] у config.local.toml:\n   chat_id = {chat_id}")
-                    bot.chat_id = chat_id
-                    bot.send("👋 Знайшов тебе! Додай chat_id у config.local.toml — і я писатиму про пари сюди.")
-                    return
-            print("Не дочекався повідомлення. Спробуй ще раз.")
+            code = f"{secrets.randbelow(10**6):06d}"
+            print(
+                f"Відкрий https://t.me/{username}?start={code} і натисни «Start»\n"
+                f"(або знайди @{username} у Telegram і надішли йому код {code}). Чекаю 3 хвилини..."
+            )
+            chat_id = wait_for_code(token, code)
+            if chat_id is None:
+                print("Не дочекався коду. Спробуй ще раз.")
+                return
+            print(f"Підключено! Допиши в [telegram]:\n   chat_id = {chat_id}")
             return
         bot.send("👋 autopara на зв'язку. Напиши «допомога», щоб побачити команди.")
-        print("Надіслав тестове повідомлення — перевір Telegram.")
+        print(f"Надіслав тестове повідомлення від @{username} — перевір Telegram.")
     except TelegramError as e:
         print(f"Помилка: {e}", file=sys.stderr)
         sys.exit(1)
@@ -382,6 +387,11 @@ def main(argv: list[str] | None = None) -> None:
     except (ConfigError, RozkladError) as e:
         print(f"Помилка: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def window() -> None:
+    """`autopara-window`: те саме, що `autopara app`, але на Windows без чорного вікна консолі."""
+    main(["app"])
 
 
 if __name__ == "__main__":

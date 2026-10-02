@@ -511,3 +511,57 @@ def test_questions_come_with_yes_no_buttons():
     plus_wave(assistant)
     [(text, buttons)] = assistant.media.asked
     assert buttons == [[("✅ Написати «+»", "так"), ("❌ Ні", "ні")]]
+
+
+# --- Що можна вимкнути --------------------------------------------------------
+
+
+def test_roll_call_switched_off_only_asks():
+    assistant, inbox, _ = make()
+    assistant.me.roll_call = False
+    assistant.media = Media()
+    chat(assistant, "09:59", ("Петренко П.П.", "Поставте + хто є"))
+    plus_wave(assistant)
+    assert assistant.take_actions() == []
+    [(text, buttons)] = assistant.media.asked
+    assert buttons == [[("✅ Написати «+»", "так"), ("❌ Ні", "ні")]]
+    assert assistant.on_command("так", at("10:00:20")) == "Пишу «+»."  # з твоєї згоди — пише
+
+
+def test_answer_here_switched_off_only_asks():
+    assistant, inbox = listening()
+    assistant.me.answer_here = False
+    say(assistant, "Ляшко, ви з нами?")
+    assert assistant.take_actions() == [] and "Написати «Так, я тут»?" in inbox.text()
+
+
+def test_polite_switched_off_stays_silent():
+    assistant, inbox, _ = make()
+    assistant.me.polite = False
+    chat(assistant, "10:49", ("Іван Коваль", "Дякую"), ("Олена Бойко", "дякую!"), ("Марко Лис", "Дякую за пару"))
+    assert assistant.take_actions() == [] and "Дякую" not in inbox.text()
+
+
+def test_without_bot_answers_it_never_waits_for_a_reply():
+    """Бот не слухає команд — спитати не можна, тож «напишу, якщо не скажеш ні» перетворюється на сповіщення."""
+    assistant, inbox = listening()
+    assistant.can_ask = False
+    assistant.media = Media()
+    plus_wave(assistant)
+    assistant.tick(at("10:02"))
+    assert assistant.take_actions() == [] and assistant.media.asked == []
+    assert "спитати тебе не можу" in inbox.text()
+    # Надійні сигнали (перекличку назвали прямо) — як і раніше, діє сам.
+    chat(assistant, "10:10", ("Петренко П.П.", "Перекличка: напишіть присутній"))
+    chat(assistant, "10:11", ("Іван Коваль", "присутній"), ("Олена Бойко", "присутня"), ("Марко Лис", "тут"))
+    assert [a.text for a in assistant.take_actions()] == ["Присутній"]
+
+
+def test_mention_alerts_can_be_switched_off():
+    assistant, inbox, _ = make()
+    moments = []
+    assistant.on_moment = lambda *args: moments.append(args)
+    assistant.alert_mentions = False
+    assistant.on_heard("Ляшко, яка відповідь?", at("10:00"))
+    assert inbox.messages == [] and moments == []
+    assert assistant.meetings[KEY].mentions  # у звіт згадка однаково потрапить

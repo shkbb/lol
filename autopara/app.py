@@ -13,8 +13,10 @@ import json
 import logging
 import os
 import queue
+import re
 import secrets
 import subprocess
+import sys
 import threading
 import tomllib
 import urllib.request
@@ -22,12 +24,14 @@ import webbrowser
 from collections import deque
 from concurrent.futures import Future
 from contextlib import ExitStack
-from datetime import datetime, timedelta
+from dataclasses import astuple, replace
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
+from . import autostart
 from .checks import find_chrome, run_checks
 from .config import UNIVERSITIES, Config, ConfigError, config_to_dict, parse_config, save_config, user_config_dir
 from .links import platform_of, resolve
@@ -213,8 +217,10 @@ class Controller:
                 log.error("Налаштування збережено, але автоматичний вхід не запустився: %s", e)
                 return "saved"
             return "started"
+        light_telegram = {"mentions": config.telegram.mentions, "joins": config.telegram.joins}  # діють на льоту
         heavy = (
-            any(getattr(old, section) != getattr(config, section) for section in ("telegram", "ears", "brain", "timezone", "data_dir"))
+            any(getattr(old, section) != getattr(config, section) for section in ("ears", "brain", "timezone", "data_dir"))
+            or replace(old.telegram, **light_telegram) != config.telegram
             or (old.join.browser_channel, old.join.browser_path, old.join.mute_sound)
             != (config.join.browser_channel, config.join.browser_path, config.join.mute_sound)
         )
@@ -229,6 +235,7 @@ class Controller:
         runner.config = config
         if runner.assistant is not None:
             runner.assistant.set_me(config.me)
+            runner.assistant.alert_mentions = config.telegram.mentions
         self.joiner.settings = config.join
         if old.schedule != config.schedule:
             runner.client = make_source(config)
@@ -312,12 +319,13 @@ def configured(config: Config) -> bool:
     return bool(s.group or s.group_uid or s.group_id)
 
 
-def lessons_view(config: Config, days: int, source=None) -> dict:
+def lessons_view(config: Config, days: int, source=None, start: date | None = None, target=None) -> dict:
     source = source or make_source(config)
-    target = resolve_target(source, config)
+    target = target or resolve_target(source, config)
     tz = ZoneInfo(config.timezone)
-    today = datetime.now(tz).date()
-    lessons = source.schedule(target, today, today + timedelta(days=days))
+    now = datetime.now(tz)
+    first = start or now.date()
+    lessons = source.schedule(target, first, first + timedelta(days=days))
     rows = []
     for lesson in lessons:
         resolution = resolve(lesson, config.links, config.schedule.use_schedule_links)
@@ -337,21 +345,14 @@ def lessons_view(config: Config, days: int, source=None) -> dict:
                 "platform": platform_of(resolution.url) if resolution.url else None,
             }
         )
-    return {"group": target.student_name or target.group_name or target.uid, "lessons": rows}
-
-
-def find_telegram_chat(token: str, wait_seconds: int = 60) -> dict:
-    """Чекає, поки хтось напише боту, і повертає його chat_id."""
-    from .telegram import TelegramBot
-
-    bot = TelegramBot(token)
-    for _ in range(max(1, wait_seconds // 25)):
-        for incoming in bot.updates(wait=25):
-            if incoming.chat_id:
-                bot.chat_id = incoming.chat_id
-                bot.send("👋 Знайшов тебе! Тепер я писатиму сюди про пари.")
-                return {"chat_id": incoming.chat_id}
-    return {"chat_id": None}
+    return {
+        "group": target.student_name or target.group_name or target.uid,
+        "lessons": rows,
+        "today": now.date().isoformat(),
+        "now": f"{now:%H:%M}",
+        "first": first.isoformat(),
+        "last": (first + timedelta(days=days)).isoformat(),
+    }
 
 
 def list_profiles() -> list[str]:
@@ -370,6 +371,7 @@ class AppServer(ThreadingHTTPServer):
         self.token = token or secrets.token_urlsafe(24)
         self.logs = logs or LogBuffer()
         self.sources: dict[str, object] = {}  # кеш клієнтів розкладу для пошуку груп
+        self.targets: dict[tuple, object] = {}  # уже знайдені групи — щоб гортати тижні без зайвих запитів
 
     @property
     def port(self) -> int:
@@ -479,6 +481,8 @@ def api_get_config(server: AppServer, query: dict, body: dict):
         "universities": UNIVERSITIES,
         "path": str(controller.config_path),
         "profiles": list_profiles(),
+        "platform": sys.platform,
+        "autostart": autostart.status(),
     }
 
 
@@ -543,7 +547,17 @@ def api_students(server: AppServer, query: dict, body: dict):
 def api_lessons(server: AppServer, query: dict, body: dict):
     config = server.controller.config
     source = make_source(config) if config.schedule.base_url else server.source_for(config.schedule.university)
-    return 200, lessons_view(config, int(query.get("days", 14)), source)
+    start = None
+    if query.get("start"):
+        try:
+            start = date.fromisoformat(query["start"])
+        except ValueError:
+            return 400, {"error": "дата має бути у форматі РРРР-ММ-ДД"}
+    days = min(max(int(query.get("days", 14)), 0), 62)
+    key = astuple(config.schedule)
+    if key not in server.targets:
+        server.targets[key] = resolve_target(source, config)
+    return 200, lessons_view(config, days, source, start=start, target=server.targets[key])
 
 
 def api_command(name: str):
@@ -569,11 +583,38 @@ def api_check(server: AppServer, query: dict, body: dict):
     return 200, {"checks": [{"ok": c.ok, "area": c.area, "text": c.text} for c in checks]}
 
 
-def api_telegram_find(server: AppServer, query: dict, body: dict):
+def _telegram_token(body: dict) -> str:
     token = (body.get("token") or "").strip()
-    if ":" not in token:
-        return 400, {"error": "спершу встав токен від @BotFather"}
-    return 200, find_telegram_chat(token)
+    if not re.fullmatch(r"\d+:[\w-]{20,}", token):
+        raise ConfigError("це не схоже на токен від @BotFather — він виглядає як 123456789:AAH…")
+    return token
+
+
+def api_telegram_check(server: AppServer, query: dict, body: dict):
+    from .telegram import TelegramBot, TelegramError
+
+    try:
+        me = TelegramBot(_telegram_token(body)).me()
+    except TelegramError as e:
+        if "Unauthorized" in str(e) or "Not Found" in str(e):
+            return 400, {"error": "Telegram не знає такого токена — скопіюй його від @BotFather ще раз"}
+        return 400, {"error": str(e)}
+    return 200, {"username": me.get("username", ""), "name": me.get("first_name", "")}
+
+
+def api_telegram_pair(server: AppServer, query: dict, body: dict):
+    from .telegram import TelegramError, wait_for_code
+
+    code = str(body.get("code") or "")
+    if not re.fullmatch(r"\d{6}", code):
+        return 400, {"error": "некоректний код"}
+    try:
+        chat_id = wait_for_code(_telegram_token(body), code, wait_seconds=int(body.get("wait") or 180))
+    except TelegramError as e:
+        if "Conflict" in str(e):
+            return 409, {"error": "цього бота вже слухає інша програма — вимкни її на хвилину й спробуй знову"}
+        return 400, {"error": str(e)}
+    return 200, {"chat_id": chat_id}
 
 
 def api_telegram_test(server: AppServer, query: dict, body: dict):
@@ -584,6 +625,13 @@ def api_telegram_test(server: AppServer, query: dict, body: dict):
     except TelegramError as e:
         return 400, {"error": str(e)}
     return 200, {"ok": True}
+
+
+def api_autostart(server: AppServer, query: dict, body: dict):
+    try:
+        return 200, autostart.set_enabled(bool(body.get("enabled")))
+    except OSError as e:
+        return 400, {"error": f"не вдалося змінити автозапуск: {e}"}
 
 
 def api_log(server: AppServer, query: dict, body: dict):
@@ -604,9 +652,11 @@ ROUTES = {
     ("POST", "/api/join"): api_join,
     ("POST", "/api/leave"): api_leave,
     ("POST", "/api/check"): api_check,
-    ("POST", "/api/telegram/find"): api_telegram_find,
+    ("POST", "/api/telegram/check"): api_telegram_check,
+    ("POST", "/api/telegram/pair"): api_telegram_pair,
     ("POST", "/api/telegram/test"): api_telegram_test,
     ("GET", "/api/log"): api_log,
+    ("POST", "/api/autostart"): api_autostart,
 }
 
 

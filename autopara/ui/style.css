@@ -80,6 +80,8 @@ nav button {
 }
 nav button:hover { background: var(--panel-2); }
 nav button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.nav-label { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 14px 12px 4px; }
+.nav-label:empty { padding: 6px 0 0; margin: 0 12px 6px; border-bottom: 1px solid var(--line); }
 
 main { padding: 28px 32px 110px; max-width: 980px; width: 100%; }
 h1 { font-size: 24px; margin: 0 0 4px; }
@@ -107,7 +109,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 input[type=number] { max-width: 140px; }
 
 label.check { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; cursor: pointer; }
-label.check input { margin-top: 4px; width: 17px; height: 17px; accent-color: var(--accent); }
+label.check input { margin-top: 4px; width: 17px; height: 17px; flex: none; accent-color: var(--accent); }
 label.check b { display: block; font-weight: 600; }
 
 .choices { display: grid; gap: 8px; margin-bottom: 14px; }
@@ -164,6 +166,24 @@ button.icon:hover { background: var(--panel-2); color: var(--text); }
 .item .title { font-weight: 600; }
 .empty { color: var(--muted); padding: 6px 0; }
 
+.lesson { padding: 10px 0; border-top: 1px solid var(--line); }
+.lesson:first-child { border-top: 0; }
+.lesson .time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.lesson .title { font-weight: 600; margin-top: 2px; }
+.lesson.past { opacity: .5; }
+.lesson.now { background: var(--accent-soft); margin: 0 -12px; padding: 10px 12px; border-radius: 10px; border-top-color: transparent; }
+.lesson.now + .lesson { border-top-color: transparent; }
+.days { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+.days .card { margin: 0; }
+.days .card.today { border-color: var(--accent); }
+.days h2 { display: flex; gap: 8px; align-items: center; }
+.week-label { font-weight: 600; }
+.code { font: 700 26px/1.2 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em; color: var(--accent); }
+.waiting { padding: 14px 16px; border-radius: 10px; background: var(--accent-soft); margin-top: 8px; }
+table.estimate { width: 100%; border-collapse: collapse; }
+table.estimate td { padding: 6px 0; border-top: 1px solid var(--line); }
+table.estimate td:last-child { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+table.estimate tr.total td { font-weight: 700; }
 .day { margin-top: 14px; font-weight: 700; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
 
 .search { position: relative; }
@@ -220,6 +240,7 @@ table.rules td:first-child { width: 28%; }
   .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 12px; }
   .brand { margin-bottom: 10px; }
   nav { flex-direction: row; overflow-x: auto; }
+  .nav-label { display: none; }
   nav button { white-space: nowrap; }
   main { padding: 18px 16px 110px; }
 }

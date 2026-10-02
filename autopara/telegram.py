@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -55,6 +57,14 @@ class TelegramBot:
         if not data.get("ok"):
             raise TelegramError(f"Telegram: {data.get('description', 'помилка')}")
         return data["result"]
+
+    def me(self) -> dict:
+        """Хто цей бот: {"username": ..., "first_name": ...}. Заодно перевіряє токен."""
+        return self._call("getMe")
+
+    def ack(self) -> None:
+        """Підтвердити Telegram, що вже прочитані оновлення оброблено, щоб вони не прийшли знову."""
+        self._call("getUpdates", offset=self._offset, timeout=0, limit=1)
 
     def send(self, text: str, buttons: Buttons | None = None) -> None:
         params = {"chat_id": self.chat_id, "text": text[:4000]}
@@ -114,6 +124,30 @@ class TelegramBot:
             except TelegramError as e:
                 log.warning("%s — повторю за хвилину", e)
                 stop.wait(60)
+
+
+def wait_for_code(token: str, code: str, wait_seconds: int = 180, session: requests.Session | None = None) -> int | None:
+    """Підключення бота: чекає, поки хтось надішле йому ``code`` (чи натисне Start за посиланням з ним).
+
+    Повертає chat_id того, хто надіслав код, — лише він і отримуватиме сповіщення. Випадковий
+    перехожий, що знайшов бота, коду не знає, тож підключитися замість тебе не може.
+    """
+    bot = TelegramBot(token, session=session)
+    pattern = re.compile(rf"^(/start(@\w+)?\s+)?{re.escape(code)}$", re.I)
+    deadline = time.monotonic() + wait_seconds
+    while (left := deadline - time.monotonic()) > 0:
+        for incoming in bot.updates(wait=max(1, min(25, int(left)))):
+            text = incoming.text.strip()
+            if incoming.chat_id and pattern.match(text):
+                bot.chat_id = incoming.chat_id
+                bot.ack()  # щоб програма не отримала цей код ще раз як команду
+                bot.send("👋 Готово! Тепер я писатиму сюди про твої пари. Напиши «допомога», щоб побачити команди.")
+                return incoming.chat_id
+            if incoming.chat_id and text.startswith("/start"):
+                TelegramBot(token, incoming.chat_id, session=bot.session).send(
+                    "Щоб підключити мене, натисни «Підключити» у вікні autopara або надішли сюди код звідти."
+                )
+    return None
 
 
 class Notifier:

@@ -83,3 +83,22 @@ def test_buttons_are_sent_and_presses_handled():
     assert methods == ["sendMessage", "getUpdates", "answerCallbackQuery", "sendMessage"]
     markup = api.calls[0][1]["reply_markup"]["inline_keyboard"]
     assert markup == [[{"text": "✅ Так", "callback_data": "так"}, {"text": "❌ Ні", "callback_data": "ні"}]]
+
+
+def test_pairing_accepts_only_the_code():
+    from autopara.telegram import wait_for_code
+
+    api = FakeApi([update(1, 666, "/start"), update(2, 777, "привіт"), update(3, 42, "/start 482917")])
+    assert wait_for_code("123:abc", "482917", wait_seconds=5, session=api) == 42
+    sent = [(params["chat_id"], params["text"]) for method, params, _ in api.calls if method == "sendMessage"]
+    assert sent[0][0] == 666 and "код" in sent[0][1]  # підказали, як підключитись, але не підключили
+    assert sent[-1][0] == 42 and sent[-1][1].startswith("👋 Готово")
+    acks = [params for method, params, _ in api.calls if method == "getUpdates" and params.get("limit") == 1]
+    assert acks == [{"offset": 4, "timeout": 0, "limit": 1}]  # «/start 482917» не прийде програмі ще раз
+
+
+def test_pairing_by_typed_code_and_timeout():
+    from autopara.telegram import wait_for_code
+
+    assert wait_for_code("123:abc", "000111", wait_seconds=5, session=FakeApi([update(1, 9, " 000111 ")])) == 9
+    assert wait_for_code("123:abc", "000111", wait_seconds=1, session=FakeApi([update(1, 9, "000112")])) is None
