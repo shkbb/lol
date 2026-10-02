@@ -12,7 +12,19 @@ from typing import Callable, Iterator
 from .assistant import Assistant
 from .brain import BrainWorker, OllamaBrain
 from .config import Config
-from .ears import BrowserAudio, Ears, EarsError, NullSink, WhisperTranscriber, pick_source, pulse_available
+from .ears import (
+    AudioQueue,
+    DeviceAppCapture,
+    Ears,
+    EarsError,
+    NoAppCapture,
+    NullSink,
+    PulseAppCapture,
+    PulseRecorder,
+    WhisperTranscriber,
+    pick_source,
+    pulse_available,
+)
 from .media import AudioBuffer, Clipper, FrameBuffer
 from .report import Reporter
 from .telegram import Notifier, TelegramBot
@@ -25,6 +37,7 @@ class Stack:
     assistant: Assistant
     audio_sink: str = ""  # куди браузер віддає звук (для вух, системний звук Linux), або ""
     audio_tap: Callable[[str], None] | None = None  # або: сторінка пари віддає звук сюди (вуха через браузер)
+    app_audio: object | None = None  # звук Zoom-клієнта на час пари: start() / stop()
     frames: FrameBuffer | None = None  # кадри сторінки для відеовирізок, або None
 
 
@@ -79,32 +92,18 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         except EarsError as e:
             log.warning("Вуха вимкнено: %s", e)
         else:
-            source = pick_source(config.ears.source)
-            on_text = lambda text, confident: assistant.on_heard(text, clock(), confident)  # noqa: E731
-            ears = None
-            if source == "pulse":
-                sink = NullSink(loopback=not config.join.mute_sound)
-                try:
-                    if problem := pulse_available():
-                        raise EarsError(problem)
-                    sink.create()
-                except EarsError as e:
-                    sink.close()
-                    log.warning("Системний звук недоступний (%s) — слухаю пару через браузер", e)
-                    source = "browser"
-                else:
-                    ears = Ears(transcriber, on_text, sink.monitor, on_audio=audio.add if audio else None)
-                    stoppers.append(sink.close)
-                    stack.audio_sink = sink.name
-            if source == "browser":
-                stream = BrowserAudio()
-                ears = Ears(transcriber, on_text, stream, on_audio=audio.add if audio else None)
-                stack.audio_tap = stream.feed_base64
+            queue = AudioQueue()  # сюди йде звук пари, звідки б він не брався
+            stoppers += _audio_sources(config, queue, stack)
+            ears = Ears(
+                transcriber,
+                lambda text, confident: assistant.on_heard(text, clock(), confident),
+                queue,
+                on_audio=audio.add if audio else None,
+            )
             ears.start()
             assistant.ears_on = True
             stoppers.append(ears.stop)
-            where = "системний звук" if source == "pulse" else "звук зі сторінки пари"
-            log.info("Вуха: слухаю пари (модель %s, %s)", config.ears.model, where)
+            log.info("Вуха: слухаю пари (модель %s)", config.ears.model)
 
     if clips:
         assistant.on_moment = Clipper(stack.frames, audio, notifier, assistant.quote).capture
@@ -120,3 +119,37 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         for stop_one in reversed(stoppers):
             stop_one()
         notifier.flush()
+
+
+def _audio_sources(config: Config, queue: AudioQueue, stack: Stack) -> list[Callable[[], None]]:
+    """Підключає до черги вух звук пар: у браузері — зі сторінки пари, у Zoom-клієнті — його потоки."""
+    stoppers: list[Callable[[], None]] = []
+    shared_sink = None
+    if pick_source(config.ears.source) == "pulse":
+        sink = NullSink(loopback=not config.join.mute_sound)
+        try:
+            if problem := pulse_available():
+                raise EarsError(problem)
+            sink.create()
+        except EarsError as e:
+            sink.close()
+            log.warning("Системний звук недоступний (%s) — слухаю пари зі сторінки", e)
+        else:
+            recorder = PulseRecorder(sink.monitor, queue)
+            recorder.start()
+            stoppers += [sink.close, recorder.stop]
+            stack.audio_sink = sink.name
+            shared_sink = sink
+    if shared_sink is None:
+        stack.audio_tap = queue.feed_base64
+    if config.join.zoom_mode == "app":
+        if pulse_available() is None:
+            stack.app_audio = PulseAppCapture(queue, hear_too=not config.join.mute_sound, sink=shared_sink)
+        elif config.ears.app_device:
+            stack.app_audio = DeviceAppCapture(queue, config.ears.app_device)
+        else:
+            stack.app_audio = NoAppCapture(
+                "у вікні програми обери віртуальний кабель («Помічник» → «Zoom-клієнт») або заходь у Zoom через браузер"
+            )
+        stoppers.append(stack.app_audio.stop)
+    return stoppers

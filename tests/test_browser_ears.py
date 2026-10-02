@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("playwright")
 
-from autopara.ears import BrowserAudio  # noqa: E402
+from autopara.ears import AudioQueue  # noqa: E402
 from autopara.joiner import Browser  # noqa: E402
 
 # Як у Meet: голос приходить доріжкою WebRTC і грає через <audio>.
@@ -51,18 +51,38 @@ def pitch_and_loudness(pcm: bytes) -> tuple[float, float]:
     return crossings / 2 / (len(samples) / 16_000), rms
 
 
-@pytest.mark.parametrize("html", [MEET_LIKE, WEB_AUDIO], ids=["webrtc-audio-element", "web-audio"])
-def test_meeting_audio_reaches_the_ears_even_when_muted(tmp_path, html):
-    stream = BrowserAudio()
+def listen(tmp_path, url, html, enable=True, seconds=5):
+    """Відкрити сторінку в браузері програми й повернути, що почули вуха."""
+    stream = AudioQueue()
     browser = Browser(tmp_path, channel="", mute_sound=True, headless=True, audio_tap=stream.feed_base64)
     try:
         page = browser.new_page()
-        page.route("https://meet.test/**", lambda route: route.fulfill(body=html, content_type="text/html"))
-        page.goto("https://meet.test/abc-defg-hij")
-        page.wait_for_timeout(5000)  # тим часом браузер передає звук
-        pcm = stream.read(10**9)
+        page.route(url, lambda route: route.fulfill(body=html, content_type="text/html"))
+        page.goto(url)
+        if enable:
+            # Так робить програма у вкладці, де сама зайшла на пару.
+            page.evaluate("() => window.__autoparaTap ? window.__autoparaTap.enable() : false")
+        page.wait_for_timeout(seconds * 1000)  # тим часом браузер передає звук
+        return stream.read(10**9)
     finally:
         browser.close()
+
+
+@pytest.mark.parametrize(
+    "url, html",
+    [("https://meet.google.com/abc-defg-hij", MEET_LIKE), ("https://us02web.zoom.us/wc/123", WEB_AUDIO)],
+    ids=["meet-webrtc-audio-element", "zoom-web-audio"],
+)
+def test_meeting_audio_reaches_the_ears_even_when_muted(tmp_path, url, html):
+    pcm = listen(tmp_path, url, html)
     assert len(pcm) >= 16_000 * 2 * 3  # щонайменше 3 секунди звуку
     frequency, loudness = pitch_and_loudness(pcm[16_000 * 2 :])
     assert 400 < frequency < 480 and loudness > 5000  # той самий тон, без задвоєння й тиші
+
+
+def test_youtube_in_the_same_browser_is_not_heard(tmp_path):
+    assert listen(tmp_path, "https://www.youtube.com/watch?v=x", WEB_AUDIO, seconds=3) == b""
+
+
+def test_other_meet_tab_is_not_heard_until_the_app_joins_there(tmp_path):
+    assert listen(tmp_path, "https://meet.google.com/xyz-abcd-efg", MEET_LIKE, enable=False, seconds=3) == b""

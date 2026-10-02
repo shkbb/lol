@@ -1,18 +1,23 @@
 """«Вуха»: слухають пару й перетворюють мову на текст — локально, нічого нікуди не надсилаючи.
 
-Звідки береться звук — два шляхи:
-- **з браузера** (будь-яка ОС): сторінка пари сама збирає голоси учасників (ears_tap.js) і віддає
-  їх програмі. Працює, навіть коли звук у браузері вимкнений;
-- **системний звук Linux** (PipeWire/PulseAudio): віртуальний вихід ``autopara`` (module-null-sink),
-  браузер запускаємо з PULSE_SINK=autopara, записуємо його через parec. Якщо mute_sound = false,
-  звук ще й дублюється в динаміки (module-loopback).
+Звідки береться звук (усе потрапляє в одну чергу ``AudioQueue``):
+- **пара в браузері** (Meet, Zoom у браузері; будь-яка ОС): вкладка пари сама збирає голоси учасників
+  (ears_tap.js) і віддає їх програмі. Лише ця вкладка — ні YouTube, ні інші вкладки сюди не потраплять;
+- **Zoom-клієнт**: на Linux на час пари переносимо *лише його* аудіопотоки у віртуальний вихід
+  (PipeWire/PulseAudio) і записуємо звідти; на Windows і macOS — записуємо віртуальний кабель
+  (VB-Cable, BlackHole), у який Zoom виводить звук;
+- **запасний шлях на Linux** (``[ears] source = "pulse"``): увесь звук браузера програми йде у віртуальний
+  вихід ``autopara`` (PULSE_SINK), і вуха слухають його.
+Якщо mute_sound = false, звук з віртуального виходу ще й дублюється в динаміки (module-loopback).
 Далі однаково: шматки по ~10 с → мова в текст (faster-whisper).
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -32,7 +37,8 @@ SINK = "autopara"
 RATE = 16_000  # Гц, моно, 16 біт — те, що їсть whisper
 CHUNK_SECONDS = 10
 SILENCE_RMS = 150
-SOURCES = ("auto", "browser", "pulse")  # звідки брати звук: auto — системний на Linux, інакше з браузера
+SOURCES = ("auto", "browser", "pulse")  # звук пар у браузері: зі сторінки пари чи весь звук браузера (Linux)
+APP_STREAM_RE = re.compile(r"zoom", re.I)  # аудіопотоки Zoom-клієнта в PipeWire/PulseAudio
 TAP_SCRIPT = Path(__file__).with_name("ears_tap.js")
 # Якщо модель не встигає за мовою — на яку переходити (turbo зазвичай не повільніший за medium).
 LIGHTER_MODEL = {
@@ -78,10 +84,11 @@ def whisper_available() -> str | None:
 
 
 def pick_source(setting: str) -> str:
-    """"pulse" чи "browser" для налаштування [ears] source."""
-    if setting == "auto":
-        return "pulse" if pulse_available() is None else "browser"
-    return setting
+    """"pulse" чи "browser" для налаштування [ears] source.
+
+    За замовчуванням — зі сторінки пари: так вуха чують лише пару, а не все, що грає в браузері.
+    """
+    return "pulse" if setting == "pulse" else "browser"
 
 
 class AudioStream(Protocol):
@@ -105,7 +112,7 @@ class PulseStream:
             self.process.terminate()
 
 
-class BrowserAudio:
+class AudioQueue:
     """Звук пари просто з браузера: сторінка (ears_tap.js) кладе сюди шматки по ~0,5 с.
 
     ``feed`` викликає потік браузера, ``read`` — потік вух. Якщо розпізнавання не встигає,
@@ -293,11 +300,248 @@ def is_confident(avg_logprob: float, no_speech_prob: float) -> bool:
     return avg_logprob > CONFIDENT_LOGPROB and no_speech_prob < CONFIDENT_NO_SPEECH
 
 
+class PulseRecorder:
+    """Фоновий потік: системний звук (parec з монітора віртуального виходу) → черга вух."""
+
+    def __init__(self, device: str, queue: AudioQueue):
+        self.device = device
+        self.queue = queue
+        self._stream: PulseStream | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="pulse-recorder", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._stream is not None:
+            self._stream.close()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._stream = PulseStream(self.device)
+            while not self._stop.is_set():
+                data = self._stream.read(RATE)
+                if data is None:
+                    break
+                self.queue.feed(data)
+            self._stream.close()
+            if not self._stop.is_set():
+                log.warning("Запис звуку обірвався — перезапускаю за 5 с")
+                self._stop.wait(5)
+
+
+def _pactl(*args: str) -> subprocess.CompletedProcess:
+    # LC_ALL=C — щоб вивід pactl не був перекладений і його можна було розібрати.
+    return subprocess.run(["pactl", *args], capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"})
+
+
+def sink_inputs() -> list[dict]:
+    """Аудіопотоки програм: [{"index", "sink", "app"}] — app — назва й файл програми."""
+    result = _pactl("-f", "json", "list", "sink-inputs")
+    if result.returncode == 0:
+        try:
+            return [
+                {
+                    "index": int(item["index"]),
+                    "sink": item.get("sink"),
+                    "app": " ".join(
+                        str((item.get("properties") or {}).get(key, ""))
+                        for key in ("application.name", "application.process.binary")
+                    ),
+                }
+                for item in json.loads(result.stdout)
+            ]
+        except (ValueError, KeyError, TypeError):
+            pass
+    return parse_sink_inputs(_pactl("list", "sink-inputs").stdout)  # старий pactl без JSON
+
+
+def parse_sink_inputs(text: str) -> list[dict]:
+    streams = []
+    for block in re.split(r"^Sink Input #", text, flags=re.M)[1:]:
+        index = re.match(r"(\d+)", block)
+        sink = re.search(r"^\s*Sink:\s*(\d+)", block, re.M)
+        names = re.findall(r'^\s*application\.(?:name|process\.binary)\s*=\s*"([^"]*)"', block, re.M)
+        if index:
+            streams.append({"index": int(index.group(1)), "sink": int(sink.group(1)) if sink else None, "app": " ".join(names)})
+    return streams
+
+
+class PulseAppCapture:
+    """Linux: звук Zoom-клієнта на час пари — переносимо *лише його* потоки у віртуальний вихід і слухаємо.
+
+    Після пари потоки повертаються туди, де були (у навушники чи динаміки). ``sink`` — уже наявний
+    вихід (запасний шлях, де його й так записують); інакше створюємо свій на час пари.
+    """
+
+    def __init__(self, queue: AudioQueue, hear_too: bool, sink: NullSink | None = None):
+        self.queue = queue
+        self.hear_too = hear_too
+        self._shared = sink
+        self._sink: NullSink | None = None
+        self._recorder: PulseRecorder | None = None
+        self._moved: dict[int, object] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        target = self._shared
+        if target is None:
+            target = NullSink(name=f"{SINK}_zoom", loopback=self.hear_too)
+            try:
+                target.create()
+            except EarsError as e:
+                log.warning("Не можу слухати Zoom-клієнт: %s", e)
+                return
+            self._sink = target
+            self._recorder = PulseRecorder(target.monitor, self.queue)
+            self._recorder.start()
+        self._target = target.name
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._follow, name="zoom-audio", daemon=True)
+        self._thread.start()
+
+    def _follow(self) -> None:
+        # Zoom створює потоки не одразу й може пересоздати їх (змінив навушники) — стежимо всю пару.
+        while not self._stop.is_set():
+            try:
+                self.move_streams()
+            except OSError as e:
+                log.debug("pactl: %s", e)
+            self._stop.wait(3)
+
+    def move_streams(self) -> None:
+        for stream in sink_inputs():
+            if stream["index"] in self._moved or not APP_STREAM_RE.search(stream["app"]):
+                continue
+            if _pactl("move-sink-input", str(stream["index"]), self._target).returncode == 0:
+                if not self._moved:
+                    log.info("👂 Слухаю Zoom-клієнт")
+                self._moved[stream["index"]] = stream["sink"]
+
+    def stop(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=10)
+        self._thread = None
+        for index, original in self._moved.items():
+            back = str(original) if original is not None else "@DEFAULT_SINK@"
+            if _pactl("move-sink-input", str(index), back).returncode != 0:
+                _pactl("move-sink-input", str(index), "@DEFAULT_SINK@")
+        self._moved = {}
+        if self._recorder is not None:
+            self._recorder.stop()
+            self._recorder = None
+        if self._sink is not None:
+            self._sink.close()
+            self._sink = None
+
+
+def to_pcm16(samples, rate: int) -> bytes:
+    """Моно float -1..1 з частотою ``rate`` → 16 кГц, 16 біт (як хоче whisper)."""
+    import numpy as np
+
+    samples = np.asarray(samples, dtype=np.float32)
+    if rate % RATE == 0 and rate != RATE:
+        factor = rate // RATE  # середнє по вікну — заодно прибирає частоти, яких whisper не чує
+        samples = samples[: len(samples) - len(samples) % factor].reshape(-1, factor).mean(axis=1)
+    elif rate != RATE and len(samples) > 1:
+        count = max(1, int(round(len(samples) * RATE / rate)))
+        samples = np.interp(np.linspace(0, len(samples) - 1, count), np.arange(len(samples)), samples)
+    return (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
+
+
+def _sounddevice():
+    try:
+        import sounddevice
+    except (ImportError, OSError) as e:
+        raise EarsError('немає sounddevice — встанови: pip install -e ".[ears]"') from e
+    return sounddevice
+
+
+def list_input_devices() -> list[str]:
+    """Назви пристроїв запису — для вибору віртуального кабелю у вікні програми."""
+    try:
+        sd = _sounddevice()
+        names = [device["name"] for device in sd.query_devices() if device["max_input_channels"] > 0]
+    except Exception:  # noqa: BLE001 — немає звукової системи чи бібліотеки: просто порожній список
+        return []
+    return list(dict.fromkeys(names))
+
+
+class DeviceAppCapture:
+    """Windows/macOS: звук Zoom-клієнта з віртуального кабелю (VB-Cable, BlackHole).
+
+    У Zoom динаміком обрано кабель, а ми записуємо його «вихід» — тож чуємо лише Zoom, а не YouTube
+    чи інші програми.
+    """
+
+    def __init__(self, queue: AudioQueue, device: str):
+        self.queue = queue
+        self.device = device
+        self._stream = None
+
+    def start(self) -> None:
+        if self._stream is not None:
+            return
+        try:
+            sd = _sounddevice()
+            matches = [
+                index
+                for index, info in enumerate(sd.query_devices())
+                if info["max_input_channels"] > 0 and self.device.casefold() in info["name"].casefold()
+            ]
+            if not matches:
+                raise EarsError(f"пристрій «{self.device}» не знайдено — перевір, що кабель встановлено")
+            info = sd.query_devices(matches[0])
+            rate = int(info["default_samplerate"])
+            channels = max(1, min(2, int(info["max_input_channels"])))
+
+            def callback(indata, frames, moment, status) -> None:
+                self.queue.feed(to_pcm16(indata.mean(axis=1), rate))
+
+            self._stream = sd.InputStream(
+                device=matches[0], channels=channels, samplerate=rate, dtype="float32", blocksize=rate // 2,
+                callback=callback,
+            )
+            self._stream.start()
+            log.info("👂 Слухаю Zoom-клієнт через «%s»", info["name"])
+        except Exception as e:  # noqa: BLE001 — без звуку Zoom решта пари однаково працює
+            self._stream = None
+            log.warning("Не можу слухати Zoom-клієнт: %s", e)
+
+    def stop(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            finally:
+                self._stream = None
+
+
+class NoAppCapture:
+    """Zoom-клієнт почути нема як — кажемо, що робити."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def start(self) -> None:
+        log.warning("Zoom-клієнт вуха не чують: %s", self.reason)
+
+    def stop(self) -> None:
+        pass
+
+
 class Ears:
     """Фоновий потік: звук → шматки по ~10 с → текст → on_text(текст, чи впевнено).
 
     ``source`` — пристрій PulseAudio (рядок, наприклад "autopara.monitor") або готовий потік
-    (BrowserAudio).
+    (AudioQueue).
     """
 
     def __init__(

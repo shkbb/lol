@@ -747,13 +747,49 @@ function resourcesCard() {
       "На батареї з вухами й мозком ноутбук сідає помітно швидше — краще бути на зарядці."));
 }
 
+let audioDevices = null;  // пристрої запису (для віртуального кабелю Zoom), завантажуються раз
+
+function zoomEars(linux) {
+  if (get("join.zoom_mode") !== "app") {
+    return h("small", { class: "hint" }, "Zoom відкривається в браузері — вуха чують його так само, як Meet.");
+  }
+  if (linux) {
+    return h("small", { class: "hint" }, "Zoom-клієнт: на час пари програма слухає лише його звук (PipeWire/PulseAudio) — налаштовувати нічого не треба.");
+  }
+  if (audioDevices === null) {
+    audioDevices = [];
+    api("GET", "/api/audio-devices").then((result) => {
+      audioDevices = result.devices;
+      if (page === "assistant") render();
+    }).catch(() => {});
+  }
+  const current = get("ears.app_device") || "";
+  const names = [...new Set([...audioDevices, current].filter(Boolean))];
+  const select = h("select", { onchange: (event) => set("ears.app_device", event.target.value || undefined) },
+    h("option", { value: "" }, "— не слухати Zoom-клієнт —"),
+    names.map((name) => h("option", { value: name, selected: name === current }, name)));
+  const mac = (meta.platform || "") === "darwin";
+  const cable = mac
+    ? h("a", { href: "https://existential.audio/blackhole/", target: "_blank", rel: "noopener" }, "BlackHole")
+    : h("a", { href: "https://vb-audio.com/Cable/", target: "_blank", rel: "noopener" }, "VB-Cable");
+  return h("div", { class: "card", style: "background:var(--panel-2);box-shadow:none;margin:6px 0 14px" },
+    h("b", {}, "Zoom-клієнт"),
+    h("div", { class: "muted small", style: "margin-bottom:8px" }, "Щоб вуха чули пари в Zoom-клієнті, обери одне:"),
+    h("ol", { class: "small", style: "margin:0 0 8px;padding-left:20px" },
+      h("li", { style: "margin-bottom:6px" }, "Найпростіше — заходити в Zoom через браузер. ",
+        h("button", { class: "soft", onclick: () => { set("join.zoom_mode", "browser"); render(); toast("Збережи зміни"); } }, "Заходити через браузер")),
+      h("li", {}, "Або віртуальний кабель: встанови ", cable, mac ? ", у Zoom → Налаштування → Аудіо → Динамік обери BlackHole," : ", у Zoom → Налаштування → Аудіо → Динамік обери «CABLE Input»,",
+        " а тут — пристрій запису кабелю:", h("div", { style: "margin-top:6px" }, select))),
+    h("small", { class: "hint" }, "Так вуха чують лише Zoom, а не YouTube чи музику. Як при цьому чути пару й самому — README, розділ «Вуха»."));
+}
+
 pages.assistant = () => {
   const linux = (meta.platform || "").startsWith("linux");
   const check = h("button", { class: "ghost" }, "Перевірити мозок і вуха");
   const checks = h("div", { class: "list" });
   check.onclick = () => busy(check, "Перевіряю…", async () => {
     const result = await api("POST", "/api/check");
-    checks.replaceChildren(...result.checks.filter((item) => ["мозок", "вуха", "відеовирізки"].includes(item.area)).map((item) =>
+    checks.replaceChildren(...result.checks.filter((item) => ["мозок", "вуха", "вуха в Zoom", "відеовирізки"].includes(item.area)).map((item) =>
       h("div", { class: "item" }, h("span", { class: item.ok ? "badge ok" : item.ok === null ? "badge" : "badge bad" }, item.area), h("span", {}, item.text))));
   });
   return [
@@ -784,8 +820,9 @@ pages.assistant = () => {
         "Розпізнає мову локально, без інтернету: кличуть тебе, перекличка голосом, розшифровка для звіту. Потрібен пакет autopara[ears]."),
       selectField("ears.model", "Модель розпізнавання", "large-v3-turbo — точніша для української; якщо комп'ютер не встигатиме, програма сама перейде на small.",
         [["small", "small — швидка"], ["medium", "medium"], ["large-v3-turbo", "large-v3-turbo — точна"]]),
-      linux && selectField("ears.source", "Звідки брати звук", "Зі сторінки пари — на будь-якій ОС і навіть із вимкненим звуком; системний — через PipeWire/PulseAudio, чує все, що грає браузер.",
-        [["auto", "автоматично (системний, якщо є)"], ["browser", "зі сторінки пари"], ["pulse", "системний звук Linux"]]),
+      linux && selectField("ears.source", "Пари в браузері: звідки брати звук", "Зі вкладки пари — вуха чують лише пару, навіть із вимкненим звуком. Весь звук браузера — запасний шлях: чує й інші вкладки браузера програми.",
+        [["auto", "зі вкладки пари (рекомендовано)"], ["pulse", "весь звук браузера програми (PipeWire/PulseAudio)"]]),
+      get("ears.enabled") && zoomEars(linux),
       checkField("brain.enabled", "Мозок (локальна мовна модель)", "Через Ollama (є для Linux, Windows і macOS). Розбирається в незапрограмованих ситуаціях і складає звіт після пари."),
       h("div", { class: "grid" },
         textField("brain.model", "Модель", "", { placeholder: "gemma3:4b" }),

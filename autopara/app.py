@@ -144,7 +144,10 @@ class Controller:
             self.config.join, self.config.profile_dir, audio_sink=info.audio_sink, frames=info.frames,
             audio_tap=info.audio_tap,
         )
-        runner = Runner(self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant)
+        runner = Runner(
+            self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant,
+            app_audio=info.app_audio,
+        )
         return runner, joiner
 
     def _tick_if_due(self) -> None:
@@ -630,6 +633,12 @@ def api_telegram_test(server: AppServer, query: dict, body: dict):
     return 200, {"ok": True}
 
 
+def api_audio_devices(server: AppServer, query: dict, body: dict):
+    from .ears import list_input_devices
+
+    return 200, {"devices": list_input_devices()}
+
+
 def api_autostart(server: AppServer, query: dict, body: dict):
     try:
         return 200, autostart.set_enabled(bool(body.get("enabled")))
@@ -660,6 +669,7 @@ ROUTES = {
     ("POST", "/api/telegram/test"): api_telegram_test,
     ("GET", "/api/log"): api_log,
     ("POST", "/api/autostart"): api_autostart,
+    ("GET", "/api/audio-devices"): api_audio_devices,
 }
 
 

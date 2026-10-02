@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ears = ["faster-whisper>=1.0"]  # «вуха»: локальне розпізнавання мови
+# «вуха»: локальне розпізнавання мови; sounddevice — слухати Zoom-клієнт через віртуальний кабель (Windows, macOS)
+ears = ["faster-whisper>=1.0", "sounddevice>=0.4; platform_system != 'Linux'"]
 dev = ["pytest>=8", "numpy"]
 
 [project.scripts]

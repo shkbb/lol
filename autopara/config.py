@@ -98,9 +98,12 @@ class EarsSettings:
     enabled: bool = False
     model: str = "small"
     language: str = "uk"
-    # Звідки брати звук: "browser" — зі сторінки пари (будь-яка ОС), "pulse" — системний звук Linux,
-    # "auto" — системний, де він є, інакше з браузера.
+    # Пари в браузері: "auto"/"browser" — звук лише з вкладки пари (будь-яка ОС); "pulse" — увесь звук
+    # браузера програми через PipeWire/PulseAudio (Linux, запасний шлях).
     source: str = "auto"
+    # Zoom-клієнт на Windows/macOS: пристрій запису віртуального кабелю, куди Zoom виводить звук
+    # (наприклад, "CABLE Output" з VB-Cable чи "BlackHole"). На Linux не потрібен — там чуємо сам Zoom.
+    app_device: str = ""
 
 
 @dataclass

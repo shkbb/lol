@@ -155,7 +155,7 @@ def cmd_join(args, config: Config) -> None:
         joiner = Joiner(
             config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames, audio_tap=stack.audio_tap
         )
-        runner = Runner(config, _client(config), joiner, clock=clock, assistant=stack.assistant)
+        runner = Runner(config, _client(config), joiner, clock=clock, assistant=stack.assistant, app_audio=stack.app_audio)
         runner.plan = Plan(visits=[visit])
         runner.next_refresh = leave_at + timedelta(days=1)  # розклад не потрібен
         print("Заходжу. Ctrl+C — вийти.")

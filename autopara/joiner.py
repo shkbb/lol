@@ -582,7 +582,17 @@ class Joiner:
             self._discard(page)
             raise JoinError(f"помилка браузера: {str(e).splitlines()[0]}") from e
         self._screencast(page)
+        self._enable_ears(page)
         return Session(visit, visit.leave_at, page)
+
+    def _enable_ears(self, page: Page) -> None:
+        """Вуха слухають лише вкладку пари, куди зайшла програма, — не YouTube чи інші вкладки."""
+        if self.browser.audio_tap is None:
+            return
+        try:
+            page.evaluate("() => window.__autoparaTap ? window.__autoparaTap.enable() : false")
+        except PlaywrightError as e:
+            log.debug("Не вдалося увімкнути вуха у вкладці: %s", e)
 
     def _screencast(self, page: Page) -> None:
         """Кадри сторінки — у буфер для відеовирізок. Трансляція живе, поки відкрита вкладка."""
@@ -622,6 +632,7 @@ class Joiner:
         page = session.page
         if page is None:
             return Observation()
+        self._enable_ears(page)  # якщо Meet перезавантажив сторінку, збирач звуку треба ввімкнути знову
         try:
             if session.visit.platform == "meet":
                 return observe_meet(page)

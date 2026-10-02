@@ -77,7 +77,8 @@ desktop = true            # дублювати сповіщення на роб�
 enabled = false
 model = "small"           # small — швидко, але плутає прізвища; large-v3-turbo — значно точніше (autopara listen-test)
 language = "uk"
-source = "auto"           # звук: "browser" — зі сторінки пари; "pulse" — системний звук Linux; "auto" — системний, якщо є
+source = "auto"           # пари в браузері: "auto" — звук лише з вкладки пари; "pulse" — увесь звук браузера програми (Linux)
+app_device = ""           # Zoom-клієнт на Windows/macOS: віртуальний кабель, напр. "CABLE Output" чи "BlackHole" (README → «Вуха»)
 
 [brain]                   # локальна мовна модель через Ollama
 enabled = false

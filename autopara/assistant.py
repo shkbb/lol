@@ -193,6 +193,7 @@ class Meeting:
     pending: Pending | None = None  # чекаємо на твоє «так»/«ні»
     awaiting: Awaiting | None = None  # хвиля «+», щодо якої питаємо мозок
     expect_roll_call: datetime | None = None  # мозок чув перекличку — чекаємо, чи відмічатимуться інші
+    can_chat: bool = True  # чи вміємо писати в чат цієї пари (лише Meet у браузері)
 
 
 @dataclass
@@ -265,10 +266,12 @@ class Assistant:
     # --- Життєвий цикл зустрічі ------------------------------------------------
 
     def attach(
-        self, key: str, title: str, teacher: str, start: datetime, end: datetime, now: datetime | None = None
+        self, key: str, title: str, teacher: str, start: datetime, end: datetime, now: datetime | None = None,
+        can_chat: bool = True,
     ) -> None:
         with self._lock:
             meeting = Meeting(key, title, teacher, start, end, joined=now or start, report_id=f"{key}#1")
+            meeting.can_chat = can_chat
             self.meetings[key] = meeting
             self._order.append(key)
 
@@ -282,7 +285,7 @@ class Assistant:
             number = meeting.lesson_number + 1
             fresh = Meeting(key, title, meeting.teacher, start, end, joined=now or start, report_id=f"{key}#{number + 1}")
             fresh.lesson_number = number
-            fresh.seen, fresh.chat_primed = meeting.seen, True
+            fresh.seen, fresh.chat_primed, fresh.can_chat = meeting.seen, True, meeting.can_chat
             self.meetings[key] = fresh
 
     def detach(self, key: str, now: datetime | None = None) -> None:
@@ -409,7 +412,7 @@ class Assistant:
             self._last_mention = now
             if self.alert_mentions:
                 lead = "🚨 Тебе кличуть" if any(hits) else "❗ Можливо, звертаються до тебе"
-                self._alert(f"{lead} {where} на «{meeting.title}»: «{_snippet(text)}»", self._quick_buttons())
+                self._alert(f"{lead} {where} на «{meeting.title}»: «{_snippet(text)}»", self._quick_buttons(meeting))
                 if self.on_moment:
                     self.on_moment(meeting.key, f"🎬 Момент з «{meeting.title}», {now:%H:%M}", now)
             if self.wake_brain:
@@ -696,7 +699,10 @@ class Assistant:
                 return  # «дякую» за групою не варте навіть сповіщення
             ask, act_on_timeout = True, False
         needs_you = ask or act_on_timeout or policy == "ask"
-        if policy == "off":
+        if not meeting.can_chat:
+            # Zoom: писати в його чат помічник не вміє — підказує тобі, що написати.
+            self.notify(f"{reason} на «{meeting.title}».{quote}\n✍️ У цей чат я писати не вмію — напиши сам: «{text}»", urgent=True)
+        elif policy == "off":
             self.notify(f"{reason} на «{meeting.title}».{quote}\nСам не пишу — так налаштовано.", urgent=True)
         elif not self._can_chat(meeting, now):
             self.notify(f"{reason} на «{meeting.title}», але я вже писав у чат нещодавно — пропускаю.{quote}", urgent=True)
@@ -840,6 +846,10 @@ class Assistant:
                 return self._status(meeting, now)
             if meeting is None:
                 return "Зараз я не на парі."
+            if not meeting.can_chat and (
+                is_reply or low in ("+", "так", "yes", "ок", "ok", "давай", "чат", "/chat") or low.startswith(("напиши ", "/say ", "say:"))
+            ):
+                return f"Чат «{meeting.title}» мені не видно й писати туди я не вмію (Zoom) — напиши сам."
             if low in ("чат", "/chat"):
                 return self._chat_view(meeting)
             if low in ("екран", "скрін", "скріншот", "/screen"):
@@ -897,7 +907,9 @@ class Assistant:
         else:
             self.notify(text, urgent=True)
 
-    def _quick_buttons(self) -> list:
+    def _quick_buttons(self, meeting: Meeting) -> list:
+        if not meeting.can_chat:
+            return []  # кнопки «написати в чат» тут нічого б не зробили
         replies = [(f"💬 {reply}", f"say:{index}") for index, reply in enumerate(self.me.quick_replies[:3])]
         return [replies, [("📋 Чат", "чат"), ("🖥 Екран", "екран")]] if replies else [[("📋 Чат", "чат"), ("🖥 Екран", "екран")]]
 

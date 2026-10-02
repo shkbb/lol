@@ -33,6 +33,7 @@ class Runner:
         joiner,
         clock: Callable[[], datetime] | None = None,
         sleep_guard: SleepGuard | None = None,
+        app_audio=None,
         assistant: Assistant | None = None,
     ):
         self.config = config
@@ -49,6 +50,7 @@ class Runner:
         self.retry_at: dict[str, datetime] = {}
         self.next_refresh: datetime | None = None
         self.sleep_guard = sleep_guard or SleepGuard()
+        self.app_audio = app_audio  # вуха для Zoom-клієнта: start() на початку пари, stop() після
         self.last_seen: dict[str, Observation] = {}
         self.extra_visits: list[Visit] = []  # тестові входи з вікна програми
         self.last_error = ""
@@ -168,7 +170,9 @@ class Runner:
         self.notify(f"👋 Вийшов з «{session.visit.title}»: {reason}", routine=True)
 
     def _forget(self, key: str) -> None:
-        self.active.pop(key, None)
+        session = self.active.pop(key, None)
+        if session is not None and session.page is None and self.app_audio is not None:
+            self.app_audio.stop()
         self.last_seen.pop(key, None)
         if self.assistant is not None:
             self.assistant.detach(key, self.clock())
@@ -237,15 +241,19 @@ class Runner:
                 self.notify(f"❌ Не вдалося зайти на «{visit.title}»: {e}. Зайди сам: {visit.url}", urgent=True)
                 self.finished.add(visit.key)
             return
+        start, end = self._window(visit)
         if session.page is None:
             self.notify(f"✅ Відкрив «{visit.title}» у Zoom-клієнті (мікрофон і камера — за налаштуваннями Zoom)", routine=True)
+            if self.app_audio is not None:
+                self.app_audio.start()
         else:
             self.notify(f"✅ Зайшов на «{visit.title}», мікрофон і камера вимкнені", routine=True)
             if self.config.join.smart_leave:
-                session.decider = LeaveDecider(*self._window(visit), self.config.join)
-            if self.assistant is not None:
-                start, end = self._window(visit)
-                self.assistant.attach(visit.key, visit.title, visit.lessons[0].teacher, start, end, now=now)
+                session.decider = LeaveDecider(start, end, self.config.join)
+        if self.assistant is not None:
+            # Писати в чат помічник уміє лише в Meet; в інших — підкаже тобі, що написати.
+            can_chat = session.page is not None and visit.platform == "meet"
+            self.assistant.attach(visit.key, visit.title, visit.lessons[0].teacher, start, end, now=now, can_chat=can_chat)
         self.finished.add(visit.key)
         self.active[visit.key] = session
         # Одразу дивимось у зустріч: те, що вже є в чаті, — історія, а все наступне — нове.

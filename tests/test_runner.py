@@ -307,3 +307,34 @@ def test_join_and_leave_messages_can_be_switched_off():
     runner.next_refresh = None
     runner.tick(at("09:28"))
     assert inbox and inbox[-1].startswith("❌")  # невдача — повідомляємо завжди
+
+
+class FakeAppAudio:
+    def __init__(self):
+        self.log = []
+
+    def start(self):
+        self.log.append("start")
+
+    def stop(self):
+        self.log.append("stop")
+
+
+def test_zoom_client_class_is_heard_and_reported():
+    """Пара в Zoom-клієнті: вуха слухають саме його, помічник стежить, а писати в чат не береться."""
+    runner, joiner, inbox = make_assisted_runner([make_lesson(subject="Мережі")])
+    joiner.join = lambda visit: Session(visit, visit.leave_at)  # Zoom-клієнт: вкладки браузера немає
+    runner.app_audio = audio = FakeAppAudio()
+    finished = []
+    runner.assistant.on_finished = finished.append
+    runner.tick(at("09:28"))
+    assert audio.log == ["start"]
+    meeting = runner.assistant.current()
+    assert meeting is not None and meeting.can_chat is False
+    runner.assistant.on_heard("Ляшко, ви тут?", at("09:40"))
+    assert any("напиши сам: «Так, я тут»" in text for text in inbox)
+    assert joiner.written == []
+    runner.tick(at("10:51"))
+    assert audio.log == ["start", "stop"]
+    [record] = finished
+    assert record.transcript and "Ляшко, ви тут?" in record.transcript[0][1]  # у звіт розшифровка потрапила

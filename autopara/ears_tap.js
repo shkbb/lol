@@ -6,14 +6,24 @@
 // - вхідні доріжки RTCPeerConnection — про всяк випадок теж (і як запасний шлях);
 // - програвачі на Web Audio (Zoom у браузері) — перехоплюємо їхнє підключення до динаміків.
 // Усе це лише слухає: звук, який чуєш ти, не змінюється, а мікрофон не чіпаємо взагалі.
+//
+// Працює лише на сторінках Meet і Zoom, і лише у вкладці, де програма сама зайшла на пару
+// (вона викликає enable()). YouTube чи будь-що інше, навіть у цьому ж браузері, вухам не потрапляє.
 (() => {
-  if (window.top !== window || window.__autoparaTap) return;
+  const MEETING_HOSTS = /(^|\.)meet\.google\.com$|(^|\.)zoom\.us$|(^|\.)zoom\.com$/;
+  if (window.top !== window || window.__autoparaTap || !MEETING_HOSTS.test(location.hostname)) return;
   const RATE = 16000;
   const SEND_SAMPLES = RATE / 2;
   const state = {
-    ctx: null, mix: null, tracks: new Map(), webAudio: new Map(), pending: [], pendingLength: 0,
+    enabled: false, ctx: null, mix: null, tracks: new Map(), webAudio: new Map(), pending: [], pendingLength: 0,
   };
-  window.__autoparaTap = state;
+  window.__autoparaTap = {
+    enable() {
+      state.enabled = true;
+      scan();
+      return true;
+    },
+  };
 
   function processor(ctx, onlyWithoutTracks) {
     // Простий фільтр: середнє по вікну перед проріджуванням до 16 кГц прибирає частоти, яких whisper не чує.
@@ -21,6 +31,7 @@
     const step = ctx.sampleRate / RATE;
     const down = { phase: 0, sum: 0, count: 0 };
     node.onaudioprocess = (event) => {
+      if (!state.enabled) return;
       if (onlyWithoutTracks ? state.tracks.size > 0 : state.tracks.size === 0) return;
       const input = event.inputBuffer.getChannelData(0);
       const out = new Int16Array(Math.ceil(input.length / step) + 1);

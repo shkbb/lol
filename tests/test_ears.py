@@ -166,7 +166,7 @@ def test_too_slow_model_switches_to_a_lighter_one(monkeypatch):
 
 
 def test_browser_audio_stream():
-    stream = ears.BrowserAudio(max_seconds=1)
+    stream = ears.AudioQueue(max_seconds=1)
     assert stream.read(100, timeout=0.01) == b""  # не на парі — просто тиша
     stream.feed(b"\x01\x00" * 10)
     stream.feed_base64("AgADAA==")  # два відліки з браузера
@@ -181,7 +181,7 @@ def test_browser_audio_stream():
 def test_ears_flush_the_tail_when_the_class_ends():
     """Звук з браузера припинився — хвіст розпізнаємо одразу, а не разом з наступною парою."""
     chunks = []
-    stream = ears.BrowserAudio()
+    stream = ears.AudioQueue()
     listener = Ears(lambda chunk: chunks.append(len(chunk)) or [], lambda text, confident: None, stream)
     stream.feed(tone(4, 3000))
     listener.start()
@@ -193,9 +193,124 @@ def test_ears_flush_the_tail_when_the_class_ends():
     assert chunks == [ears.RATE * 2 * 4]
 
 
-def test_audio_source_choice(monkeypatch):
-    monkeypatch.setattr(ears, "pulse_available", lambda: None)
-    assert ears.pick_source("auto") == "pulse"
-    monkeypatch.setattr(ears, "pulse_available", lambda: "системний звук слухаю лише на Linux")
-    assert ears.pick_source("auto") == "browser"
+def test_audio_source_choice():
+    assert ears.pick_source("auto") == "browser"  # за замовчуванням — лише вкладка пари
+    assert ears.pick_source("browser") == "browser"
     assert ears.pick_source("pulse") == "pulse"
+
+
+ZOOM_JSON = """[
+  {"index": 41, "sink": 0, "properties": {"application.name": "Firefox", "application.process.binary": "firefox"}},
+  {"index": 42, "sink": 3, "properties": {"application.name": "ZOOM VoiceEngine", "application.process.binary": "zoom"}}
+]"""
+
+ZOOM_TEXT = """Sink Input #41
+\tSink: 0
+\tProperties:
+\t\tapplication.name = "YouTube Music"
+Sink Input #42
+\tSink: 3
+\tProperties:
+\t\tapplication.name = "ZOOM VoiceEngine"
+\t\tapplication.process.binary = "zoom"
+"""
+
+
+class FakePactl:
+    def __init__(self, json_ok=True):
+        self.calls = []
+        self.json_ok = json_ok
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        if args[:2] == ("-f", "json"):
+            return types.SimpleNamespace(returncode=0 if self.json_ok else 1, stdout=ZOOM_JSON if self.json_ok else "")
+        if args[:2] == ("list", "sink-inputs"):
+            return types.SimpleNamespace(returncode=0, stdout=ZOOM_TEXT)
+        return types.SimpleNamespace(returncode=0, stdout="")
+
+
+def test_sink_inputs_from_json_or_old_text(monkeypatch):
+    monkeypatch.setattr(ears, "_pactl", FakePactl(json_ok=True))
+    assert [(s["index"], s["sink"]) for s in ears.sink_inputs() if "zoom" in s["app"]] == [(42, 3)]
+    monkeypatch.setattr(ears, "_pactl", FakePactl(json_ok=False))
+    streams = ears.sink_inputs()
+    assert streams == [{"index": 41, "sink": 0, "app": "YouTube Music"}, {"index": 42, "sink": 3, "app": "ZOOM VoiceEngine zoom"}]
+
+
+def test_only_zoom_is_moved_and_then_returned(monkeypatch):
+    """Вухам потрапляє лише Zoom: Firefox з YouTube лишається, де був."""
+    pactl = FakePactl()
+    monkeypatch.setattr(ears, "_pactl", pactl)
+    capture = ears.PulseAppCapture(ears.AudioQueue(), hear_too=True, sink=types.SimpleNamespace(name="autopara"))
+    capture._target = "autopara"
+    capture._thread = threading.Thread(target=lambda: None)  # як після start(), але без стеження у фоні
+    capture._thread.start()
+    capture.move_streams()
+    capture.move_streams()  # уже перенесений — вдруге не чіпаємо
+    capture.stop()
+    moves = [args for args in pactl.calls if args[0] == "move-sink-input"]
+    assert moves == [("move-sink-input", "42", "autopara"), ("move-sink-input", "42", "3")]
+
+
+def test_resampling_to_whisper_rate():
+    import math
+
+    for rate in (48_000, 44_100, 16_000):
+        tone = [0.5 * math.sin(2 * math.pi * 440 * i / rate) for i in range(rate)]  # 1 с, 440 Гц
+        pcm = ears.to_pcm16(tone, rate)
+        samples = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+        assert abs(len(samples) - ears.RATE) <= 1
+        crossings = sum(1 for a, b in zip(samples, samples[1:]) if (a < 0) != (b < 0))
+        assert 860 <= crossings <= 900  # той самий тон
+        assert 15_000 < max(samples) < 17_000
+
+
+def test_virtual_cable_for_zoom_client(monkeypatch):
+    import numpy as np
+
+    streams = []
+
+    class InputStream:
+        def __init__(self, **options):
+            self.options = options
+            self.running = False
+            streams.append(self)
+
+        def start(self):
+            self.running = True
+
+        def stop(self):
+            self.running = False
+
+        def close(self):
+            pass
+
+    devices = [
+        {"name": "Microphone (Realtek)", "max_input_channels": 2, "default_samplerate": 48000.0},
+        {"name": "Speakers", "max_input_channels": 0, "default_samplerate": 48000.0},
+        {"name": "CABLE Output (VB-Audio Virtual Cable)", "max_input_channels": 2, "default_samplerate": 48000.0},
+    ]
+    fake = types.ModuleType("sounddevice")
+    fake.query_devices = lambda index=None: devices if index is None else devices[index]
+    fake.InputStream = InputStream
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+
+    assert ears.list_input_devices() == ["Microphone (Realtek)", "CABLE Output (VB-Audio Virtual Cable)"]
+    queue = ears.AudioQueue()
+    capture = ears.DeviceAppCapture(queue, "cable output")
+    capture.start()
+    [stream] = streams
+    assert stream.options["device"] == 2 and stream.running
+    stream.options["callback"](np.full((4800, 2), 0.25, dtype=np.float32), 4800, None, None)
+    assert len(queue.read(10**6)) == 1600 * 2  # 0,1 с при 48 кГц → 1600 відліків при 16 кГц
+    capture.stop()
+    assert not stream.running
+
+
+def test_missing_cable_is_reported_not_fatal(monkeypatch, caplog):
+    fake = types.ModuleType("sounddevice")
+    fake.query_devices = lambda index=None: []
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    ears.DeviceAppCapture(ears.AudioQueue(), "CABLE Output").start()
+    assert "не знайдено" in caplog.text

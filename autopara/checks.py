@@ -44,7 +44,7 @@ def install_hint(linux: str, windows: str, mac: str) -> str:
 
 def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
     from .brain import OllamaBrain
-    from .ears import pick_source, pulse_available, whisper_available
+    from .ears import list_input_devices, pick_source, pulse_available, whisper_available
     from .telegram import TelegramBot, TelegramError
 
     checks = []
@@ -94,6 +94,15 @@ def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
             pulse = pulse_available()
             where = "системний звук" if pulse is None else f"звук зі сторінки пари, бо системний недоступний: {pulse}"
         checks.append(Check(problem is None, "вуха", problem or f"готові ({config.ears.model}, {where})"))
+        if config.join.zoom_mode == "app":
+            if pulse_available() is None:
+                checks.append(Check(True, "вуха в Zoom", "Zoom-клієнт чую через PipeWire/PulseAudio"))
+            elif not config.ears.app_device:
+                checks.append(Check(False, "вуха в Zoom", "Zoom-клієнт не чую — обери віртуальний кабель або Zoom у браузері"))
+            else:
+                found = any(config.ears.app_device.casefold() in name.casefold() for name in list_input_devices())
+                text = f"слухаю «{config.ears.app_device}»" if found else f"пристрій «{config.ears.app_device}» не знайдено"
+                checks.append(Check(found, "вуха в Zoom", text))
     else:
         checks.append(Check(None, "вуха", "вимкнено"))
     return checks
