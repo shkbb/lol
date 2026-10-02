@@ -68,3 +68,14 @@ def test_local_overlay_keeps_secrets_out_of_git(tmp_path):
     config = load_config(str(tmp_path / "config.toml"))
     assert (config.telegram.token, config.telegram.chat_id) == ("123:abc", 1)
     assert config.links[0].skip  # правила з local — пріоритетніші
+
+
+def test_schedule_date_formats():
+    from datetime import date
+
+    from autopara.cli import parse_day
+
+    today = date(2026, 10, 2)
+    assert parse_day("07.10", today) == parse_day("7.10.2026", today) == parse_day("2026-10-07", today) == date(2026, 10, 7)
+    with pytest.raises(ConfigError):
+        parse_day("сьомого", today)

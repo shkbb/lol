@@ -6,7 +6,7 @@ import argparse
 import logging
 import signal
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -67,15 +67,32 @@ def _status(lesson: Lesson, config: Config) -> str:
     return f"✓ {where}{origin}: {resolution.url}"
 
 
+def parse_day(text: str, today: date) -> date:
+    """«07.10», «7.10.2026» або «2026-10-07». Без року — поточний."""
+    text = text.strip()
+    for pattern in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m"):
+        try:
+            parsed = datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+        return parsed.replace(year=today.year) if pattern == "%d.%m" else parsed
+    raise ConfigError(f"не розумію дату «{text}» — напиши, наприклад, 07.10")
+
+
 def cmd_schedule(args, config: Config) -> None:
     client = _client(config)
     tz = ZoneInfo(config.timezone)
     now = datetime.now(tz)
     target = resolve_target(client, config)
-    days = args.days if args.days is not None else config.schedule.days_ahead
-    lessons = client.schedule(target, now.date(), now.date() + timedelta(days=days))
+    if args.date:
+        first = last = parse_day(args.date, now.date())
+    else:
+        days = args.days if args.days is not None else config.schedule.days_ahead
+        first, last = now.date(), now.date() + timedelta(days=days)
+    lessons = client.schedule(target, first, last)
     who = target.student_name or target.group_name or config.schedule.group
-    print(f"Розклад: {who}, {now:%d.%m} – {now.date() + timedelta(days=days):%d.%m}\n")
+    period = f"{WEEKDAYS[first.weekday()]} {first:%d.%m}" if first == last else f"{first:%d.%m} – {last:%d.%m}"
+    print(f"Розклад: {who}, {period}\n")
     if not lessons:
         print("Пар немає.")
     previous_day = None
@@ -307,6 +324,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     schedule = sub.add_parser("schedule", help="показати розклад і які посилання відкриються")
     schedule.add_argument("--days", type=int, help="на скільки днів уперед (за замовчуванням — з конфіга)")
+    schedule.add_argument("--date", help="лише один день, наприклад 07.10")
     schedule.set_defaults(func=cmd_schedule)
 
     login = sub.add_parser("login", help="відкрити браузер, щоб один раз увійти в Google")
