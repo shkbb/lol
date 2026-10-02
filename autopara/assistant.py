@@ -312,6 +312,12 @@ class Assistant:
             )
         )
 
+    def set_me(self, me: MeSettings) -> None:
+        """Нові налаштування з вікна програми — без перезапуску."""
+        with self._lock:
+            self.me = me
+            self._patterns = name_patterns(me.name)
+
     def set_classmates(self, names: list[str]) -> None:
         """Прізвища однокурсників (з сайту розкладу): по них видно, що викладач читає список групи."""
         mine = name_patterns(self.me.name)[0][0].pattern if self.me.name else None

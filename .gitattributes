@@ -1,0 +1,3 @@
+# Особисті профілі не потрапляють в архіви (git archive, «Download ZIP» на GitHub),
+# якими зручно ділитися з друзями.
+/profiles/** export-ignore

@@ -245,3 +245,15 @@ def test_http_errors_become_rozklad_errors():
 
     with pytest.raises(RozkladError, match="HTTP 404"):
         RozkladClient(session=Down()).faculties()
+
+
+def test_group_search_for_the_ui(site):
+    client = RozkladClient(session=site)
+    found = client.search_groups("тцр")
+    assert [(g.group_name, g.faculty_name, g.course) for g in found] == [
+        ("ТЦР-31", "ННІ Цифрових технологій", 3),
+        ("ТЦР-32", "ННІ Цифрових технологій", 3),
+    ]
+    requests_made = len(site.requests)
+    client.search_groups("іпз")
+    assert len(site.requests) == requests_made  # список груп кешується

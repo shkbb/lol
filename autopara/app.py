@@ -1,0 +1,714 @@
+"""Програма з вікном.
+
+- ``Controller`` — серце: розклад, браузер і помічник живуть в одному потоці (так вимагає Playwright),
+  а вікно налаштувань спілкується з ним через чергу команд.
+- ``AppServer`` — локальний сервер вікна (лише 127.0.0.1). Кожен запит до API несе випадковий токен,
+  який вікно отримує при відкритті, а заголовок Host перевіряється — тож сторонні сайти в браузері
+  нічого не змінять.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import queue
+import secrets
+import subprocess
+import threading
+import tomllib
+import urllib.request
+import webbrowser
+from collections import deque
+from concurrent.futures import Future
+from contextlib import ExitStack
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
+
+from .checks import find_chrome, run_checks
+from .config import UNIVERSITIES, Config, ConfigError, config_to_dict, parse_config, save_config, user_config_dir
+from .links import platform_of, resolve
+from .planner import Visit
+from .rozklad import Lesson, RozkladError
+from .sources import make_source, resolve_target
+
+log = logging.getLogger(__name__)
+
+STATIC = Path(__file__).parent / "ui"
+PROFILES = Path(__file__).resolve().parent.parent / "profiles"  # профілі з репозиторію (якщо є)
+POLL_SECONDS = 20
+WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
+
+
+class LogBuffer(logging.Handler):
+    """Останні рядки лога — для вкладки «Журнал»."""
+
+    def __init__(self, size: int = 500):
+        super().__init__()
+        self.lines: deque[tuple[int, str, str]] = deque(maxlen=size)
+        self.counter = 0
+        self.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%d.%m %H:%M:%S"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.counter += 1
+        self.lines.append((self.counter, record.levelname, self.format(record)))
+
+    def since(self, after: int) -> list[dict]:
+        return [{"n": n, "level": level, "text": text} for n, level, text in list(self.lines) if n > after]
+
+
+class Controller:
+    def __init__(self, config: Config, config_path: Path, clock=None, runner_parts=None):
+        self.config = config
+        self.config_path = config_path
+        self.clock = clock or (lambda: datetime.now(ZoneInfo(self.config.timezone)))
+        self.runner_parts = runner_parts or self._real_parts
+        self._commands: queue.Queue = queue.Queue()
+        self._wake = threading.Event()
+        self._state_lock = threading.Lock()
+        self._state: dict = {"running": False}
+        self._thread = threading.Thread(target=self._loop, name="controller", daemon=True)
+        self._done = threading.Event()
+        # Живуть лише в потоці контролера:
+        self.runner = None
+        self.joiner = None
+        self._stack: ExitStack | None = None
+        self._restart_pending = False
+        self._user_stopped = False  # вимкнули кнопкою — тоді й після збереження налаштувань не вмикаємо самі
+        self._next_tick: datetime | None = None
+        self._last_error = ""
+
+    # --- Із будь-якого потоку ----------------------------------------------------
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def call(self, name: str, *args, timeout: float = 60):
+        future: Future = Future()
+        self._commands.put((name, args, future))
+        self._wake.set()
+        return future.result(timeout)
+
+    def snapshot(self) -> dict:
+        with self._state_lock:
+            return dict(self._state)
+
+    def shutdown(self) -> None:
+        if self._thread.is_alive():
+            try:
+                self.call("quit", timeout=30)
+            finally:
+                self._done.wait(10)
+
+    # --- Потік контролера --------------------------------------------------------
+
+    def _loop(self) -> None:
+        self._publish()
+        while True:
+            while True:
+                try:
+                    name, args, future = self._commands.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    result = getattr(self, f"_do_{name}")(*args)
+                    future.set_result(result)
+                except Exception as e:  # noqa: BLE001 — помилку побачить вікно, а цикл житиме далі
+                    log.exception("Команда %s не вдалася", name)
+                    future.set_exception(e)
+                self._publish()
+                if name == "quit":
+                    self._done.set()
+                    return
+            self._tick_if_due()
+            if self.joiner is not None:
+                self.joiner.idle(0.5)  # чекаємо, даючи браузеру доставляти події
+            else:
+                self._wake.wait(0.5)
+                self._wake.clear()
+
+    def _real_parts(self, stack: ExitStack):
+        from .joiner import Joiner
+        from .runner import Runner
+        from .wiring import assistant_stack
+
+        info = stack.enter_context(assistant_stack(self.config, self.clock))
+        joiner = Joiner(self.config.join, self.config.profile_dir, audio_sink=info.audio_sink, frames=info.frames)
+        runner = Runner(self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant)
+        return runner, joiner
+
+    def _tick_if_due(self) -> None:
+        if self.runner is None:
+            return
+        now = self.clock()
+        if self._next_tick is None or now >= self._next_tick:
+            self._next_tick = now + timedelta(seconds=POLL_SECONDS)
+            try:
+                self.runner.tick(now)
+            except Exception:  # noqa: BLE001
+                log.exception("Помилка в циклі розкладу")
+            if self._restart_pending and not self.runner.active:
+                log.info("Пара скінчилась — застосовую відкладені налаштування")
+                self._restart_pending = False
+                self._do_stop()
+                self._do_start()
+            self._publish()
+
+    def _do_start(self) -> str:
+        self._user_stopped = False
+        if self.runner is not None:
+            return "already"
+        if self.joiner is not None:  # браузер, відкритий для входу в Google, — перезапустимо з потрібними налаштуваннями
+            self.joiner.close()
+            self.joiner = None
+        stack = ExitStack()
+        try:
+            self.runner, self.joiner = self.runner_parts(stack)
+        except Exception:
+            stack.close()
+            raise
+        self._stack = stack
+        self._next_tick = None
+        log.info("Автоматичний вхід на пари увімкнено")
+        return "started"
+
+    def _do_stop(self) -> str:
+        if self.runner is None:
+            return "already"
+        sleep_guard = getattr(self.runner, "sleep_guard", None)
+        if sleep_guard is not None:
+            sleep_guard.release()
+        if self.joiner is not None:
+            self.joiner.close()
+        if self._stack is not None:
+            self._stack.close()
+        self.runner, self.joiner, self._stack = None, None, None
+        log.info("Автоматичний вхід на пари вимкнено")
+        return "stopped"
+
+    def _do_user_stop(self) -> str:
+        self._user_stopped = True
+        return self._do_stop()
+
+    def _do_quit(self) -> str:
+        self._do_stop()
+        if self.joiner is not None:
+            self.joiner.close()
+            self.joiner = None
+        return "quit"
+
+    def _do_reload(self, config: Config) -> str:
+        old, self.config = self.config, config
+        runner = self.runner
+        if runner is None:
+            if self._user_stopped or not configured(config):
+                return "saved"
+            # Групу щойно вибрали (або імпортували налаштування) — одразу вмикаємо вхід на пари.
+            try:
+                self._do_start()
+            except Exception as e:  # noqa: BLE001 — налаштування збережені; причину видно у вікні й лозі
+                log.error("Налаштування збережено, але автоматичний вхід не запустився: %s", e)
+                return "saved"
+            return "started"
+        heavy = (
+            any(getattr(old, section) != getattr(config, section) for section in ("telegram", "ears", "brain", "timezone", "data_dir"))
+            or (old.join.browser_channel, old.join.browser_path, old.join.mute_sound)
+            != (config.join.browser_channel, config.join.browser_path, config.join.mute_sound)
+        )
+        if heavy:
+            if runner.active:
+                self._restart_pending = True
+                return "after_lesson"  # не рвемо пару: застосуємо, щойно вона скінчиться
+            self._do_stop()
+            self._do_start()
+            return "restarted"
+        # Легкі зміни — на льоту.
+        runner.config = config
+        if runner.assistant is not None:
+            runner.assistant.set_me(config.me)
+        self.joiner.settings = config.join
+        if old.schedule != config.schedule:
+            runner.client = make_source(config)
+            runner.target = None
+        runner.next_refresh = None
+        self._next_tick = None
+        return "applied"
+
+    def _do_test_join(self, url: str, minutes: int) -> str:
+        if self.runner is None:
+            self._do_start()
+        now = self.clock()
+        leave_at = now + timedelta(minutes=minutes)
+        lesson = Lesson(now.date(), now.time(), leave_at.time(), "Тестовий вхід")
+        self.runner.extra_visits.append(Visit(url, platform_of(url), [lesson], now, leave_at))
+        self._next_tick = None
+        return "joining"
+
+    def _do_leave(self, key: str) -> str:
+        if self.runner is not None and key in self.runner.active:
+            self.runner._leave(key, "ти натиснув «Вийти» у вікні програми")
+            return "left"
+        return "not_found"
+
+    def _do_login(self) -> str:
+        if self.joiner is None:
+            from .joiner import Joiner
+
+            self.joiner = Joiner(self.config.join, self.config.profile_dir)
+        self.joiner.browser.new_page().goto("https://accounts.google.com/")
+        if self.config.join.zoom_mode == "browser":
+            self.joiner.browser.new_page().goto("https://zoom.us/signin")
+        return "opened"
+
+    def _publish(self) -> None:
+        runner = self.runner
+        state: dict = {
+            "running": runner is not None,
+            "restart_pending": self._restart_pending,
+            "now": self.clock().isoformat(),
+        }
+        if runner is not None:
+            target = runner.target
+            state["group"] = (target.student_name or target.group_name) if target else ""
+            state["error"] = getattr(runner, "last_error", "")
+            state["active"] = [
+                {
+                    "key": key,
+                    "title": session.visit.title,
+                    "platform": session.visit.platform,
+                    "url": session.visit.url,
+                    "participants": getattr(runner.last_seen.get(key), "participants", None),
+                }
+                for key, session in runner.active.items()
+            ]
+            state["upcoming"] = [
+                {
+                    "title": visit.title,
+                    "platform": visit.platform,
+                    "url": visit.url,
+                    "join_at": visit.join_at.isoformat(),
+                    "leave_at": visit.leave_at.isoformat(),
+                }
+                for visit in runner.plan.visits
+                if visit.key not in runner.finished and visit.key not in runner.active
+            ][:8]
+            state["unlinked"] = [
+                {"title": lesson.title, "when": f"{WEEKDAYS[lesson.day.weekday()]} {lesson.day:%d.%m} {lesson.start:%H:%M}"}
+                for lesson in runner.plan.unlinked
+            ][:10]
+            state["conflicts"] = list(runner.plan.conflicts)
+        with self._state_lock:
+            self._state = state
+
+
+# --- Дані для вікна ------------------------------------------------------------
+
+
+def configured(config: Config) -> bool:
+    s = config.schedule
+    return bool(s.group or s.group_uid or s.group_id)
+
+
+def lessons_view(config: Config, days: int, source=None) -> dict:
+    source = source or make_source(config)
+    target = resolve_target(source, config)
+    tz = ZoneInfo(config.timezone)
+    today = datetime.now(tz).date()
+    lessons = source.schedule(target, today, today + timedelta(days=days))
+    rows = []
+    for lesson in lessons:
+        resolution = resolve(lesson, config.links, config.schedule.use_schedule_links)
+        rows.append(
+            {
+                "date": lesson.day.isoformat(),
+                "weekday": WEEKDAYS[lesson.day.weekday()],
+                "start": f"{lesson.start:%H:%M}",
+                "end": f"{lesson.end:%H:%M}",
+                "subject": lesson.subject,
+                "short": lesson.short_subject,
+                "type": lesson.type,
+                "teacher": lesson.teacher,
+                "room": lesson.room,
+                "url": resolution.url,
+                "source": resolution.source,
+                "platform": platform_of(resolution.url) if resolution.url else None,
+            }
+        )
+    return {"group": target.student_name or target.group_name or target.uid, "lessons": rows}
+
+
+def find_telegram_chat(token: str, wait_seconds: int = 60) -> dict:
+    """Чекає, поки хтось напише боту, і повертає його chat_id."""
+    from .telegram import TelegramBot
+
+    bot = TelegramBot(token)
+    for _ in range(max(1, wait_seconds // 25)):
+        for incoming in bot.updates(wait=25):
+            if incoming.chat_id:
+                bot.chat_id = incoming.chat_id
+                bot.send("👋 Знайшов тебе! Тепер я писатиму сюди про пари.")
+                return {"chat_id": incoming.chat_id}
+    return {"chat_id": None}
+
+
+def list_profiles() -> list[str]:
+    return sorted(path.stem for path in PROFILES.glob("*.toml")) if PROFILES.is_dir() else []
+
+
+# --- Сервер вікна --------------------------------------------------------------
+
+
+class AppServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, controller: Controller, port: int = 0, token: str | None = None, logs: LogBuffer | None = None):
+        super().__init__(("127.0.0.1", port), Handler)
+        self.controller = controller
+        self.token = token or secrets.token_urlsafe(24)
+        self.logs = logs or LogBuffer()
+        self.sources: dict[str, object] = {}  # кеш клієнтів розкладу для пошуку груп
+
+    @property
+    def port(self) -> int:
+        return self.server_address[1]
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/#t={self.token}"
+
+    def source_for(self, university: str):
+        if university not in self.sources:
+            config = Config()
+            config.schedule.university = university
+            self.sources[university] = make_source(config)
+        return self.sources[university]
+
+
+class Handler(BaseHTTPRequestHandler):
+    server: AppServer
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A002 — так зветься в BaseHTTPRequestHandler
+        log.debug("UI: " + format, *args)
+
+    # Відповіді
+
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
+        )
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, status: int, data) -> None:
+        self._send(status, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _host_ok(self) -> bool:
+        return self.headers.get("Host", "") in (f"127.0.0.1:{self.server.port}", f"localhost:{self.server.port}")
+
+    def _body(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            return {}
+        data = json.loads(self.rfile.read(length).decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+
+    # Маршрути
+
+    def do_GET(self) -> None:  # noqa: N802
+        self._route("GET")
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._route("POST")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._route("PUT")
+
+    def _route(self, method: str) -> None:
+        if not self._host_ok():
+            return self._json(403, {"error": "чужий Host"})
+        parts = urlsplit(self.path)
+        if method == "GET" and not parts.path.startswith("/api/"):
+            return self._static(parts.path)
+        if not secrets.compare_digest(self.headers.get("X-Token", ""), self.server.token):
+            return self._json(403, {"error": "немає токена — відкрий вікно через `autopara app`"})
+        handler = ROUTES.get((method, parts.path))
+        if handler is None:
+            return self._json(404, {"error": "немає такого"})
+        query = {key: values[-1] for key, values in parse_qs(parts.query).items()}
+        try:
+            body = self._body() if method != "GET" else {}
+            status, data = handler(self.server, query, body)
+        except (ConfigError, RozkladError) as e:
+            status, data = 400, {"error": str(e)}
+        except json.JSONDecodeError:
+            status, data = 400, {"error": "некоректний JSON"}
+        except Exception as e:  # noqa: BLE001
+            log.exception("UI: помилка в %s %s", method, parts.path)
+            status, data = 500, {"error": str(e)}
+        self._json(status, data)
+
+    def _static(self, path: str) -> None:
+        name = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css"}.get(path)
+        if name is None:
+            return self._json(404, {"error": "немає такого"})
+        types = {"html": "text/html", "js": "text/javascript", "css": "text/css"}
+        self._send(200, (STATIC / name).read_bytes(), f"{types[name.rsplit('.', 1)[1]]}; charset=utf-8")
+
+
+def api_state(server: AppServer, query: dict, body: dict):
+    config = server.controller.config
+    state = server.controller.snapshot()
+    state["configured"] = configured(config)
+    state["university"] = UNIVERSITIES.get(config.schedule.university, "")
+    return 200, state
+
+
+def api_get_config(server: AppServer, query: dict, body: dict):
+    controller = server.controller
+    return 200, {
+        "config": config_to_dict(controller.config),
+        "universities": UNIVERSITIES,
+        "path": str(controller.config_path),
+        "profiles": list_profiles(),
+    }
+
+
+def api_put_config(server: AppServer, query: dict, body: dict):
+    config = parse_config(body.get("config") or {})
+    save_config(config, server.controller.config_path)
+    result = server.controller.call("reload", config)
+    return 200, {"ok": True, "result": result, "config": config_to_dict(config)}
+
+
+def api_import(server: AppServer, query: dict, body: dict):
+    if name := body.get("profile"):
+        if name not in list_profiles():
+            return 404, {"error": f"профілю {name} немає"}
+        data = tomllib.loads((PROFILES / f"{name}.toml").read_text(encoding="utf-8"))
+    else:
+        try:
+            data = tomllib.loads(body.get("toml") or "")
+        except tomllib.TOMLDecodeError as e:
+            return 400, {"error": f"файл не схожий на налаштування autopara: {e}"}
+    config = parse_config(data)
+    controller = server.controller
+    if controller.config.telegram.token and not config.telegram.token:
+        config.telegram = controller.config.telegram  # не губимо вже налаштований бот
+    save_config(config, controller.config_path)
+    result = controller.call("reload", config)
+    return 200, {"ok": True, "result": result, "config": config_to_dict(config)}
+
+
+def api_groups(server: AppServer, query: dict, body: dict):
+    university = query.get("university") or server.controller.config.schedule.university
+    text = (query.get("q") or "").strip()
+    if len(text) < 2:
+        return 200, {"groups": []}
+    found = server.source_for(university).search_groups(text)
+    return 200, {
+        "groups": [
+            {
+                "name": group.group_name,
+                "faculty": group.faculty_name,
+                "course": group.course or None,
+                "faculty_id": group.faculty_id or None,
+                "group_id": group.group_id or None,
+                "uid": group.uid,
+            }
+            for group in found
+        ]
+    }
+
+
+def api_students(server: AppServer, query: dict, body: dict):
+    source = server.source_for("duikt")
+    if query.get("group_id"):
+        faculty, course, group = int(query["faculty_id"]), int(query["course"]), int(query["group_id"])
+    else:
+        target = source.find_group(query.get("group", ""))
+        faculty, course, group = target.faculty_id, target.course, target.group_id
+    students = source.students(faculty, course, group)
+    return 200, {"students": [student.name for student in students]}
+
+
+def api_lessons(server: AppServer, query: dict, body: dict):
+    config = server.controller.config
+    source = make_source(config) if config.schedule.base_url else server.source_for(config.schedule.university)
+    return 200, lessons_view(config, int(query.get("days", 14)), source)
+
+
+def api_command(name: str):
+    def handler(server: AppServer, query: dict, body: dict):
+        return 200, {"result": server.controller.call(name)}
+
+    return handler
+
+
+def api_join(server: AppServer, query: dict, body: dict):
+    url = (body.get("url") or "").strip()
+    if not url:
+        return 400, {"error": "встав посилання на зустріч"}
+    return 200, {"result": server.controller.call("test_join", url, int(body.get("minutes") or 60))}
+
+
+def api_leave(server: AppServer, query: dict, body: dict):
+    return 200, {"result": server.controller.call("leave", body.get("key", ""))}
+
+
+def api_check(server: AppServer, query: dict, body: dict):
+    checks = run_checks(server.controller.config)
+    return 200, {"checks": [{"ok": c.ok, "area": c.area, "text": c.text} for c in checks]}
+
+
+def api_telegram_find(server: AppServer, query: dict, body: dict):
+    token = (body.get("token") or "").strip()
+    if ":" not in token:
+        return 400, {"error": "спершу встав токен від @BotFather"}
+    return 200, find_telegram_chat(token)
+
+
+def api_telegram_test(server: AppServer, query: dict, body: dict):
+    from .telegram import TelegramBot, TelegramError
+
+    try:
+        TelegramBot(body.get("token", ""), int(body.get("chat_id") or 0)).send("✓ autopara на зв'язку")
+    except TelegramError as e:
+        return 400, {"error": str(e)}
+    return 200, {"ok": True}
+
+
+def api_log(server: AppServer, query: dict, body: dict):
+    return 200, {"lines": server.logs.since(int(query.get("after", 0)))}
+
+
+ROUTES = {
+    ("GET", "/api/state"): api_state,
+    ("GET", "/api/config"): api_get_config,
+    ("PUT", "/api/config"): api_put_config,
+    ("POST", "/api/import"): api_import,
+    ("GET", "/api/groups"): api_groups,
+    ("GET", "/api/students"): api_students,
+    ("GET", "/api/lessons"): api_lessons,
+    ("POST", "/api/start"): api_command("start"),
+    ("POST", "/api/stop"): api_command("user_stop"),
+    ("POST", "/api/login"): api_command("login"),
+    ("POST", "/api/join"): api_join,
+    ("POST", "/api/leave"): api_leave,
+    ("POST", "/api/check"): api_check,
+    ("POST", "/api/telegram/find"): api_telegram_find,
+    ("POST", "/api/telegram/test"): api_telegram_test,
+    ("GET", "/api/log"): api_log,
+}
+
+
+# --- Запуск --------------------------------------------------------------------
+
+
+def lock_path() -> Path:
+    return user_config_dir() / "app.json"
+
+
+def running_instance() -> dict | None:
+    """Якщо програма вже працює — {port, token, pid, url}.
+
+    Питаємо саму програму, а не перевіряємо pid: так не сплутаємо її з чужим процесом із тим самим номером.
+    """
+    try:
+        info = json.loads(lock_path().read_text(encoding="utf-8"))
+        port, token = int(info["port"]), str(info["token"])
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"X-Token": token})
+        with _local_opener().open(request, timeout=3) as response:
+            if response.status != 200:
+                return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return {**info, "url": f"http://127.0.0.1:{port}/#t={token}"}
+
+
+def _local_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))  # до 127.0.0.1 — завжди напряму
+
+
+def push_config(instance: dict, config: Config) -> str:
+    """Передати налаштування вже запущеній програмі: вона їх збереже й застосує, не перериваючи пару."""
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{instance['port']}/api/config",
+        data=json.dumps({"config": config_to_dict(config)}, ensure_ascii=False).encode("utf-8"),
+        method="PUT",
+        headers={"X-Token": instance["token"], "Content-Type": "application/json"},
+    )
+    with _local_opener().open(request, timeout=60) as response:
+        return json.loads(response.read())["result"]
+
+
+def write_lock(port: int, token: str) -> Path:
+    lock = lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.unlink(missing_ok=True)
+    # У файлі токен вікна — читати його може лише власник.
+    with os.fdopen(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as f:
+        json.dump({"port": port, "token": token, "pid": os.getpid()}, f)
+    return lock
+
+
+def release_lock(lock: Path) -> None:
+    try:
+        if json.loads(lock.read_text(encoding="utf-8")).get("pid") == os.getpid():
+            lock.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+def open_window(url: str, config: Config | None = None) -> None:
+    """Вікно програми — Chrome у режимі застосунку (без вкладок і адресного рядка), інакше — звичайний браузер."""
+    chrome = find_chrome(config)
+    if chrome:
+        profile = user_config_dir() / "window"
+        subprocess.Popen(
+            [chrome, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run", "--window-size=1180,820"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        webbrowser.open(url)
+
+
+def serve(config: Config, config_path: Path, open_ui: bool, autostart: bool = True, port: int = 0) -> None:
+    """Запустити контролер і сервер вікна; блокує до Ctrl+C / SIGTERM."""
+    logs = LogBuffer()
+    logging.getLogger().addHandler(logs)
+    controller = Controller(config, config_path)
+    server = AppServer(controller, port=port, logs=logs)
+    controller.start()
+    lock = write_lock(server.port, server.token)
+    log.info("Вікно програми: http://127.0.0.1:%d (відкрити: autopara app)", server.port)
+    if autostart and configured(config):
+        threading.Thread(target=_autostart, args=(controller,), daemon=True).start()
+    elif not configured(config):
+        log.warning("Група ще не вибрана — відкрий вікно програми (autopara app) і заповни налаштування")
+    if open_ui:
+        open_window(server.url, config)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log.info("Зупинено")
+    finally:
+        server.server_close()
+        controller.shutdown()
+        release_lock(lock)
+
+
+def _autostart(controller: Controller) -> None:
+    try:
+        controller.call("start", timeout=300)
+    except Exception as e:  # noqa: BLE001 — програма житиме далі, а помилку видно у вікні й лозі
+        log.error("Не вдалося запустити автоматичний вхід: %s", e)

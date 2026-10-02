@@ -1,16 +1,33 @@
-"""Завантаження config.toml."""
+"""Налаштування: де лежать, як читаються, перевіряються й зберігаються."""
 
 from __future__ import annotations
 
+import os
+import sys
 import tomllib
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from .links import LinkRule, meet_url, normalize_url, platform_of
-from .rozklad import BASE_URL
+from .links import LinkRule, normalize_url, platform_of
 
 DEFAULT_DATA_DIR = Path.home() / ".autopara"
+UNIVERSITIES = {"duikt": "ДУІКТ", "kpi": "КПІ ім. Ігоря Сікорського"}
+
+
+def user_config_dir() -> Path:
+    """Стандартна тека налаштувань програми для поточного користувача."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / "autopara"
+
+
+def user_config_path() -> Path:
+    return user_config_dir() / "config.toml"
 
 
 class ConfigError(Exception):
@@ -19,19 +36,22 @@ class ConfigError(Exception):
 
 @dataclass
 class ScheduleSettings:
+    university: str = "duikt"  # звідки брати розклад: duikt | kpi
     group: str = ""
-    faculty_id: int | None = None
+    faculty_id: int | None = None  # ДУІКТ: ID з `autopara find-group`, щоб не шукати групу щоразу
     course: int | None = None
     group_id: int | None = None
-    student: str = ""
+    group_uid: str = ""  # КПІ: ідентифікатор групи
+    student: str = ""  # ДУІКТ: розклад конкретного студента (з підгрупами)
     days_ahead: int = 7
     refresh_minutes: int = 60
     use_schedule_links: bool = True
-    base_url: str = BASE_URL
+    base_url: str = ""  # порожньо — адреса за замовчуванням для університету
 
 
 @dataclass
 class JoinSettings:
+    accounts: list = field(default_factory=list)  # інші Google-акаунти (для посилань, які не пускають з основного)
     minutes_before: int = 2
     mute_microphone: bool = True
     camera_off: bool = True
@@ -120,8 +140,8 @@ def parse_config(data: dict) -> Config:
         raise ConfigError(f"невідомі розділи конфіга: {', '.join(sorted(unknown))}")
 
     schedule = _build(ScheduleSettings, data.get("schedule", {}), "schedule")
-    if not schedule.group and not schedule.group_id:
-        raise ConfigError("[schedule] вкажи group, наприклад group = \"ТЦР-32\"")
+    if schedule.university not in UNIVERSITIES:
+        raise ConfigError(f"[schedule] university має бути одним з: {', '.join(UNIVERSITIES)}")
     join = _build(JoinSettings, data.get("join", {}), "join")
     if join.zoom_mode not in ("app", "browser"):
         raise ConfigError('[join] zoom_mode має бути "app" або "browser"')
@@ -137,10 +157,8 @@ def parse_config(data: dict) -> Config:
             raise ConfigError(f"[[links]] #{index} ({rule.subject}): вкажи url або skip = true")
         if rule.url:
             url = normalize_url(rule.url)
-            if rule.account:
-                if platform_of(url) != "meet":
-                    raise ConfigError(f"[[links]] #{index} ({rule.subject}): account працює лише для Google Meet")
-                url = meet_url(url, rule.account)
+            if rule.account and platform_of(url) != "meet":
+                raise ConfigError(f"[[links]] #{index} ({rule.subject}): account працює лише для Google Meet")
             rule = replace(rule, url=url)
         rules.append(rule)
 
@@ -168,19 +186,17 @@ def parse_config(data: dict) -> Config:
     return config
 
 
-def find_config(explicit: str | None) -> Path:
+def find_config(explicit: str | None) -> Path | None:
+    """Де шукати налаштування: явний шлях → ./config.toml → тека користувача → стара ~/.autopara."""
     if explicit:
         path = Path(explicit).expanduser()
         if not path.is_file():
             raise ConfigError(f"файл конфіга {path} не знайдено")
         return path
-    for path in (Path("config.toml"), DEFAULT_DATA_DIR / "config.toml"):
+    for path in (Path("config.toml"), user_config_path(), DEFAULT_DATA_DIR / "config.toml"):
         if path.is_file():
             return path
-    raise ConfigError(
-        "не знайдено config.toml: скопіюй config.example.toml у config.toml і заповни його "
-        f"(шукаю в поточній папці та в {DEFAULT_DATA_DIR})"
-    )
+    return None
 
 
 def merge_config(base: dict, local: dict) -> dict:
@@ -204,10 +220,9 @@ def _read_toml(path: Path) -> dict:
         raise ConfigError(f"{path}: помилка в TOML: {e}") from e
 
 
-def load_config(explicit: str | None = None) -> Config:
-    path = find_config(explicit)
+def read_config(path: Path) -> Config:
     data = _read_toml(path)
-    # Секрети (токен Telegram-бота тощо) — у config.local.toml поруч, який не потрапляє в git.
+    # Секрети (токен Telegram-бота тощо) можна тримати в config.local.toml поруч — він не в git.
     local = path.with_name("config.local.toml")
     if local.is_file():
         data = merge_config(data, _read_toml(local))
@@ -215,3 +230,69 @@ def load_config(explicit: str | None = None) -> Config:
         return parse_config(data)
     except ConfigError as e:
         raise ConfigError(f"{path}: {e}") from e
+
+
+def load_config(explicit: str | None = None) -> Config:
+    path = find_config(explicit)
+    if path is None:
+        raise ConfigError(
+            f"налаштувань ще немає — запусти `autopara app` і заповни їх у вікні програми "
+            f"(або `autopara import-config файл.toml`; зберігаються в {user_config_path()})"
+        )
+    return read_config(path)
+
+
+def _clean(value: Any) -> Any:
+    """Прибрати None (у TOML його немає) і привести шляхи до рядків."""
+    if isinstance(value, dict):
+        return {key: _clean(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [_clean(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def config_to_dict(config: Config) -> dict:
+    data = _clean(asdict(config))
+    # У правилах посилань пишемо лише заповнені поля — так файл читається людиною.
+    data["links"] = [{key: value for key, value in rule.items() if value not in ("", False)} for rule in data["links"]]
+    if config.data_dir == DEFAULT_DATA_DIR:
+        data.pop("data_dir")
+    return data
+
+
+def save_config(config: Config, path: Path | None = None) -> Path:
+    """Записати налаштування (атомарно: спершу в тимчасовий файл, потім підмінити)."""
+    import tomli_w
+
+    path = path or user_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".toml.tmp")
+    temporary.unlink(missing_ok=True)
+    # Тут може бути токен Telegram-бота — файл читає лише власник.
+    with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as f:
+        f.write(tomli_w.dumps(config_to_dict(config)))
+    temporary.replace(path)
+    local = path.with_name("config.local.toml")
+    if local.is_file():
+        # Його вміст уже злитий у збережений файл; якби він лишився, правила посилань задвоїлись би.
+        local.replace(local.with_suffix(".toml.merged"))
+    return path
+
+
+def import_config(source: Path, target: Path | None = None, local: Path | None = None) -> Path:
+    """Взяти налаштування з файла (наприклад, профілю) у теку користувача; старі — у .bak.
+
+    ``local`` — окремий config.local.toml із секретами (токен бота), який накласти зверху.
+    """
+    config = read_config(source)
+    if local is not None and local.is_file() and local != source.with_name("config.local.toml"):
+        try:
+            config = parse_config(merge_config(_read_toml(source), _read_toml(local)))
+        except ConfigError as e:
+            raise ConfigError(f"{local}: {e}") from e
+    target = target or user_config_path()
+    if target.exists():
+        target.with_suffix(".toml.bak").write_bytes(target.read_bytes())
+    return save_config(config, target)

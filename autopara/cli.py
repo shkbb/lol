@@ -10,11 +10,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .config import Config, ConfigError, load_config
+from .config import Config, ConfigError, find_config, import_config, load_config, read_config, user_config_path
 from .links import platform_of, resolve
 from .planner import Plan, Visit, build_plan
-from .rozklad import Lesson, RozkladClient, RozkladError
-from .runner import Runner, resolve_target
+from .rozklad import Lesson, RozkladError
+from .runner import Runner
+from .sources import make_source, resolve_target
 from .wiring import assistant_stack
 
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
@@ -36,8 +37,8 @@ def setup_logging(config: Config | None, verbose: bool) -> None:
     )
 
 
-def _client(config: Config) -> RozkladClient:
-    return RozkladClient(config.schedule.base_url)
+def _client(config: Config):
+    return make_source(config)
 
 
 def cmd_find_group(args, config: Config) -> None:
@@ -174,21 +175,67 @@ def cmd_join(args, config: Config) -> None:
             joiner.close()
 
 
-def cmd_run(args, config: Config) -> None:
-    from .joiner import Joiner
+def _app_config(explicit: str | None) -> tuple[Config, Path]:
+    """Для програми налаштування необов'язкові: без них відкриється вікно, де їх і заповнять."""
+    path = find_config(explicit)
+    if path is None:
+        return Config(), user_config_path()
+    return read_config(path), path
 
+
+def _serve(args, open_ui: bool) -> None:
+    from .app import serve
+
+    config, path = _app_config(args.config)
+    setup_logging(config, args.verbose)
     # systemctl stop і kill шлють SIGTERM: перетворюємо його на звичайний вихід, щоб закрити браузер
     # і зняти заборону сну.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    clock = _clock(config)
-    with assistant_stack(config, clock) as stack:
-        joiner = Joiner(config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames)
-        try:
-            Runner(config, _client(config), joiner, clock=clock, assistant=stack.assistant).run_forever()
-        except KeyboardInterrupt:
-            log.info("Зупинено")
-        finally:
-            joiner.close()
+    serve(config, path, open_ui=open_ui)
+
+
+def cmd_app(args) -> None:
+    """Відкрити вікно програми; якщо вона ще не працює — запустити."""
+    from .app import open_window, running_instance
+
+    if instance := running_instance():
+        print("autopara вже працює — відкриваю її вікно.")
+        path = find_config(args.config)
+        open_window(instance["url"], read_config(path) if path else None)
+        return
+    _serve(args, open_ui=True)
+
+
+def cmd_run(args) -> None:
+    """Працювати у фоні (для автозапуску). Вікно можна відкрити будь-коли: autopara app."""
+    from .app import running_instance
+
+    if instance := running_instance():
+        raise ConfigError(f"autopara вже працює (процес {instance.get('pid')}) — відкрий її вікно: autopara app")
+    _serve(args, open_ui=False)
+
+
+def cmd_import_config(args) -> None:
+    from .app import push_config, running_instance
+
+    source = Path(args.file).expanduser()
+    if not source.is_file():
+        raise ConfigError(f"файл {source} не знайдено")
+    target = Path(args.config).expanduser() if args.config else user_config_path()
+    # Секрети (токен бота) з config.local.toml у поточній теці теж переносимо — щоб нічого не загубилось.
+    local = Path("config.local.toml")
+    local = local if local.is_file() else None
+    path = import_config(source, target, local=local)
+    print(f"Готово: налаштування з {source} збережено в {path}")
+    if local is not None:
+        print(f"Секрети з {local} (токен бота тощо) теж перенесено.")
+    if instance := running_instance():
+        result = push_config(instance, read_config(path))
+        print("autopara вже працювала — " + {
+            "after_lesson": "нові налаштування застосуються, щойно скінчиться поточна пара.",
+            "started": "налаштування застосовано, автоматичний вхід на пари увімкнено.",
+            "saved": "налаштування застосовано (автоматичний вхід вимкнено — увімкни його у вікні).",
+        }.get(result, "нові налаштування застосовано."))
 
 
 def cmd_telegram(args, config: Config) -> None:
@@ -197,8 +244,9 @@ def cmd_telegram(args, config: Config) -> None:
     token = config.telegram.token
     if not token:
         print(
+            "Найпростіше — у вікні програми (`autopara app`), вкладка «Помічник». Або вручну:\n"
             "1. У Telegram напиши @BotFather → /newbot → придумай назву. Він дасть токен.\n"
-            "2. Створи config.local.toml поруч з config.toml (він не потрапляє в git):\n\n"
+            "2. Створи config.local.toml поруч із файлом налаштувань (він не потрапляє в git):\n\n"
             '   [telegram]\n   token = "123456:ABC..."\n\n'
             "3. Запусти `autopara telegram` ще раз."
         )
@@ -224,50 +272,11 @@ def cmd_telegram(args, config: Config) -> None:
 
 def cmd_check(args, config: Config) -> None:
     """Перевіряє на твоєму комп'ютері все, що можна перевірити без пари."""
-    import importlib.util
-    import shutil
+    from .checks import run_checks
 
-    from .brain import OllamaBrain
-    from .ears import ears_available
-    from .telegram import TelegramBot, TelegramError
-
-    def line(ok: bool | None, text: str) -> None:
-        print(f"{'✓' if ok else ('·' if ok is None else '✗')} {text}")
-
-    try:
-        target = resolve_target(_client(config), config)
-        line(True, f"розклад: {target.student_name or target.group_name}")
-    except RozkladError as e:
-        line(False, f"розклад: {e}")
-    browsers = [config.join.browser_path] if config.join.browser_path else ["google-chrome-stable", "google-chrome"]
-    found = next((b for b in browsers if shutil.which(b) or (b.startswith("/") and Path(b).exists())), None)
-    line(bool(found), f"браузер: {found or 'не знайдено (встанови google-chrome або вкажи browser_path)'}")
-    line(config.profile_dir.exists(), f"профіль браузера: {config.profile_dir} (якщо немає — `autopara login`)")
-    if config.join.zoom_mode == "app":
-        line(bool(shutil.which("zoom")), "Zoom-клієнт" + ("" if shutil.which("zoom") else ": не знайдено (yay -S zoom)"))
-    if config.telegram.clips:
-        has_ffmpeg = bool(shutil.which("ffmpeg"))
-        line(has_ffmpeg, "ffmpeg для відеовирізок" + ("" if has_ffmpeg else ": не знайдено (sudo pacman -S ffmpeg)"))
-    if config.telegram.token and config.telegram.chat_id:
-        try:
-            TelegramBot(config.telegram.token, config.telegram.chat_id).send("✓ autopara check")
-            line(True, "Telegram: надіслав тестове повідомлення")
-        except TelegramError as e:
-            line(False, f"Telegram: {e}")
-    else:
-        line(None, "Telegram не налаштовано (`autopara telegram`)")
-    if config.brain.enabled:
-        problem = OllamaBrain(config.brain.url, config.brain.model).check()
-        line(problem is None, f"мозок: {problem or config.brain.model}")
-    else:
-        line(None, "мозок вимкнено ([brain] enabled = false)")
-    if config.ears.enabled:
-        problem = ears_available()
-        if problem is None and importlib.util.find_spec("faster_whisper") is None:
-            problem = 'немає faster-whisper — pip install -e ".[ears]"'
-        line(problem is None, f"вуха: {problem or 'готові'}")
-    else:
-        line(None, "вуха вимкнено ([ears] enabled = false)")
+    for check in run_checks(config):
+        mark = "✓" if check.ok else ("·" if check.ok is None else "✗")
+        print(f"{mark} {check.area}: {check.text}")
 
 
 def cmd_listen_test(args, config: Config) -> None:
@@ -312,7 +321,8 @@ def cmd_listen_test(args, config: Config) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autopara",
-        description="Автоматично заходить на пари ДУІКТ у Google Meet і Zoom за розкладом групи.",
+        description="Автоматично заходить на пари (ДУІКТ, КПІ) у Google Meet і Zoom за розкладом групи. "
+        "Почни з `autopara app` — відкриється вікно з усіма налаштуваннями.",
     )
     parser.add_argument("-c", "--config", help="шлях до config.toml")
     parser.add_argument("-v", "--verbose", action="store_true", help="детальний лог")
@@ -335,8 +345,15 @@ def build_parser() -> argparse.ArgumentParser:
     join.add_argument("--minutes", type=int, default=90, help="скільки чекати, поки впустять")
     join.set_defaults(func=cmd_join)
 
-    run = sub.add_parser("run", help="працювати у фоні й заходити на пари за розкладом")
-    run.set_defaults(func=cmd_run)
+    app = sub.add_parser("app", help="відкрити вікно програми (налаштування, стан, журнал)")
+    app.set_defaults(func=cmd_app, needs_config=False)
+
+    run = sub.add_parser("run", help="працювати у фоні без вікна (для автозапуску)")
+    run.set_defaults(func=cmd_run, needs_config=False)
+
+    importing = sub.add_parser("import-config", help="взяти налаштування з файла, наприклад profiles/group.toml")
+    importing.add_argument("file")
+    importing.set_defaults(func=cmd_import_config, needs_config=False)
 
     telegram = sub.add_parser("telegram", help="налаштувати Telegram-бота для сповіщень і команд")
     telegram.set_defaults(func=cmd_telegram)
@@ -356,6 +373,9 @@ def main(argv: list[str] | None = None) -> None:
         sys.stdout.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
     try:
+        if not getattr(args, "needs_config", True):
+            args.func(args)
+            return
         config = load_config(args.config)
         setup_logging(config, args.verbose)
         args.func(args, config)

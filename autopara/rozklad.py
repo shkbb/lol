@@ -80,6 +80,7 @@ class Target:
     faculty_name: str = ""
     student_id: int | None = None
     student_name: str = ""
+    uid: str = ""  # ідентифікатор групи там, де він не числовий набір (КПІ)
 
 
 # --- Розбір HTML -------------------------------------------------------------
@@ -259,6 +260,7 @@ class RozkladClient:
         )
         self.timeout = timeout
         self._csrf: dict[str, str] = {}
+        self._groups: list[Target] | None = None
 
     # Довідники
 
@@ -276,6 +278,23 @@ class RozkladClient:
     def students(self, faculty_id: int, course: int, group_id: int) -> list[Option]:
         values = {"facultyId": faculty_id, "course": course, "groupId": group_id}
         return parse_options(self._post("student", 0, values), "studentId")
+
+    def all_groups(self) -> list[Target]:
+        """Усі групи всіх факультетів і курсів (для пошуку у вікні програми; кешується)."""
+        if self._groups is None:
+            groups = []
+            for faculty in self.faculties():
+                for course in self.courses(faculty.id):
+                    groups += [
+                        Target(faculty.id, course, group.id, group_name=group.name, faculty_name=faculty.name)
+                        for group in self.groups(faculty.id, course)
+                    ]
+            self._groups = groups
+        return self._groups
+
+    def search_groups(self, query: str, limit: int = 30) -> list[Target]:
+        wanted = normalize_name(query)
+        return [group for group in self.all_groups() if wanted in normalize_name(group.group_name)][:limit]
 
     def find_group(self, name: str, faculty_id: int | None = None, course: int | None = None) -> Target:
         wanted = normalize_name(name)

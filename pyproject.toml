@@ -5,13 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autopara"
 version = "0.1.0"
-description = "Автоматично заходить на пари ДУІКТ у Google Meet і Zoom за розкладом групи"
+description = "Автоматично заходить на пари (ДУІКТ, КПІ) у Google Meet і Zoom за розкладом групи"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
     "beautifulsoup4>=4.12",
     "playwright>=1.45",
+    "tomli-w>=1.0",  # збереження налаштувань із вікна програми
     "tzdata",  # часові пояси для Windows
 ]
 
@@ -23,7 +24,10 @@ dev = ["pytest>=8", "numpy"]
 autopara = "autopara.cli:main"
 
 [tool.setuptools]
-packages = ["autopara"]
+packages = ["autopara", "autopara.ui"]
+
+[tool.setuptools.package-data]
+"autopara.ui" = ["*.html", "*.js", "*.css"]  # вікно програми (не Python-код, лише файли)
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

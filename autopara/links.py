@@ -53,7 +53,10 @@ def resolve(lesson: Lesson, rules: list[LinkRule], use_schedule_links: bool = Tr
         if rule.matches(lesson):
             if rule.skip:
                 return Resolution(None, "skip")
-            return Resolution(normalize_url(rule.url), "config")
+            url = normalize_url(rule.url)
+            if rule.account and platform_of(url) == "meet":
+                url = meet_url(url, rule.account)  # цю зустріч відкриваємо з іншого акаунта
+            return Resolution(url, "config")
     # Посилання з самого розкладу беремо лише якщо це справді Meet чи Zoom, а не Moodle тощо.
     if use_schedule_links and lesson.link and platform_of(lesson.link) != "other":
         return Resolution(normalize_url(lesson.link), "schedule")

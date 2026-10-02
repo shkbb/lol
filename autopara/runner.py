@@ -13,6 +13,7 @@ from .leaving import LeaveDecider, Observation
 from .planner import Plan, Visit, build_plan
 from .power import SleepGuard
 from .rozklad import RozkladClient, RozkladError, Target
+from .sources import resolve_target
 from .session import JoinError, Session
 
 log = logging.getLogger(__name__)
@@ -22,17 +23,6 @@ TOO_LATE = timedelta(minutes=5)
 RETRY_JOIN_AFTER = timedelta(minutes=2)
 MAX_JOIN_ATTEMPTS = 3
 RETRY_REFRESH_AFTER = timedelta(minutes=5)
-
-
-def resolve_target(client: RozkladClient, config: Config) -> Target:
-    s = config.schedule
-    if s.faculty_id and s.course and s.group_id:
-        target = Target(s.faculty_id, s.course, s.group_id, group_name=s.group)
-    else:
-        target = client.find_group(s.group, s.faculty_id, s.course)
-    if s.student:
-        target = client.resolve_student(target, s.student)
-    return target
 
 
 class Runner:
@@ -60,6 +50,8 @@ class Runner:
         self.next_refresh: datetime | None = None
         self.sleep_guard = sleep_guard or SleepGuard()
         self.last_seen: dict[str, Observation] = {}
+        self.extra_visits: list[Visit] = []  # тестові входи з вікна програми
+        self.last_error = ""
         self._warned: set[str] = set()
 
     def notify(self, text: str, urgent: bool = False) -> None:
@@ -122,8 +114,10 @@ class Runner:
             try:
                 self.refresh(now)
                 self.next_refresh = now + timedelta(minutes=self.config.schedule.refresh_minutes)
+                self.last_error = ""
             except RozkladError as e:
                 log.error("Не вдалося оновити розклад: %s. Спробую ще раз за 5 хв", e)
+                self.last_error = str(e)
                 self.next_refresh = now + RETRY_REFRESH_AFTER
 
         for key, session in list(self.active.items()):
@@ -135,7 +129,8 @@ class Runner:
             if self.config.join.auto_leave and (reason := self._leave_reason(session, seen, now)):
                 self._leave(key, reason)
 
-        for visit in self.plan.visits:
+        self.extra_visits = [visit for visit in self.extra_visits if visit.leave_at > now]
+        for visit in self.plan.visits + self.extra_visits:
             if self._due(visit, now):
                 self._join(visit, now)
 

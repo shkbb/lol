@@ -1,4 +1,5 @@
-# Секрети (токен Telegram-бота тощо)
+# Локальні налаштування й секрети (токен Telegram-бота тощо) — не в git
+config.toml
 config.local.toml
 
 __pycache__/
