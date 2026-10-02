@@ -338,3 +338,23 @@ def test_zoom_client_class_is_heard_and_reported():
     assert audio.log == ["start", "stop"]
     [record] = finished
     assert record.transcript and "Ляшко, ви тут?" in record.transcript[0][1]  # у звіт розшифровка потрапила
+
+
+def test_classroom_is_used_only_between_classes():
+    class Study:
+        def __init__(self):
+            self.ticks, self.classmates = [], None
+
+        def browser_tick(self, now):
+            self.ticks.append(now.strftime("%H:%M"))
+
+        def set_classmates(self, names):
+            self.classmates = names
+
+    runner, _, joiner = make_runner([make_lesson()])
+    runner.study = Study()
+    for hhmm in ("09:00", "09:20", "09:29", "10:00", "10:50", "11:00"):
+        runner.tick(at(hhmm))
+    assert joiner.joined == ["Бази даних"] and joiner.left == ["Бази даних"]
+    # за 15 хв до пари й на парі браузер не займаємо — він потрібен для входу
+    assert runner.study.ticks == ["09:00", "10:50", "11:00"]

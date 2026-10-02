@@ -38,7 +38,7 @@ def test_commands_only_from_my_chat():
     stop = threading.Event()
     heard = []
 
-    def handle(text, is_reply):
+    def handle(text, is_reply, reply_to):
         heard.append((text, is_reply))
         if len(heard) == 2:
             stop.set()
@@ -65,20 +65,20 @@ def test_photo_is_uploaded_and_long_caption_follows_as_text():
 
 
 def test_buttons_are_sent_and_presses_handled():
-    press = {"update_id": 7, "callback_query": {"id": "cb1", "data": "так", "message": {"chat": {"id": 42}}}}
+    press = {"update_id": 7, "callback_query": {"id": "cb1", "data": "так", "message": {"message_id": 55, "chat": {"id": 42}}}}
     api = FakeApi([press])
     bot = TelegramBot("123:abc", chat_id=42, session=api)
     bot.send("Написати «+»?", [[("✅ Так", "так"), ("❌ Ні", "ні")]])
     stop = threading.Event()
     pressed = []
 
-    def handle(text, is_reply):
-        pressed.append(text)
+    def handle(text, is_reply, reply_to):
+        pressed.append((text, reply_to))
         stop.set()
         return "Пишу «+»."
 
     bot.listen(handle, stop)
-    assert pressed == ["так"]
+    assert pressed == [("так", 55)]  # натиснута кнопка знає своє повідомлення
     methods = [method for method, _, _ in api.calls]
     assert methods == ["sendMessage", "getUpdates", "answerCallbackQuery", "sendMessage"]
     markup = api.calls[0][1]["reply_markup"]["inline_keyboard"]

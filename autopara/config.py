@@ -116,6 +116,36 @@ class BrainSettings:
 
 
 @dataclass
+class StudySettings:
+    """Навчання: завдання з Google Classroom виконує агент, а здає — лише після твого «так»."""
+
+    enabled: bool = False
+    account: str = ""  # акаунт Classroom; порожньо — основний акаунт Meet (університетська пошта)
+    full_name: str = ""  # «Прізвище Ім'я По батькові» — для титульної сторінки
+    group: str = ""  # порожньо — група з розкладу
+    specialty: str = "121 Інженерія програмного забезпечення"
+    university: str = "Державний університет інформаційно-комунікаційних технологій"
+    department: str = ""  # кафедра; порожньо — агент візьме з матеріалів курсу
+    city: str = "Київ"
+    list_number: int = 0  # номер у списку групи (для варіантів); 0 — визначити за списком з розкладу
+    file_format: str = "pdf"  # у чому здавати звіти: pdf | docx
+    check_hours: int = 3  # як часто дивитися в Classroom
+    lecture_notes: bool = True  # після пари — детальна вижимка лекції через агента (і конспект курсу)
+    skip_courses: list = field(default_factory=list)  # курси, яких не чіпати (шматок назви)
+
+
+@dataclass
+class AgentSettings:
+    """Агент, що виконує завдання: Antigravity CLI (agy) у режимі без інтерфейсу."""
+
+    command: str = "agy"
+    args: list = field(default_factory=lambda: ["--output-format", "json", "--dangerously-skip-permissions"])
+    timeout_minutes: int = 90  # одна спроба; велике завдання агент може робити довго
+    daily_limit: int = 40  # не більше стількох запусків на день — щоб не спалити підписку
+    attempts: int = 3  # скільки разів доробляти, поки перевірка не скаже, що все готово
+
+
+@dataclass
 class Config:
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
     join: JoinSettings = field(default_factory=JoinSettings)
@@ -124,6 +154,8 @@ class Config:
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
     ears: EarsSettings = field(default_factory=EarsSettings)
     brain: BrainSettings = field(default_factory=BrainSettings)
+    study: StudySettings = field(default_factory=StudySettings)
+    agent: AgentSettings = field(default_factory=AgentSettings)
     timezone: str = "Europe/Kyiv"
     data_dir: Path = DEFAULT_DATA_DIR
 
@@ -151,7 +183,7 @@ def _build(cls, data: Any, section: str):
 
 
 def parse_config(data: dict) -> Config:
-    allowed = {"schedule", "join", "links", "me", "telegram", "ears", "brain", "timezone", "data_dir"}
+    allowed = {"schedule", "join", "links", "me", "telegram", "ears", "brain", "study", "agent", "timezone", "data_dir"}
     unknown = set(data) - allowed
     if unknown:
         raise ConfigError(f"невідомі розділи конфіга: {', '.join(sorted(unknown))}")
@@ -198,7 +230,13 @@ def parse_config(data: dict) -> Config:
         telegram=telegram,
         ears=ears,
         brain=_build(BrainSettings, data.get("brain", {}), "brain"),
+        study=_build(StudySettings, data.get("study", {}), "study"),
+        agent=_build(AgentSettings, data.get("agent", {}), "agent"),
     )
+    if config.study.file_format not in ("pdf", "docx"):
+        raise ConfigError('[study] file_format має бути "pdf" або "docx"')
+    if not all(isinstance(arg, str) for arg in config.agent.args):
+        raise ConfigError("[agent] args — це список рядків")
     if "timezone" in data:
         config.timezone = str(data["timezone"])
     if "data_dir" in data:

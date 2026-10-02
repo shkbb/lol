@@ -82,6 +82,7 @@ class Controller:
         self.runner = None
         self.joiner = None
         self._stack: ExitStack | None = None
+        self.study = None  # StudyManager, поки автовхід увімкнено (його методи безпечні з будь-якого потоку)
         self._restart_pending = False
         self._user_stopped = False  # вимкнули кнопкою — тоді й після збереження налаштувань не вмикаємо самі
         self._next_tick: datetime | None = None
@@ -148,8 +149,14 @@ class Controller:
         )
         runner = Runner(
             self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant,
-            app_audio=info.app_audio,
+            app_audio=info.app_audio, study=info.study,
         )
+        if info.study is not None:
+            from .classroom import Classroom
+
+            account = self.config.study.account or self.config.join.meet_account
+            info.study.classroom = Classroom(joiner.browser.new_page, account, context=joiner.browser.context)
+        self.study = info.study
         return runner, joiner
 
     def _tick_if_due(self) -> None:
@@ -197,7 +204,7 @@ class Controller:
             self.joiner.close()
         if self._stack is not None:
             self._stack.close()
-        self.runner, self.joiner, self._stack = None, None, None
+        self.runner, self.joiner, self._stack, self.study = None, None, None, None
         log.info("Автоматичний вхід на пари вимкнено")
         return "stopped"
 
@@ -687,6 +694,55 @@ def api_autostart(server: AppServer, query: dict, body: dict):
         return 400, {"error": f"не вдалося змінити автозапуск: {e}"}
 
 
+def api_study(server: AppServer, query: dict, body: dict):
+    config, study = server.controller.config, server.controller.study
+    if not config.study.enabled:
+        return 200, {"off": "вимкнено"}
+    if study is None:
+        return 200, {"off": "автовхід вимкнено — навчання працює разом з ним (кнопка «Увімкнути» на головній)"}
+    return 200, study.snapshot()
+
+
+def _study(server: AppServer):
+    if server.controller.study is None:
+        raise ConfigError("навчання зараз не працює — увімкни його й автовхід")
+    return server.controller.study
+
+
+def api_study_action(server: AppServer, query: dict, body: dict):
+    study = _study(server)
+    version = body.get("version")
+    answer = study.act(
+        int(body.get("number") or 0), str(body.get("action") or ""), str(body.get("comment") or "").strip(),
+        version=int(version) if version is not None else None,
+    )
+    return 200, {"result": answer, **study.snapshot()}
+
+
+def api_study_check(server: AppServer, query: dict, body: dict):
+    _study(server).check_now()
+    return 200, {"result": "перевірю Classroom найближчим часом (між парами)"}
+
+
+def api_study_open(server: AppServer, query: dict, body: dict):
+    """Відкрити теку роботи у файловому менеджері — переглянути файли перед «так»."""
+    task = _study(server).task(int(body.get("number") or 0))
+    if task is None or not task.folder or not Path(task.folder).exists():
+        return 404, {"error": "теки цього завдання ще немає"}
+    folder = Path(task.folder) / "out" if (Path(task.folder) / "out").exists() else Path(task.folder)
+    open_path(folder)
+    return 200, {"ok": True}
+
+
+def open_path(path: Path) -> None:
+    if sys.platform == "win32":
+        os.startfile(path)  # noqa: S606 — тека нашого ж завдання
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def api_log(server: AppServer, query: dict, body: dict):
     return 200, {"lines": server.logs.since(int(query.get("after", 0)))}
 
@@ -709,6 +765,10 @@ ROUTES = {
     ("POST", "/api/telegram/pair"): api_telegram_pair,
     ("POST", "/api/telegram/test"): api_telegram_test,
     ("GET", "/api/log"): api_log,
+    ("GET", "/api/study"): api_study,
+    ("POST", "/api/study/action"): api_study_action,
+    ("POST", "/api/study/check"): api_study_check,
+    ("POST", "/api/study/open"): api_study_open,
     ("POST", "/api/autostart"): api_autostart,
     ("GET", "/api/audio-devices"): api_audio_devices,
     ("POST", "/api/install-ears"): api_install_ears,

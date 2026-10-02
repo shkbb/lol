@@ -326,3 +326,29 @@ def test_timetable_tab_shows_the_week(running_app):
             assert page.get_by_text("Бази даних").count() == 0
         finally:
             browser.close()
+
+
+def test_study_api(running_app, tmp_path):
+    from .test_study import LAB, make, run_jobs, ticks
+
+    server, controller, _ = running_app
+    assert call(server, "GET", "/api/study")[1] == {"off": "вимкнено"}
+    controller.config.study.enabled = True
+    assert "автовхід вимкнено" in call(server, "GET", "/api/study")[1]["off"]
+    assert call(server, "POST", "/api/study/check")[0] == 400
+
+    study, _, _, classroom = make(tmp_path, [LAB])
+    ticks(study, 2)
+    run_jobs(study)
+    controller.study = study
+    status, data = call(server, "GET", "/api/study")
+    task = data["tasks"][0]
+    assert status == 200 and task["status"] == "ready" and task["version"] == 1 and data["agent_problem"] is None
+
+    status, data = call(server, "POST", "/api/study/action", {"number": 1, "action": "yes", "version": 0})
+    assert "старішої версії" in data["result"] and data["tasks"][0]["status"] == "ready"
+    status, data = call(server, "POST", "/api/study/action", {"number": 1, "action": "redo", "comment": "додай висновок", "version": 1})
+    assert data["tasks"][0]["status"] == "working" and data["tasks"][0]["feedback"] == ["додай висновок"]
+    assert call(server, "POST", "/api/study/check")[0] == 200
+    assert call(server, "POST", "/api/study/open", {"number": 99})[0] == 404
+    controller.study = None

@@ -33,6 +33,7 @@ class Incoming:
     text: str
     is_reply: bool  # відповідь на якесь повідомлення бота
     callback_id: str = ""  # натиснута кнопка під повідомленням бота
+    reply_to: int = 0  # на яке саме повідомлення бота відповіли (або під яким натиснули кнопку)
 
 
 Buttons = list[list[tuple[str, str]]]  # рядки кнопок: (підпис, що «написати» боту при натисканні)
@@ -68,28 +69,31 @@ class TelegramBot:
         """Підтвердити Telegram, що вже прочитані оновлення оброблено, щоб вони не прийшли знову."""
         self._call("getUpdates", offset=self._offset, timeout=0, limit=1)
 
-    def send(self, text: str, buttons: Buttons | None = None) -> None:
+    def send(self, text: str, buttons: Buttons | None = None) -> int:
+        """Надіслати повідомлення; повертає його номер (щоб розуміти, на що потім відповіли)."""
         params = {"chat_id": self.chat_id, "text": text[:4000]}
         if buttons:
             params["reply_markup"] = {
                 "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]
             }
-        self._call("sendMessage", **params)
+        result = self._call("sendMessage", **params)
+        return int(result.get("message_id", 0)) if isinstance(result, dict) else 0
 
-    def _send_file(self, method: str, field: str, filename: str, content: bytes, caption: str) -> None:
-        self._call(method, files={field: (filename, content)}, chat_id=self.chat_id, caption=caption[:CAPTION_LIMIT])
+    def _send_file(self, method: str, field: str, filename: str, content: bytes, caption: str) -> int:
+        result = self._call(method, files={field: (filename, content)}, chat_id=self.chat_id, caption=caption[:CAPTION_LIMIT])
+        return int(result.get("message_id", 0)) if isinstance(result, dict) else 0
 
-    def send_photo(self, content: bytes, caption: str = "") -> None:
-        self._send_file("sendPhoto", "photo", "screen.jpg", content, caption)
+    def send_photo(self, content: bytes, caption: str = "") -> int:
+        return self._send_file("sendPhoto", "photo", "screen.jpg", content, caption)
 
-    def send_video(self, content: bytes, filename: str, caption: str = "") -> None:
-        self._send_file("sendVideo", "video", filename, content, caption)
+    def send_video(self, content: bytes, filename: str, caption: str = "") -> int:
+        return self._send_file("sendVideo", "video", filename, content, caption)
 
-    def send_voice(self, content: bytes, filename: str, caption: str = "") -> None:
-        self._send_file("sendVoice", "voice", filename, content, caption)
+    def send_voice(self, content: bytes, filename: str, caption: str = "") -> int:
+        return self._send_file("sendVoice", "voice", filename, content, caption)
 
-    def send_document(self, content: bytes, filename: str, caption: str = "") -> None:
-        self._send_file("sendDocument", "document", filename, content, caption)
+    def send_document(self, content: bytes, filename: str, caption: str = "") -> int:
+        return self._send_file("sendDocument", "document", filename, content, caption)
 
     def updates(self, wait: int = 30) -> list[Incoming]:
         """Нові текстові повідомлення боту."""
@@ -105,13 +109,19 @@ class TelegramBot:
             self._offset = max(self._offset, update["update_id"] + 1)
             message = update.get("message") or {}
             if "text" in message:
-                messages.append(Incoming(message["chat"]["id"], message["text"], "reply_to_message" in message))
+                replied = message.get("reply_to_message") or {}
+                messages.append(
+                    Incoming(message["chat"]["id"], message["text"], bool(replied), reply_to=int(replied.get("message_id", 0)))
+                )
             if callback := update.get("callback_query"):
-                chat_id = (callback.get("message") or {}).get("chat", {}).get("id", 0)
-                messages.append(Incoming(chat_id, callback.get("data", ""), False, callback["id"]))
+                origin = callback.get("message") or {}
+                chat_id = origin.get("chat", {}).get("id", 0)
+                messages.append(
+                    Incoming(chat_id, callback.get("data", ""), False, callback["id"], int(origin.get("message_id", 0)))
+                )
         return messages
 
-    def listen(self, handle: Callable[[str, bool], str | None], stop: threading.Event) -> None:
+    def listen(self, handle: Callable[[str, bool, int], str | None], stop: threading.Event) -> None:
         """Приймає команди лише з твого чату й відповідає на них. Блокує — запускай у потоці."""
         while not stop.is_set():
             try:
@@ -121,7 +131,7 @@ class TelegramBot:
                         continue
                     if incoming.callback_id:  # прибрати «годинник» на кнопці
                         self._call("answerCallbackQuery", callback_query_id=incoming.callback_id)
-                    if reply := handle(incoming.text, incoming.is_reply):
+                    if reply := handle(incoming.text, incoming.is_reply, incoming.reply_to):
                         self.send(reply)
             except TelegramError as e:
                 log.warning("%s — повторю за хвилину", e)
@@ -224,32 +234,38 @@ class Notifier:
 
         self._queue.put(job)
 
-    def ask(self, text: str, buttons: Buttons, urgent: bool = True) -> None:
-        """Сповіщення з кнопками: відповісти можна одним дотиком."""
+    def ask(
+        self, text: str, buttons: Buttons, urgent: bool = True, on_sent: Callable[[int], None] | None = None
+    ) -> None:
+        """Сповіщення з кнопками: відповісти можна одним дотиком. ``on_sent`` отримає номер повідомлення."""
         log.info("🔔 %s", text)
 
         def job() -> None:
             if self.desktop:
                 self.desktop(text, urgent)
             if self.bot:
-                self.bot.send(text, buttons)
+                message_id = self.bot.send(text, buttons)
+                if on_sent and message_id:
+                    on_sent(message_id)
 
         self._queue.put(job)
 
-    def _media(self, send: Callable[[TelegramBot], None], caption: str, what: str) -> None:
+    def _media(self, send: Callable[[TelegramBot], int], caption: str, what: str, on_sent=None) -> None:
         log.info("🔔 [%s] %s", what, caption.splitlines()[0] if caption else "")
         if not self.bot:
             return
 
         def job() -> None:
-            send(self.bot)
+            message_id = send(self.bot)
+            if on_sent and message_id:
+                on_sent(message_id)
             if len(caption) > CAPTION_LIMIT:  # повний текст — окремим повідомленням
                 self.bot.send(caption)
 
         self._queue.put(job)
 
-    def photo(self, content: bytes, caption: str = "") -> None:
-        self._media(lambda bot: bot.send_photo(content, caption), caption, "фото")
+    def photo(self, content: bytes, caption: str = "", on_sent: Callable[[int], None] | None = None) -> None:
+        self._media(lambda bot: bot.send_photo(content, caption), caption, "фото", on_sent)
 
     def video(self, content: bytes, filename: str, caption: str = "") -> None:
         self._media(lambda bot: bot.send_video(content, filename, caption), caption, "відео")
@@ -257,8 +273,8 @@ class Notifier:
     def voice(self, content: bytes, filename: str, caption: str = "") -> None:
         self._media(lambda bot: bot.send_voice(content, filename, caption), caption, "аудіо")
 
-    def document(self, content: bytes, filename: str, caption: str = "") -> None:
-        self._media(lambda bot: bot.send_document(content, filename, caption), caption, filename)
+    def document(self, content: bytes, filename: str, caption: str = "", on_sent: Callable[[int], None] | None = None) -> None:
+        self._media(lambda bot: bot.send_document(content, filename, caption), caption, filename, on_sent)
 
     def _run(self) -> None:
         while True:

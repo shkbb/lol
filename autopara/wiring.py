@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterator
 
-from .assistant import Assistant
+from .agent import Agent
+from .assistant import HELP, Assistant
 from .brain import BrainConnector, BrainWorker, OllamaBrain
 from .config import Config
 from .ears import (
@@ -29,6 +30,7 @@ from .ears import (
 )
 from .media import AudioBuffer, Clipper, FrameBuffer
 from .report import Reporter
+from .study import STUDY_HELP, StudyManager
 from .telegram import Notifier, TelegramBot
 
 log = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ class Stack:
     app_audio: object | None = None  # звук Zoom-клієнта на час пари: start() / stop()
     zoom_app_heard: bool = True  # чи чують вуха Zoom-клієнт (інакше в режимі auto Zoom відкривається в браузері)
     frames: FrameBuffer | None = None  # кадри сторінки для відеовирізок, або None
+    study: StudyManager | None = None  # завдання з Classroom і вижимки лекцій (агент)
 
 
 @contextmanager
@@ -70,11 +73,28 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         worker.start()
     stack = Stack(assistant)
 
+    study = None
+    if config.study.enabled:
+        folder = config.data_dir / "study"
+        study = StudyManager(config, Agent(config.agent, folder / "agent-usage.json"), notifier, clock, folder)
+        study.start()
+        stoppers.append(study.stop)
+        stack.study = study
+
+    def route(text: str, is_reply: bool, reply_to: int = 0) -> str | None:
+        """Повідомлення з Telegram: спершу — чи це про завдання, інакше — помічнику пари."""
+        if study is not None:
+            if (answer := study.on_command(text, reply_to)) is not None:
+                return answer
+            if text.strip().casefold() in ("/start", "/help", "help", "допомога", "?"):
+                return HELP + "\n" + STUDY_HELP
+        return assistant.on_command(text, clock(), is_reply)
+
     if listening:
         stop = threading.Event()
         listener = threading.Thread(
             target=bot.listen,
-            args=(lambda text, is_reply: assistant.on_command(text, clock(), is_reply), stop),
+            args=(route, stop),
             name="telegram",
             daemon=True,
         )
@@ -108,10 +128,15 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         assistant.on_moment = Clipper(stack.frames, audio, notifier, assistant.quote).capture
 
     reporter = None
+    finished: list[Callable] = []  # пара скінчилась → звіт і вижимка
     if config.telegram.reports:
         reporter = Reporter(notifier, None, None, config.data_dir / "transcripts")
         assistant.on_chunk = reporter.chunk
-        assistant.on_finished = reporter.finish
+        finished.append(reporter.finish)
+    if study is not None:
+        finished.append(study.lecture_record)
+    if finished:
+        assistant.on_finished = lambda record: [handle(record) for handle in finished]
 
     if worker:
 

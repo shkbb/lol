@@ -992,6 +992,151 @@ pages.behaviour = () => [
       numberField("join.leave_after_minutes", "Якщо учасників не видно — через хв після кінця", ""))),
 ];
 
+// --- Навчання -------------------------------------------------------------------
+
+const STUDY_BADGE = {
+  new: "", working: "warn", waiting: "warn", stuck: "bad", ready: "accent", approved: "warn",
+  submitted: "ok", returning: "warn", declined: "", skipped: "", failed: "bad", gone: "",
+};
+let studyTimer;
+let studyRedo = 0;  // номер завдання, для якого зараз пишеш зауваження (тоді список не оновлюємо)
+
+function studyTask(task, show) {
+  const call = (button, action, extra = {}) => busy(button, "…", async () => {
+    const data = await api("POST", "/api/study/action", { number: task.number, action, version: task.version, ...extra });
+    if (data.result) toast(data.result);
+    studyRedo = 0;
+    show(data);
+  });
+  const button = (label, cls, action, question) => {
+    const element = h("button", { class: cls }, label);
+    element.onclick = () => { if (!question || confirm(question)) call(element, action); };
+    return element;
+  };
+  const open = h("button", { class: "ghost" }, "📂 Файли");
+  open.onclick = () => busy(open, "…", () => api("POST", "/api/study/open", { number: task.number }));
+
+  const actions = [];
+  if ((task.status === "ready" || task.status === "failed") && task.files.length) {
+    actions.push(button("✅ Так, здати", "primary", "yes", `Здати «${task.title}» у Classroom?`));
+  }
+  if (task.status === "ready" || task.status === "stuck") {
+    const redo = h("button", { class: "soft" }, "✏️ Переробити");
+    redo.onclick = () => { studyRedo = task.number; show(); };
+    actions.push(redo);
+  }
+  if (["stuck", "failed", "declined"].includes(task.status)) actions.push(button("🔁 Спробувати ще", "soft", "retry"));
+  if (["ready", "stuck", "failed", "approved"].includes(task.status)) actions.push(button("❌ Не здавати", "ghost", "no"));
+  if (task.status === "submitted" && task.submitted !== "раніше") {
+    actions.push(button("↩️ Забрати з Classroom", "ghost", "back", `Скасувати здачу «${task.title}»?`));
+  }
+  if (task.folder) actions.push(open);
+
+  let redoBox = null;
+  if (studyRedo === task.number) {
+    const text = h("textarea", { rows: 3, placeholder: "Що змінити: «варіант 7, а не 5», «більше пояснень до коду»…" });
+    const send = h("button", { class: "primary" }, "Переробити з цим");
+    send.onclick = () => {
+      if (!text.value.trim()) { text.focus(); return; }
+      call(send, "redo", { comment: text.value.trim() });
+    };
+    redoBox = h("div", { class: "field", style: "margin-top:10px" }, text,
+      h("div", { class: "row" }, send, h("button", { class: "ghost", onclick: () => { studyRedo = 0; show(); } }, "Скасувати")));
+    setTimeout(() => text.focus(), 0);
+  }
+
+  const due = task.due ? ` · до ${new Date(task.due).toLocaleDateString("uk-UA", { day: "numeric", month: "short" })}` : "";
+  const files = task.files.map((path) => path.split(/[\\/]/).pop());
+  return h("div", { class: "card" },
+    h("div", { class: "row" },
+      h("b", {}, `№${task.number} ${task.title}`),
+      h("span", { class: `badge ${STUDY_BADGE[task.status] || ""}` }, task.status_text)),
+    h("div", { class: "muted small" }, `${task.course}${due}${task.version > 1 ? ` · версія ${task.version}` : ""}`),
+    task.error && !["ready", "submitted"].includes(task.status) && h("div", { class: "banner warn", style: "margin-top:8px" }, task.error),
+    files.length > 0 && h("div", { class: "small", style: "margin-top:8px" }, "📎 ", files.join(", ")),
+    task.summary && h("details", { style: "margin-top:8px" }, h("summary", {}, "Що зроблено"), h("div", { class: "small", style: "white-space:pre-wrap" }, task.summary)),
+    task.feedback.length > 0 && h("div", { class: "small muted", style: "margin-top:6px" }, "Твої зауваження: ", task.feedback.map((item) => `«${item}»`).join(", ")),
+    actions.length > 0 && h("div", { class: "row", style: "margin-top:10px" }, actions),
+    redoBox);
+}
+
+pages.study = () => {
+  const status = h("div");
+  const list = h("div", {}, h("div", { class: "empty" }, "Завантажую…"));
+  let latest = null;
+  const show = (data) => {
+    if (data) latest = data;
+    if (!latest) return;
+    if (latest.off) {
+      status.replaceChildren(h("div", { class: "banner" }, `Навчання: ${latest.off}.`));
+      list.replaceChildren();
+      return;
+    }
+    const agent = latest.agent_problem
+      ? h("div", { class: "banner warn" }, `Агент: ${latest.agent_problem}`)
+      : h("div", { class: "banner ok" }, `Агент готовий · сьогодні запусків: ${latest.agent_used} з ${latest.agent_limit}`);
+    const check = h("button", { class: "ghost" }, "Перевірити Classroom зараз");
+    check.onclick = () => busy(check, "…", async () => toast((await api("POST", "/api/study/check")).result));
+    status.replaceChildren(agent,
+      latest.last_error && h("div", { class: "banner bad" }, `Classroom: ${latest.last_error}`),
+      h("div", { class: "row", style: "margin:10px 0 16px" },
+        h("span", { class: "muted" }, latest.last_check ? `Classroom перевірено ${when(latest.last_check)}` : "Classroom ще не перевіряли",
+          latest.list_number ? ` · твій номер у списку: ${latest.list_number}` : ""),
+        h("span", { class: "spacer" }), check));
+    const active = latest.tasks.filter((task) => !["submitted", "declined", "skipped", "gone"].includes(task.status));
+    const done = latest.tasks.filter((task) => !active.includes(task));
+    list.replaceChildren(h("div", {},
+      active.length ? active.map((task) => studyTask(task, show)) : h("div", { class: "empty" }, "Незданих завдань немає."),
+      done.length > 0 && h("details", { style: "margin:4px 0 20px" },
+        h("summary", { class: "muted" }, `Здані й пропущені (${done.length})`), done.map((task) => studyTask(task, show)))));
+  };
+  const pull = async () => {
+    if (page !== "study") return;
+    if (!studyRedo) {
+      try { show(await api("GET", "/api/study")); } catch (e) { /* програма перезапускається */ }
+    }
+    studyTimer = setTimeout(pull, 5000);
+  };
+  clearTimeout(studyTimer);
+  studyRedo = 0;
+  pull();
+
+  return [
+    h("h1", {}, "Навчання"),
+    h("p", { class: "lead" }, "Агент (Antigravity) робить завдання з Google Classroom і вижимки лекцій. Тобі приходять лише повністю готові роботи — і здаються вони тільки після твого «так»."),
+    status,
+    list,
+    h("div", { class: "card" },
+      h("h2", {}, "Налаштування"),
+      checkField("study.enabled", "Виконувати завдання з Classroom", "Перевіряє «Завдання» кожні кілька годин між парами. Тести й захисти не чіпає. Потрібен Antigravity CLI (agy) з виконаним входом."),
+      checkField("study.lecture_notes", "Вижимки лекцій", "Після пари агент робить детальний конспект з розшифровки. Конспекти бачить і агент, коли робить завдання з цього предмета (побажання викладача)."),
+      h("div", { class: "grid" },
+        textField("study.account", "Акаунт Classroom", "Порожньо — той самий, що для Meet.", { placeholder: get("join.meet_account") || "st…@stud.duikt.edu.ua" }),
+        numberField("study.check_hours", "Перевіряти кожні, год", "", { min: 1 })),
+      chipsField("study.skip_courses", "Курси, які не чіпати", "Частина назви курсу.", "назва курсу і Enter")),
+    h("div", { class: "card" },
+      h("h2", {}, "Для титульної сторінки"),
+      h("div", { class: "grid" },
+        textField("study.full_name", "ПІБ повністю", "", { placeholder: "Прізвище Ім'я По батькові" }),
+        textField("study.group", "Група", "Порожньо — з розкладу.", { placeholder: get("schedule.group") || "" })),
+      textField("study.university", "Університет", ""),
+      h("div", { class: "grid" },
+        textField("study.specialty", "Спеціальність", ""),
+        textField("study.department", "Кафедра", "Порожньо — агент візьме з матеріалів курсу.")),
+      h("div", { class: "grid" },
+        textField("study.city", "Місто", ""),
+        numberField("study.list_number", "Номер у списку групи", "Для варіантів. Порожньо — визначу зі списку групи.", { optional: true }),
+        selectField("study.file_format", "Формат звіту", "", [["pdf", "PDF"], ["docx", "Word (DOCX)"]]))),
+    h("div", { class: "card" },
+      h("h2", {}, "Агент"),
+      h("div", { class: "grid" },
+        textField("agent.command", "Команда", "Antigravity CLI.", { placeholder: "agy" }),
+        numberField("agent.timeout_minutes", "Хвилин на один запуск", "", { min: 5 }),
+        numberField("agent.daily_limit", "Запусків на день", "Запобіжник для лімітів підписки.", { min: 1 }),
+        numberField("agent.attempts", "Спроб довести до готового", "Кожна — виконання + сувора перевірка.", { min: 1 }))),
+  ];
+};
+
 let logAfter = 0;
 let logTimer;
 pages.log = () => {
