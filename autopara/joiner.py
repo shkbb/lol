@@ -1,0 +1,440 @@
+"""Заходить у Google Meet / Zoom з вимкненими мікрофоном і камерою.
+
+Головне правило безпеки: якщо не вдалося *переконатися*, що мікрофон вимкнено,
+ми забороняємо сторінці доступ до мікрофона й камери на рівні браузера
+і заходимо вже так. Інтерфейс Meet/Zoom змінюється часто, а «гарячий» мікрофон
+на парі — найгірший можливий результат.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+from time import monotonic
+from typing import Callable
+
+from playwright.sync_api import BrowserContext, Locator, Page, sync_playwright
+from playwright.sync_api import Error as PlaywrightError
+
+from .config import JoinSettings
+from .links import meet_url, zoom_app_url, zoom_web_url
+from .planner import Visit
+from .session import JoinError, Session
+
+log = logging.getLogger(__name__)
+
+MEET_ORIGIN = "https://meet.google.com"
+ZOOM_ORIGIN = "https://app.zoom.us"
+LOGIN_HINT = "потрібно увійти в Google-акаунт: запусти `autopara login`"
+
+# Інтерфейс Meet/Zoom буває англійською, українською чи російською — шукаємо всіма трьома.
+JOIN_RE = re.compile(
+    r"^\s*(join now|join|ask to join|приєднатися( зараз)?|попросити\b.*приєдна\w*"
+    r"|присоединиться( сейчас)?|попросить\b.*присоедин\w*)\s*$",
+    re.I,
+)
+CONTINUE_WITHOUT_RE = re.compile(r"continue without|продовжити без|продолжить без", re.I)
+DISMISS_RE = re.compile(r"^\s*(got it|dismiss|зрозуміло|закрити|понятно|закрыть)\s*$", re.I)
+NAME_RE = re.compile(r"name|ім.я|имя", re.I)
+LEAVE_RE = re.compile(r"leave|покинути|вийти з|покинуть|выйти из", re.I)
+DENIED_RE = re.compile(
+    r"can.?t join this|cannot join this|check your meeting code|declined|removed from the meeting"
+    r"|не вдається приєднатися|не можете приєднатися|відхилено|перевірте код"
+    r"|не удается присоединиться|отклонен|проверьте код",
+    re.I,
+)
+NOT_STARTED_RE = re.compile(r"hasn.?t started|not started yet|ще не почал|ещ[её] не начал", re.I)
+PASSCODE_RE = re.compile(r"passcode|код доступу|пароль", re.I)
+
+ZOOM_MIC_RE = re.compile(r"micro|мікрофон|микрофон|\b(un)?mute\b|звук", re.I)
+ZOOM_CAM_RE = re.compile(r"camera|video|камер|відео|видео", re.I)
+# Підпис кнопки описує дію, а не стан: «Увімкнути мікрофон» означає, що зараз він вимкнений.
+CURRENTLY_OFF_RE = re.compile(r"turn on|unmute|start video|увімкн|включ|запуст", re.I)
+CURRENTLY_ON_RE = re.compile(r"turn off|\bmute\b|stop video|вимкн|выключ|отключ|зупин|останов", re.I)
+
+
+# --- Дрібні помічники Playwright ---------------------------------------------
+
+
+def _first_visible(locator: Locator, accept: Callable[[Locator], bool] | None = None) -> Locator | None:
+    try:
+        count = min(locator.count(), 20)
+        for index in range(count):
+            item = locator.nth(index)
+            if item.is_visible() and (accept is None or accept(item)):
+                return item
+    except PlaywrightError:
+        pass
+    return None
+
+
+def _find(page: Page, make: Callable, accept: Callable[[Locator], bool] | None = None) -> Locator | None:
+    """Шукає видимий елемент на сторінці та в усіх її фреймах (Zoom живе в iframe)."""
+    for frame in page.frames:
+        if found := _first_visible(make(frame), accept):
+            return found
+    return None
+
+
+def _visible_text(page: Page, pattern: re.Pattern) -> bool:
+    return _find(page, lambda f: f.get_by_text(pattern)) is not None
+
+
+def _label(item: Locator) -> str:
+    try:
+        parts = [item.get_attribute("aria-label"), item.get_attribute("data-tooltip")]
+        return " ".join(p for p in parts if p) or item.inner_text(timeout=1000)
+    except PlaywrightError:
+        return ""
+
+
+def _is_off(item: Locator) -> bool | None:
+    """True — пристрій вимкнено, False — увімкнено, None — не зрозуміло."""
+    try:
+        muted = item.get_attribute("data-is-muted")
+    except PlaywrightError:
+        return None
+    if muted in ("true", "false"):
+        return muted == "true"
+    label = _label(item)
+    if CURRENTLY_OFF_RE.search(label):
+        return True
+    if CURRENTLY_ON_RE.search(label):
+        return False
+    return None
+
+
+def _has_state(item: Locator) -> bool:
+    return _is_off(item) is not None
+
+
+def _ensure_off(page: Page, find_toggle: Callable[[Page], Locator | None]) -> bool:
+    for _ in range(3):
+        toggle = find_toggle(page)
+        if toggle is None:
+            return False
+        state = _is_off(toggle)
+        if state is True:
+            return True
+        if state is None:
+            return False
+        try:
+            toggle.click(timeout=3000)
+        except PlaywrightError:
+            return False
+        page.wait_for_timeout(700)
+    toggle = find_toggle(page)
+    return toggle is not None and _is_off(toggle) is True
+
+
+def _devices_off(page: Page, settings: JoinSettings, mic, cam) -> bool:
+    """Вимикає й перевіряє пристрої двічі з паузою: Meet вмикає камеру асинхронно після завантаження."""
+    for _ in range(2):
+        if settings.mute_microphone and not _ensure_off(page, mic):
+            return False
+        if settings.camera_off and not _ensure_off(page, cam):
+            return False
+        page.wait_for_timeout(1500)
+    return True
+
+
+def _block_media(context: BrowserContext, page: Page, origin: str) -> None:
+    """Забороняє сайту мікрофон і камеру — після перезавантаження він фізично не зможе їх увімкнути.
+
+    Заборона діє, поки живе CDP-сесія, тобто поки відкрита вкладка: тому сесію не від'єднуємо.
+    Закрили вкладку — Chromium скасовує заборону, і наступна пара починається з чистого аркуша.
+    """
+    try:
+        cdp = context.new_cdp_session(page)
+        for name in ("microphone", "camera"):
+            cdp.send(
+                "Browser.setPermission",
+                {"origin": origin, "permission": {"name": name}, "setting": "denied"},
+            )
+    except PlaywrightError as e:
+        log.warning("Не вдалося заборонити доступ через CDP (%s), просто скидаю дозволи", e)
+        context.clear_permissions()
+
+
+def _now(deadline: datetime) -> datetime:
+    return datetime.now(deadline.tzinfo)
+
+
+def _wait_in_call(page: Page, deadline: datetime, in_call: Callable[[Page], bool]) -> None:
+    waiting_logged = False
+    while _now(deadline) < deadline:
+        if in_call(page):
+            return
+        if _visible_text(page, DENIED_RE):
+            raise JoinError("організатор не впустив або зустріч недоступна", retry=False)
+        if not waiting_logged:
+            log.info("Чекаю, поки впустять у зустріч...")
+            waiting_logged = True
+        page.wait_for_timeout(2000)
+    raise JoinError("так і не впустили до кінця пари", retry=False)
+
+
+# --- Google Meet -------------------------------------------------------------
+
+
+def _meet_device(device_re: re.Pattern) -> Callable[[Page], Locator | None]:
+    def find(page: Page) -> Locator | None:
+        def matches(item: Locator) -> bool:
+            return bool(device_re.search(_label(item)))
+
+        return _first_visible(page.locator("[data-is-muted]"), matches) or _first_visible(
+            page.get_by_role("button", name=device_re), _has_state
+        )
+
+    return find
+
+
+MEET_MIC = _meet_device(re.compile(r"micro|мікрофон|микрофон", re.I))
+MEET_CAM = _meet_device(re.compile(r"camera|камер", re.I))
+
+
+def _meet_in_call(page: Page) -> bool:
+    return (
+        _first_visible(page.get_by_role("button", name=LEAVE_RE)) is not None
+        or _first_visible(page.locator("button i", has_text=re.compile(r"^call_end$"))) is not None
+    )
+
+
+def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime) -> Locator:
+    """Чекає на кнопку «Приєднатися», попутно закриваючи діалоги та заповнюючи ім'я гостя."""
+    stuck_since = monotonic()
+    while _now(deadline) < deadline:
+        if "accounts.google.com" in page.url:
+            raise JoinError(LOGIN_HINT, retry=False)
+        if _visible_text(page, DENIED_RE):
+            raise JoinError("Meet каже, що приєднатися до цієї зустрічі не можна", retry=False)
+        if _visible_text(page, NOT_STARTED_RE):
+            log.info("Зустріч ще не почалася — перевірю знову за 30 с")
+            page.wait_for_timeout(30_000)
+            page.reload(wait_until="domcontentloaded")
+            stuck_since = monotonic()
+            continue
+        for pattern in (CONTINUE_WITHOUT_RE, DISMISS_RE):
+            if button := _first_visible(page.get_by_role("button", name=pattern)):
+                button.click()
+        name_box = _first_visible(page.get_by_role("textbox", name=NAME_RE))
+        if name_box is not None and not name_box.input_value():
+            if not settings.display_name:
+                raise JoinError(f"Meet просить ім'я гостя — {LOGIN_HINT} (або задай display_name)", retry=False)
+            name_box.fill(settings.display_name)
+        if button := _first_visible(page.get_by_role("button", name=JOIN_RE)):
+            if button.is_enabled():
+                return button
+        if monotonic() - stuck_since > 90:
+            raise JoinError("не дочекався кнопки «Приєднатися» в Meet")
+        page.wait_for_timeout(1000)
+    raise JoinError("пара вже закінчилась", retry=False)
+
+
+def join_meet(context: BrowserContext, page: Page, url: str, settings: JoinSettings, deadline: datetime) -> None:
+    context.grant_permissions(["microphone", "camera"], origin=MEET_ORIGIN)
+    page.goto(meet_url(url, settings.meet_account), wait_until="domcontentloaded")
+    join_button = _meet_prejoin(page, settings, deadline)
+    if (settings.mute_microphone or settings.camera_off) and not _devices_off(page, settings, MEET_MIC, MEET_CAM):
+        log.warning("Не вдалося переконатися, що мікрофон/камера вимкнені — забороняю Meet доступ до них")
+        _block_media(context, page, MEET_ORIGIN)
+        page.reload(wait_until="domcontentloaded")
+        join_button = _meet_prejoin(page, settings, deadline)
+    join_button.click()
+    _wait_in_call(page, deadline, _meet_in_call)
+    if settings.mute_microphone and MEET_MIC(page) is not None and not _ensure_off(page, MEET_MIC):
+        log.error("УВАГА: у дзвінку мікрофон, схоже, увімкнений — вимкни його вручну!")
+
+
+# --- Zoom у браузері (експериментально) --------------------------------------
+
+
+def _zoom_toggle(selector: str, name_re: re.Pattern) -> Callable[[Page], Locator | None]:
+    def find(page: Page) -> Locator | None:
+        return _find(page, lambda f: f.locator(selector)) or _find(
+            page, lambda f: f.get_by_role("button", name=name_re), _has_state
+        )
+
+    return find
+
+
+ZOOM_MIC = _zoom_toggle("#preview-audio-control-button", ZOOM_MIC_RE)
+ZOOM_CAM = _zoom_toggle("#preview-video-control-button", ZOOM_CAM_RE)
+
+
+def _zoom_in_call(page: Page) -> bool:
+    return (
+        _find(page, lambda f: f.locator(".footer__leave-btn, .footer__leave-btn-container button")) is not None
+        or _find(page, lambda f: f.get_by_role("button", name=re.compile(r"^\s*(leave|вийти|выйти)\b", re.I)))
+        is not None
+    )
+
+
+def _zoom_prejoin(page: Page, settings: JoinSettings) -> Locator:
+    started = monotonic()
+    while monotonic() - started < 90:
+        if _find(page, lambda f: f.get_by_role("textbox", name=PASSCODE_RE)):
+            raise JoinError("Zoom просить код доступу — додай ?pwd=... у посилання в конфігу", retry=False)
+        name_box = _find(page, lambda f: f.locator("#input-for-name")) or _find(
+            page, lambda f: f.get_by_role("textbox", name=NAME_RE)
+        )
+        if name_box is not None and not name_box.input_value():
+            if not settings.display_name:
+                raise JoinError("Zoom у браузері просить ім'я — задай display_name у [join]", retry=False)
+            name_box.fill(settings.display_name)
+        button = _find(page, lambda f: f.locator("button.preview-join-button")) or _find(
+            page, lambda f: f.get_by_role("button", name=JOIN_RE)
+        )
+        if button is not None and button.is_enabled():
+            return button
+        page.wait_for_timeout(1000)
+    raise JoinError("не дочекався кнопки «Join» у веб-клієнті Zoom")
+
+
+def join_zoom_web(context: BrowserContext, page: Page, url: str, settings: JoinSettings, deadline: datetime) -> None:
+    context.grant_permissions(["microphone", "camera"], origin=ZOOM_ORIGIN)
+    page.goto(zoom_web_url(url), wait_until="domcontentloaded")
+    join_button = _zoom_prejoin(page, settings)
+    if (settings.mute_microphone or settings.camera_off) and not _devices_off(page, settings, ZOOM_MIC, ZOOM_CAM):
+        log.warning("Не вдалося переконатися, що мікрофон/камера вимкнені — забороняю Zoom доступ до них")
+        _block_media(context, page, ZOOM_ORIGIN)
+        page.reload(wait_until="domcontentloaded")
+        join_button = _zoom_prejoin(page, settings)
+    join_button.click()
+    _wait_in_call(page, deadline, _zoom_in_call)
+
+
+# --- Zoom-клієнт -------------------------------------------------------------
+
+
+def open_uri(uri: str) -> None:
+    if sys.platform == "win32":
+        os.startfile(uri)  # noqa: S606 — так Windows відкриває zoommtg:// у Zoom
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", uri])
+    else:
+        subprocess.Popen(["xdg-open", uri])
+
+
+# --- Браузер і фасад ---------------------------------------------------------
+
+
+ANCHOR_PAGE = """<!doctype html><meta charset="utf-8"><title>autopara</title>
+<body style="font: 16px sans-serif; padding: 2em">
+<h2>autopara</h2><p>Тут відкриватимуться пари. Не закривай це вікно, поки працює autopara.</p></body>"""
+
+
+class Browser:
+    """Один Chrome з окремим постійним профілем: логін у Google зберігається між запусками."""
+
+    def __init__(self, profile_dir: Path, channel: str = "chrome", mute_sound: bool = True, headless: bool = False):
+        self.profile_dir = profile_dir
+        self.channel = channel
+        self.mute_sound = mute_sound
+        self.headless = headless
+        self._playwright = None
+        self._context: BrowserContext | None = None
+
+    def context(self) -> BrowserContext:
+        if self._context is None:
+            self._context = self._launch()
+            self._context.on("close", lambda _: setattr(self, "_context", None))
+            # Перша вкладка — «якір»: пари відкриваються в нових вкладках і закриваються,
+            # а вікно браузера лишається.
+            if self._context.pages:
+                self._context.pages[0].set_content(ANCHOR_PAGE)
+        return self._context
+
+    def new_page(self) -> Page:
+        return self.context().new_page()
+
+    def _launch(self) -> BrowserContext:
+        if self._playwright is None:
+            self._playwright = sync_playwright().start()
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        args = ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
+        if self.mute_sound:
+            args.append("--mute-audio")
+        options = dict(
+            user_data_dir=str(self.profile_dir),
+            headless=self.headless,
+            args=args,
+            # Без цього прапорця Google не пускає логінитись («браузер може бути небезпечним»).
+            ignore_default_args=["--enable-automation"],
+            no_viewport=True,
+        )
+        if self.channel:
+            try:
+                return self._playwright.chromium.launch_persistent_context(channel=self.channel, **options)
+            except PlaywrightError as e:
+                log.warning(
+                    "Не вдалося запустити браузер %r (%s). Беру вбудований Chromium — "
+                    "логін у Google, зроблений у %r, там може не зберегтися.",
+                    self.channel,
+                    str(e).splitlines()[0],
+                    self.channel,
+                )
+        return self._playwright.chromium.launch_persistent_context(**options)
+
+    def close(self) -> None:
+        if self._context is not None:
+            try:
+                self._context.close()
+            except PlaywrightError:
+                pass
+            self._context = None
+        if self._playwright is not None:
+            self._playwright.stop()
+            self._playwright = None
+
+
+class Joiner:
+    def __init__(self, settings: JoinSettings, profile_dir: Path, headless: bool = False, opener=open_uri):
+        self.settings = settings
+        self.browser = Browser(profile_dir, settings.browser_channel, settings.mute_sound, headless)
+        self._open_uri = opener
+
+    def join(self, visit: Visit) -> Session:
+        if visit.platform == "zoom" and self.settings.zoom_mode == "app":
+            self._open_uri(zoom_app_url(visit.url) or visit.url)
+            return Session(visit, visit.leave_at)
+        page = self.browser.new_page()
+        try:
+            if visit.platform == "meet":
+                join_meet(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
+            elif visit.platform == "zoom":
+                join_zoom_web(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
+            else:
+                page.goto(visit.url, wait_until="domcontentloaded")
+                log.warning("%s — не Meet і не Zoom: сторінку відкрито, мікрофон перевір сам", visit.url)
+        except JoinError:
+            self._discard(page)
+            raise
+        except PlaywrightError as e:
+            self._discard(page)
+            raise JoinError(f"помилка браузера: {str(e).splitlines()[0]}") from e
+        return Session(visit, visit.leave_at, page)
+
+    def alive(self, session: Session) -> bool:
+        return session.page is None or not session.page.is_closed()
+
+    def leave(self, session: Session) -> None:
+        if session.page is None:
+            log.info("Zoom-клієнт не закриваю — вийди з конференції сам, коли зручно")
+            return
+        self._discard(session.page)
+
+    def _discard(self, page: Page) -> None:
+        try:
+            if not page.is_closed():
+                page.close()
+        except PlaywrightError:
+            pass
+
+    def close(self) -> None:
+        self.browser.close()
