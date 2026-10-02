@@ -56,6 +56,7 @@ class Lesson:
     groups: str = ""
     link: str | None = None  # посилання, яке вписали прямо в розклад (поле info)
     notice: str = ""
+    short_subject: str = ""  # скорочена назва з розкладу, наприклад «ЯТПЗ»
 
     def starts_at(self, tz: tzinfo) -> datetime:
         return datetime.combine(self.day, self.start, tz)
@@ -201,6 +202,7 @@ def to_lesson(event: dict) -> Lesson:
         groups=_clean(event.get("groups")),
         link=link_from_html(event.get("info")) or link_from_html(event.get("notice")),
         notice=_clean(event.get("notice")),
+        short_subject=_clean(event.get("disciplineShortName")),
     )
 
 

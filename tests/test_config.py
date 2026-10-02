@@ -38,3 +38,33 @@ def test_links_are_normalized():
         tomllib.loads('[schedule]\ngroup = "ТЦР-32"\n[[links]]\nsubject = "БД"\nurl = " meet.google.com/aaa-bbbb-ccc "\n')
     )
     assert config.links[0].url == "https://meet.google.com/aaa-bbbb-ccc"
+
+
+REPO_CONFIG = EXAMPLE.with_name("config.toml")
+
+
+def test_repo_config_is_valid():
+    config = load_config(str(REPO_CONFIG))
+    yatpz_lectures = next(rule for rule in config.links if rule.type == "Лк")
+    assert yatpz_lectures.url.endswith("?authuser=denys.personal%40gmail.com")
+    assert config.join.meet_account == "st1234567@stud.duikt.edu.ua"
+
+
+def test_account_only_for_meet():
+    toml = '[schedule]\ngroup = "ТЦР-32"\n[[links]]\nsubject = "БД"\naccount = "a@b.c"\nurl = "https://zoom.us/j/123456789"\n'
+    with pytest.raises(ConfigError, match="лише для Google Meet"):
+        parse_config(tomllib.loads(toml))
+
+
+def test_local_overlay_keeps_secrets_out_of_git(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        '[schedule]\ngroup = "ТЦР-32"\n[telegram]\nchat_id = 1\n'
+        '[[links]]\nsubject = "БД"\nurl = "https://meet.google.com/aaa-bbbb-ccc"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "config.local.toml").write_text(
+        '[telegram]\ntoken = "123:abc"\n[[links]]\nsubject = "БД"\nskip = true\n', encoding="utf-8"
+    )
+    config = load_config(str(tmp_path / "config.toml"))
+    assert (config.telegram.token, config.telegram.chat_id) == ("123:abc", 1)
+    assert config.links[0].skip  # правила з local — пріоритетніші

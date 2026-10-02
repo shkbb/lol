@@ -21,6 +21,7 @@ from typing import Callable
 from playwright.sync_api import BrowserContext, Locator, Page, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 
+from .assistant import ChatMessage
 from .config import JoinSettings
 from .leaving import Observation
 from .links import meet_url, zoom_app_url, zoom_web_url
@@ -244,6 +245,61 @@ def observe_meet(page: Page) -> Observation:
     return Observation(ended=ended)
 
 
+CHAT_BUTTON_RE = re.compile(r"chat|чат", re.I)
+CHAT_INPUT_RE = re.compile(r"send a message|message|повідомлення|сообщение", re.I)
+# Повідомлення в чаті Meet мають data-message-id; автора шукаємо в заголовку групи повідомлень.
+READ_MEET_CHAT_JS = """() => {
+  const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+  return [...document.querySelectorAll('[data-message-id]')].map((el) => {
+    let author = '';
+    let node = el;
+    for (let depth = 0; node && depth < 5 && !author; depth++, node = node.parentElement) {
+      author = clean(node.getAttribute && node.getAttribute('data-sender-name'));
+      for (let sib = node.previousElementSibling; sib && !author; sib = sib.previousElementSibling) {
+        if (sib.hasAttribute('data-message-id') || sib.querySelector('[data-message-id]')) break;
+        const text = clean(sib.innerText);
+        if (text && text.length <= 80) author = text.replace(/\\s*\\d{1,2}:\\d{2}(\\s*[AP]M)?$/i, '');
+      }
+    }
+    return {id: el.getAttribute('data-message-id'), author, text: clean(el.innerText)};
+  });
+}"""
+
+
+def _meet_chat_input(page: Page) -> Locator | None:
+    return _first_visible(page.get_by_role("textbox", name=CHAT_INPUT_RE))
+
+
+def open_meet_chat(page: Page) -> bool:
+    if _meet_chat_input(page) is not None:
+        return True  # уже відкритий: повторний клік його б закрив
+    button = _first_visible(page.get_by_role("button", name=CHAT_BUTTON_RE))
+    if button is None:
+        return False
+    button.click()
+    page.wait_for_timeout(1000)
+    return _meet_chat_input(page) is not None
+
+
+def read_meet_chat(page: Page) -> list[ChatMessage]:
+    if not open_meet_chat(page):
+        return []
+    rows = page.evaluate(READ_MEET_CHAT_JS)
+    return [ChatMessage(row["id"], row["author"], row["text"]) for row in rows if row.get("id") and row.get("text")]
+
+
+def send_meet_chat(page: Page, text: str) -> bool:
+    if not open_meet_chat(page):
+        return False
+    box = _meet_chat_input(page)
+    if box is None or not box.is_enabled():
+        return False
+    box.fill(text)
+    box.press("Enter")
+    page.wait_for_timeout(500)
+    return True
+
+
 def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime) -> Locator:
     """Чекає на кнопку «Приєднатися», попутно закриваючи діалоги та заповнюючи ім'я гостя."""
     stuck_since = monotonic()
@@ -394,10 +450,12 @@ class Browser:
         mute_sound: bool = True,
         headless: bool = False,
         executable_path: str = "",
+        audio_sink: str = "",
     ):
         self.profile_dir = profile_dir
         self.channel = channel
         self.executable_path = executable_path
+        self.audio_sink = audio_sink  # куди віддавати звук, щоб «вуха» могли його слухати
         self.mute_sound = mute_sound
         self.headless = headless
         self._playwright = None
@@ -421,9 +479,14 @@ class Browser:
             self._playwright = sync_playwright().start()
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         args = ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
-        if self.mute_sound:
+        env = None
+        if self.audio_sink:
+            # Звук іде у віртуальний вихід: у динаміках тиша, а вуха його чують.
+            env = {**os.environ, "PULSE_SINK": self.audio_sink}
+        elif self.mute_sound:
             args.append("--mute-audio")
         options = dict(
+            env=env,
             user_data_dir=str(self.profile_dir),
             headless=self.headless,
             args=args,
@@ -461,10 +524,17 @@ class Browser:
 
 
 class Joiner:
-    def __init__(self, settings: JoinSettings, profile_dir: Path, headless: bool = False, opener=open_uri):
+    def __init__(
+        self,
+        settings: JoinSettings,
+        profile_dir: Path,
+        headless: bool = False,
+        opener=open_uri,
+        audio_sink: str = "",
+    ):
         self.settings = settings
         self.browser = Browser(
-            profile_dir, settings.browser_channel, settings.mute_sound, headless, settings.browser_path
+            profile_dir, settings.browser_channel, settings.mute_sound, headless, settings.browser_path, audio_sink
         )
         self._open_uri = opener
 
@@ -502,6 +572,24 @@ class Joiner:
         except PlaywrightError as e:
             log.debug("Не вдалося роздивитись зустріч: %s", e)
         return Observation()
+
+    def read_chat(self, session: Session) -> list[ChatMessage]:
+        if session.page is None or session.visit.platform != "meet":
+            return []  # чат Zoom-клієнта нам не видно
+        try:
+            return read_meet_chat(session.page)
+        except PlaywrightError as e:
+            log.debug("Не вдалося прочитати чат: %s", e)
+            return []
+
+    def send_chat(self, session: Session, text: str) -> bool:
+        if session.page is None or session.visit.platform != "meet":
+            return False
+        try:
+            return send_meet_chat(session.page, text)
+        except PlaywrightError as e:
+            log.warning("Не вдалося написати в чат: %s", e)
+            return False
 
     def alive(self, session: Session) -> bool:
         return session.page is None or not session.page.is_closed()

@@ -11,17 +11,22 @@ from .rozklad import Lesson
 
 @dataclass(frozen=True)
 class LinkRule:
-    """Правило з конфіга: пари, що підходять під усі задані поля, відкриваються за ``url``."""
+    """Правило з конфіга: пари, що підходять під усі задані поля, відкриваються за ``url``.
+
+    У кожному полі можна дати кілька варіантів через «|»: ``subject = "ЯТПЗ|Якість"``.
+    ``subject`` порівнюється і з повною, і зі скороченою назвою предмета з розкладу.
+    """
 
     subject: str = ""
     type: str = ""
     teacher: str = ""
     url: str = ""
     skip: bool = False
+    account: str = ""  # Google-акаунт для цього посилання (email або номер), якщо не основний
 
     def matches(self, lesson: Lesson) -> bool:
         return (
-            _contains(lesson.subject, self.subject)
+            (_contains(lesson.subject, self.subject) or _contains(lesson.short_subject, self.subject))
             and _contains(lesson.type, self.type)
             and _contains(lesson.teacher, self.teacher)
         )
@@ -38,7 +43,9 @@ def _fold(text: str) -> str:
 
 
 def _contains(text: str, needle: str) -> bool:
-    return not needle or _fold(needle) in _fold(text)
+    if not needle:
+        return True
+    return any(alternative and _fold(alternative) in _fold(text) for alternative in needle.split("|"))
 
 
 def resolve(lesson: Lesson, rules: list[LinkRule], use_schedule_links: bool = True) -> Resolution:
@@ -72,10 +79,10 @@ def platform_of(url: str) -> str:
 def meet_url(url: str, account: str = "") -> str:
     """Посилання на Meet; ``account`` обирає Google-акаунт, якщо їх у браузері кілька."""
     url = normalize_url(url)
-    if not account:
-        return url
     parts = urlsplit(url)
     query = parse_qs(parts.query)
+    if not account or "authuser" in query:  # акаунт, заданий для конкретного посилання, важливіший
+        return url
     query["authuser"] = [account]
     return urlunsplit(parts._replace(query=urlencode(query, doseq=True)))
 

@@ -1,7 +1,8 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from autopara.config import Config, JoinSettings, ScheduleSettings
+from autopara.assistant import Assistant, ChatMessage
+from autopara.config import Config, JoinSettings, MeSettings, ScheduleSettings
 from autopara.leaving import Observation
 from autopara.links import LinkRule
 from autopara.rozklad import RozkladError, Target
@@ -40,9 +41,17 @@ class FakeJoiner:
         self.joined, self.left = [], []
         self.errors = []
         self.seen = Observation()
+        self.chat, self.written = [], []
 
     def observe(self, session):
         return self.seen
+
+    def read_chat(self, session):
+        return list(self.chat)
+
+    def send_chat(self, session, text):
+        self.written.append(text)
+        return True
 
     def join(self, visit):
         if self.errors:
@@ -213,3 +222,42 @@ def test_sleep_is_blocked_only_while_lessons_remain_today():
     runner.tick(at("09:28"))
     runner.tick(at("10:50"))
     assert not runner.sleep_guard.holding
+
+
+# --- Помічник ----------------------------------------------------------------
+
+
+def make_assisted_runner(lessons):
+    runner, client, joiner = make_runner(lessons)
+    inbox = []
+    runner.assistant = Assistant(MeSettings(name="Ляшко Денис"), lambda text, urgent=False: inbox.append(text))
+    return runner, joiner, inbox
+
+
+def test_assistant_mirrors_plus_through_the_browser():
+    runner, joiner, inbox = make_assisted_runner([make_lesson()])
+    joiner.chat = [ChatMessage("0", "Іван Коваль", "Всім привіт")]
+    runner.tick(at("09:28"))
+    assert inbox == ["✅ Зайшов на «Бази даних», мікрофон і камера вимкнені"]
+    joiner.chat += [ChatMessage(str(i), name, "+") for i, name in enumerate(["Іван Коваль", "Олена Бойко", "Марко Лис"], 1)]
+    runner.tick(at("10:00"))
+    assert joiner.written == ["+"]
+    assert inbox[-1] == "💬 Написав «+» у чат «Бази даних» (Група пише «+» у чат)"
+
+
+def test_leave_command_from_telegram():
+    runner, joiner, inbox = make_assisted_runner([make_lesson()])
+    runner.tick(at("09:28"))
+    assert runner.assistant.on_command("вийди", at("09:40")) == "Виходжу."
+    runner.tick(at("09:40"))
+    assert joiner.left == ["Бази даних"]
+    assert inbox[-1] == "👋 Вийшов з «Бази даних»: ти попросив у Telegram"
+    runner.tick(at("09:45"))
+    assert joiner.joined == ["Бази даних"]  # назад не заходимо
+
+
+def test_failed_join_is_reported_with_the_link():
+    runner, joiner, inbox = make_assisted_runner([make_lesson()])
+    joiner.errors = [JoinError("потрібно увійти в Google-акаунт", retry=False)]
+    runner.tick(at("09:28"))
+    assert inbox == [f"❌ Не вдалося зайти на «Бази даних»: потрібно увійти в Google-акаунт. Зайди сам: {MEET}"]

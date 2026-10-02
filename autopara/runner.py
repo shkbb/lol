@@ -8,8 +8,9 @@ from time import sleep
 from typing import Callable
 from zoneinfo import ZoneInfo
 
+from .assistant import Action, Assistant
 from .config import Config
-from .leaving import LeaveDecider
+from .leaving import LeaveDecider, Observation
 from .planner import Plan, Visit, build_plan
 from .power import SleepGuard
 from .rozklad import RozkladClient, RozkladError, Target
@@ -43,8 +44,10 @@ class Runner:
         joiner,
         clock: Callable[[], datetime] | None = None,
         sleep_guard: SleepGuard | None = None,
+        assistant: Assistant | None = None,
     ):
         self.config = config
+        self.assistant = assistant
         self.client = client
         self.joiner = joiner
         self.tz = ZoneInfo(config.timezone)
@@ -57,7 +60,14 @@ class Runner:
         self.retry_at: dict[str, datetime] = {}
         self.next_refresh: datetime | None = None
         self.sleep_guard = sleep_guard or SleepGuard()
+        self.last_seen: dict[str, Observation] = {}
         self._warned: set[str] = set()
+
+    def notify(self, text: str, urgent: bool = False) -> None:
+        if self.assistant is not None:
+            self.assistant.notify(text, urgent=urgent)
+        else:
+            log.info(text)
 
     # Розклад
 
@@ -106,25 +116,62 @@ class Runner:
         for key, session in list(self.active.items()):
             if not self.joiner.alive(session):
                 log.info("Вкладку «%s» закрито вручну", session.visit.title)
-                del self.active[key]
-            elif self.config.join.auto_leave and (reason := self._leave_reason(session, now)):
+                self._forget(key)
+                continue
+            seen = self._look(key, session, now)
+            if self.config.join.auto_leave and (reason := self._leave_reason(session, seen, now)):
                 self._leave(key, reason)
 
         for visit in self.plan.visits:
             if self._due(visit, now):
                 self._join(visit, now)
 
+        if self.assistant is not None:
+            self.assistant.tick(now)
+            for action in self.assistant.take_actions():
+                self._act(action, now)
+
         self.sleep_guard.hold(self._lessons_left_today(now))
 
-    def _leave_reason(self, session: Session, now: datetime) -> str | None:
+    def _look(self, key: str, session: Session, now: datetime) -> Observation:
+        """Очі: що зараз у зустрічі (лише для вкладок браузера)."""
+        if session.page is None:
+            return Observation()
+        seen = self.joiner.observe(session)
+        self.last_seen[key] = seen
+        if self.assistant is not None:
+            self.assistant.on_participants(key, seen.participants)
+            self.assistant.on_chat(key, self.joiner.read_chat(session), now)
+        return seen
+
+    def _leave_reason(self, session: Session, seen: Observation, now: datetime) -> str | None:
         if session.decider is not None:
-            return session.decider.update(now, self.joiner.observe(session))
+            return session.decider.update(now, seen)
         return "пара скінчилась за розкладом" if now >= session.leave_at else None
 
     def _leave(self, key: str, reason: str) -> None:
-        session = self.active.pop(key)
+        session = self.active[key]
         log.info("Виходжу з «%s»: %s", session.visit.title, reason)
         self.joiner.leave(session)
+        self._forget(key)
+        self.notify(f"👋 Вийшов з «{session.visit.title}»: {reason}")
+
+    def _forget(self, key: str) -> None:
+        self.active.pop(key, None)
+        self.last_seen.pop(key, None)
+        if self.assistant is not None:
+            self.assistant.detach(key)
+
+    def _act(self, action: Action, now: datetime) -> None:
+        """Руки: виконуємо дії помічника тут, у головному потоці, — браузером керує лише він."""
+        session = self.active.get(action.key)
+        if session is None:
+            return
+        if action.kind == "chat":
+            ok = self.joiner.send_chat(session, action.text)
+            self.assistant.chat_done(action.key, action.text, ok, now, action.reason)
+        elif action.kind == "leave":
+            self._leave(action.key, action.reason)
 
     def _lessons_left_today(self, now: datetime) -> bool:
         if self.active:
@@ -151,6 +198,8 @@ class Runner:
                 session.leave_at = max(session.leave_at, visit.leave_at)
                 if session.decider is not None:
                     session.decider.next_lesson(*self._window(visit))
+                if self.assistant is not None:
+                    self.assistant.next_lesson(session.visit.key, visit.title, *self._window(visit))
                 self.finished.add(visit.key)
                 log.info("Лишаюсь у тій самій зустрічі на «%s»", visit.title)
                 return
@@ -169,16 +218,22 @@ class Runner:
                 self.retry_at[visit.key] = now + RETRY_JOIN_AFTER
             else:
                 log.error("Не вдалося зайти на «%s»: %s", visit.title, e)
+                self.notify(f"❌ Не вдалося зайти на «{visit.title}»: {e}. Зайди сам: {visit.url}", urgent=True)
                 self.finished.add(visit.key)
             return
         if session.page is None:
-            log.info("Відкрив «%s» у Zoom-клієнті (мікрофон і камера — за налаштуваннями Zoom)", visit.title)
+            self.notify(f"✅ Відкрив «{visit.title}» у Zoom-клієнті (мікрофон і камера — за налаштуваннями Zoom)")
         else:
-            log.info("Зайшов на «%s»", visit.title)
+            self.notify(f"✅ Зайшов на «{visit.title}», мікрофон і камера вимкнені")
             if self.config.join.smart_leave:
                 session.decider = LeaveDecider(*self._window(visit), self.config.join)
+            if self.assistant is not None:
+                start, end = self._window(visit)
+                self.assistant.attach(visit.key, visit.title, visit.lessons[0].teacher, start, end)
         self.finished.add(visit.key)
         self.active[visit.key] = session
+        # Одразу дивимось у зустріч: те, що вже є в чаті, — історія, а все наступне — нове.
+        self._look(visit.key, session, now)
 
     def run_forever(self, poll_seconds: float = 20) -> None:
         log.info("autopara запущено. Не вимикай комп'ютер і не давай йому заснути під час пар.")

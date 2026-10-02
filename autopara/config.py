@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from .links import LinkRule, normalize_url
+from .links import LinkRule, meet_url, normalize_url, platform_of
 from .rozklad import BASE_URL
 
 DEFAULT_DATA_DIR = Path.home() / ".autopara"
@@ -48,10 +48,41 @@ class JoinSettings:
 
 
 @dataclass
+class MeSettings:
+    name: str = ""  # «Прізвище Ім'я» — щоб помічати, коли тебе кличуть, і відповідати на перекличку
+    chat_reply: str = "auto"  # "auto" | "ask" | "off": чи відповідати в чат, коли група масово пише «+»
+    present: str = "Присутній"  # що писати, коли група відмічається словами «присутній», «тут»
+
+
+@dataclass
+class TelegramSettings:
+    token: str = ""
+    chat_id: int = 0
+
+
+@dataclass
+class EarsSettings:
+    enabled: bool = False
+    model: str = "small"
+    language: str = "uk"
+
+
+@dataclass
+class BrainSettings:
+    enabled: bool = False
+    model: str = "gemma3:4b"
+    url: str = "http://127.0.0.1:11434"
+
+
+@dataclass
 class Config:
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
     join: JoinSettings = field(default_factory=JoinSettings)
     links: list[LinkRule] = field(default_factory=list)
+    me: MeSettings = field(default_factory=MeSettings)
+    telegram: TelegramSettings = field(default_factory=TelegramSettings)
+    ears: EarsSettings = field(default_factory=EarsSettings)
+    brain: BrainSettings = field(default_factory=BrainSettings)
     timezone: str = "Europe/Kyiv"
     data_dir: Path = DEFAULT_DATA_DIR
 
@@ -79,7 +110,7 @@ def _build(cls, data: Any, section: str):
 
 
 def parse_config(data: dict) -> Config:
-    allowed = {"schedule", "join", "links", "timezone", "data_dir"}
+    allowed = {"schedule", "join", "links", "me", "telegram", "ears", "brain", "timezone", "data_dir"}
     unknown = set(data) - allowed
     if unknown:
         raise ConfigError(f"невідомі розділи конфіга: {', '.join(sorted(unknown))}")
@@ -101,10 +132,29 @@ def parse_config(data: dict) -> Config:
         if not rule.skip and not rule.url:
             raise ConfigError(f"[[links]] #{index} ({rule.subject}): вкажи url або skip = true")
         if rule.url:
-            rule = LinkRule(rule.subject, rule.type, rule.teacher, normalize_url(rule.url), rule.skip)
+            url = normalize_url(rule.url)
+            if rule.account:
+                if platform_of(url) != "meet":
+                    raise ConfigError(f"[[links]] #{index} ({rule.subject}): account працює лише для Google Meet")
+                url = meet_url(url, rule.account)
+            rule = replace(rule, url=url)
         rules.append(rule)
 
-    config = Config(schedule=schedule, join=join, links=rules)
+    me = _build(MeSettings, data.get("me", {}), "me")
+    if me.chat_reply not in ("auto", "ask", "off"):
+        raise ConfigError('[me] chat_reply має бути "auto", "ask" або "off"')
+    telegram = _build(TelegramSettings, data.get("telegram", {}), "telegram")
+    if telegram.token and ":" not in telegram.token:
+        raise ConfigError("[telegram] token виглядає неправильно — візьми його в @BotFather")
+    config = Config(
+        schedule=schedule,
+        join=join,
+        links=rules,
+        me=me,
+        telegram=telegram,
+        ears=_build(EarsSettings, data.get("ears", {}), "ears"),
+        brain=_build(BrainSettings, data.get("brain", {}), "brain"),
+    )
     if "timezone" in data:
         config.timezone = str(data["timezone"])
     if "data_dir" in data:
@@ -127,13 +177,34 @@ def find_config(explicit: str | None) -> Path:
     )
 
 
-def load_config(explicit: str | None = None) -> Config:
-    path = find_config(explicit)
+def merge_config(base: dict, local: dict) -> dict:
+    """config.local.toml поверх config.toml: розділи зливаються по ключах, його [[links]] — пріоритетніші."""
+    merged = dict(base)
+    for key, value in local.items():
+        if key == "links":
+            merged["links"] = list(value) + list(base.get("links", []))
+        elif isinstance(value, dict) and isinstance(base.get(key), dict):
+            merged[key] = {**base[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def _read_toml(path: Path) -> dict:
     try:
         with path.open("rb") as f:
-            data = tomllib.load(f)
+            return tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: помилка в TOML: {e}") from e
+
+
+def load_config(explicit: str | None = None) -> Config:
+    path = find_config(explicit)
+    data = _read_toml(path)
+    # Секрети (токен Telegram-бота тощо) — у config.local.toml поруч, який не потрапляє в git.
+    local = path.with_name("config.local.toml")
+    if local.is_file():
+        data = merge_config(data, _read_toml(local))
     try:
         return parse_config(data)
     except ConfigError as e:

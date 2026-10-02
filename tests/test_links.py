@@ -59,3 +59,15 @@ def test_zoom_urls():
     assert zoom_app_url("https://zoom.us/my/teacher") is None
     assert zoom_web_url(ZOOM) == "https://app.zoom.us/wc/join/12345678901?pwd=AbC"
     assert zoom_web_url("https://zoom.us/my/teacher") == "https://zoom.us/my/teacher"
+
+
+def test_alternatives_and_short_subject(lesson):
+    rules = [LinkRule(subject="ЯТПЗ|Якість", type="Лк", url=MEET), LinkRule(subject="ЯТПЗ|Якість", url=ZOOM)]
+    assert resolve(lesson(subject="Якість та тестування ПЗ", type="Лк"), rules).url == MEET
+    assert resolve(lesson(subject="Невідома повна назва", short_subject="ЯТПЗ", type="Пз"), rules).url == ZOOM
+    assert resolve(lesson(subject="Бази даних"), rules).source == "none"
+
+
+def test_link_account_wins_over_default_account():
+    personal = meet_url(MEET, "personal@gmail.com")
+    assert meet_url(personal, "st@stud.duikt.edu.ua") == personal

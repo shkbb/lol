@@ -7,14 +7,16 @@ import logging
 import signal
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
+from time import sleep
 from zoneinfo import ZoneInfo
 
 from .config import Config, ConfigError, load_config
 from .links import platform_of, resolve
-from .planner import Visit, build_plan
+from .planner import Plan, Visit, build_plan
 from .rozklad import Lesson, RozkladClient, RozkladError
 from .runner import Runner, resolve_target
-from .session import JoinError
+from .wiring import assistant_stack
 
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 PLATFORM_NAMES = {"meet": "Meet", "zoom": "Zoom", "other": "сайт"}
@@ -87,49 +89,73 @@ def cmd_schedule(args, config: Config) -> None:
         print(f"\n⚠ {message}")
 
 
+def _google_accounts(config: Config) -> list[str]:
+    accounts = [config.join.meet_account] + [rule.account for rule in config.links if rule.account]
+    return list(dict.fromkeys(account for account in accounts if account))
+
+
 def cmd_login(args, config: Config) -> None:
     from .joiner import Browser
 
     browser = Browser(
         config.profile_dir, config.join.browser_channel, mute_sound=False, executable_path=config.join.browser_path
     )
+    accounts = _google_accounts(config)
     try:
         browser.new_page().goto("https://accounts.google.com/")
         if config.join.zoom_mode == "browser":
             browser.new_page().goto("https://zoom.us/signin")
-        input(
-            "У вікні браузера увійди в Google-акаунт, з яким ходиш на пари "
-            "(університетський, якщо пари там).\nКоли закінчиш — натисни Enter тут... "
-        )
+        if accounts:
+            print("Увійди у вікні браузера в усі ці Google-акаунти (наступний — через «Додати обліковий запис»):")
+            for account in accounts:
+                print(f"  • {account}")
+        else:
+            print("Увійди у вікні браузера в Google-акаунт, з яким ходиш на пари.")
+        input("Коли закінчиш — натисни Enter тут... ")
     finally:
         browser.close()
     print(f"Готово. Профіль браузера збережено в {config.profile_dir}")
 
 
+def _clock(config: Config):
+    tz = ZoneInfo(config.timezone)
+    return lambda: datetime.now(tz)
+
+
 def cmd_join(args, config: Config) -> None:
+    """Тестовий вхід: працює так само, як на справжній парі, і показує, що програма бачить."""
     from .joiner import Joiner
 
-    tz = ZoneInfo(config.timezone)
-    now = datetime.now(tz)
+    clock = _clock(config)
+    now = clock()
     leave_at = now + timedelta(minutes=args.minutes)
     lesson = Lesson(now.date(), now.time(), leave_at.time(), "Тестовий вхід")
     visit = Visit(args.url, platform_of(args.url), [lesson], now, leave_at)
-    joiner = Joiner(config.join, config.profile_dir)
-    try:
-        session = joiner.join(visit)
-        if session.page is not None:
-            session.page.wait_for_timeout(3000)  # лічильник учасників з'являється не одразу
-            seen = joiner.observe(session)
-            if seen.participants:
-                print(f"Бачу учасників: {seen.participants} — розумний вихід працюватиме.")
-            else:
-                print("Не бачу лічильника учасників — з цієї зустрічі програма виходитиме за розкладом.")
-        input("Зайшов. Перевір мікрофон/камеру у вікні. Натисни Enter, щоб вийти... ")
-    except JoinError as e:
-        print(f"Не вдалося зайти: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        joiner.close()
+    logging.getLogger("autopara.ears").setLevel(logging.DEBUG)  # показувати розпізнану мову
+    with assistant_stack(config, clock) as (assistant, sink):
+        joiner = Joiner(config.join, config.profile_dir, audio_sink=sink)
+        runner = Runner(config, _client(config), joiner, clock=clock, assistant=assistant)
+        runner.plan = Plan(visits=[visit])
+        runner.next_refresh = leave_at + timedelta(days=1)  # розклад не потрібен
+        print("Заходжу. Ctrl+C — вийти.")
+        shown = None
+        try:
+            while True:
+                runner.tick()
+                if visit.key in runner.finished and visit.key not in runner.active:
+                    break
+                seen = runner.last_seen.get(visit.key)
+                if seen is not None and seen.participants != shown:
+                    shown = seen.participants
+                    if shown:
+                        print(f"👥 Бачу учасників: {shown} — розумний вихід працює.")
+                    else:
+                        print("👥 Не бачу лічильника учасників — з такої зустрічі виходитиму за розкладом.")
+                sleep(5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            joiner.close()
 
 
 def cmd_run(args, config: Config) -> None:
@@ -138,13 +164,91 @@ def cmd_run(args, config: Config) -> None:
     # systemctl stop і kill шлють SIGTERM: перетворюємо його на звичайний вихід, щоб закрити браузер
     # і зняти заборону сну.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    joiner = Joiner(config.join, config.profile_dir)
+    clock = _clock(config)
+    with assistant_stack(config, clock) as (assistant, sink):
+        joiner = Joiner(config.join, config.profile_dir, audio_sink=sink)
+        try:
+            Runner(config, _client(config), joiner, clock=clock, assistant=assistant).run_forever()
+        except KeyboardInterrupt:
+            log.info("Зупинено")
+        finally:
+            joiner.close()
+
+
+def cmd_telegram(args, config: Config) -> None:
+    from .telegram import TelegramBot, TelegramError
+
+    token = config.telegram.token
+    if not token:
+        print(
+            "1. У Telegram напиши @BotFather → /newbot → придумай назву. Він дасть токен.\n"
+            "2. Створи config.local.toml поруч з config.toml (він не потрапляє в git):\n\n"
+            '   [telegram]\n   token = "123456:ABC..."\n\n'
+            "3. Запусти `autopara telegram` ще раз."
+        )
+        return
+    bot = TelegramBot(token, config.telegram.chat_id)
     try:
-        Runner(config, _client(config), joiner).run_forever()
-    except KeyboardInterrupt:
-        log.info("Зупинено")
-    finally:
-        joiner.close()
+        if not config.telegram.chat_id:
+            print("Напиши своєму боту будь-що в Telegram (наприклад, /start). Чекаю 2 хвилини...")
+            for _ in range(4):
+                for chat_id, _text in bot.updates(wait=30):
+                    print(f"Знайшов! Додай у [telegram] у config.local.toml:\n   chat_id = {chat_id}")
+                    bot.chat_id = chat_id
+                    bot.send("👋 Знайшов тебе! Додай chat_id у config.local.toml — і я писатиму про пари сюди.")
+                    return
+            print("Не дочекався повідомлення. Спробуй ще раз.")
+            return
+        bot.send("👋 autopara на зв'язку. Напиши «допомога», щоб побачити команди.")
+        print("Надіслав тестове повідомлення — перевір Telegram.")
+    except TelegramError as e:
+        print(f"Помилка: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_check(args, config: Config) -> None:
+    """Перевіряє на твоєму комп'ютері все, що можна перевірити без пари."""
+    import importlib.util
+    import shutil
+
+    from .brain import OllamaBrain
+    from .ears import ears_available
+    from .telegram import TelegramBot, TelegramError
+
+    def line(ok: bool | None, text: str) -> None:
+        print(f"{'✓' if ok else ('·' if ok is None else '✗')} {text}")
+
+    try:
+        target = resolve_target(_client(config), config)
+        line(True, f"розклад: {target.student_name or target.group_name}")
+    except RozkladError as e:
+        line(False, f"розклад: {e}")
+    browsers = [config.join.browser_path] if config.join.browser_path else ["google-chrome-stable", "google-chrome"]
+    found = next((b for b in browsers if shutil.which(b) or (b.startswith("/") and Path(b).exists())), None)
+    line(bool(found), f"браузер: {found or 'не знайдено (встанови google-chrome або вкажи browser_path)'}")
+    line(config.profile_dir.exists(), f"профіль браузера: {config.profile_dir} (якщо немає — `autopara login`)")
+    if config.join.zoom_mode == "app":
+        line(bool(shutil.which("zoom")), "Zoom-клієнт" + ("" if shutil.which("zoom") else ": не знайдено (yay -S zoom)"))
+    if config.telegram.token and config.telegram.chat_id:
+        try:
+            TelegramBot(config.telegram.token, config.telegram.chat_id).send("✓ autopara check")
+            line(True, "Telegram: надіслав тестове повідомлення")
+        except TelegramError as e:
+            line(False, f"Telegram: {e}")
+    else:
+        line(None, "Telegram не налаштовано (`autopara telegram`)")
+    if config.brain.enabled:
+        problem = OllamaBrain(config.brain.url, config.brain.model).check()
+        line(problem is None, f"мозок: {problem or config.brain.model}")
+    else:
+        line(None, "мозок вимкнено ([brain] enabled = false)")
+    if config.ears.enabled:
+        problem = ears_available()
+        if problem is None and importlib.util.find_spec("faster_whisper") is None:
+            problem = 'немає faster-whisper — pip install -e ".[ears]"'
+        line(problem is None, f"вуха: {problem or 'готові'}")
+    else:
+        line(None, "вуха вимкнено ([ears] enabled = false)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -174,6 +278,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="працювати у фоні й заходити на пари за розкладом")
     run.set_defaults(func=cmd_run)
+
+    telegram = sub.add_parser("telegram", help="налаштувати Telegram-бота для сповіщень і команд")
+    telegram.set_defaults(func=cmd_telegram)
+
+    check = sub.add_parser("check", help="перевірити, що все налаштовано")
+    check.set_defaults(func=cmd_check)
     return parser
 
 
