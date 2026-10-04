@@ -139,3 +139,9 @@ def test_schedule_date_formats():
     assert parse_day("07.10", today) == parse_day("7.10.2026", today) == parse_day("2026-10-07", today) == date(2026, 10, 7)
     with pytest.raises(ConfigError):
         parse_day("сьомого", today)
+
+
+def test_retired_sections_are_ignored():
+    """Розділ «Навчання» прибрано — старий config.toml з [study] / [agent] однаково читається."""
+    config = parse_config({"schedule": {"group": "ТЦР-32"}, "study": {"enabled": True}, "agent": {"command": "agy"}})
+    assert config.schedule.group == "ТЦР-32" and not hasattr(config, "study")

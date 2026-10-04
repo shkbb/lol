@@ -23,8 +23,6 @@ TOO_LATE = timedelta(minutes=5)
 RETRY_JOIN_AFTER = timedelta(minutes=2)
 MAX_JOIN_ATTEMPTS = 3
 RETRY_REFRESH_AFTER = timedelta(minutes=5)
-# Classroom відкриваємо лише тоді, коли до найближчої пари ще стільки часу (здача може тривати кілька хвилин).
-STUDY_QUIET_BEFORE_CLASS = timedelta(minutes=15)
 
 
 class Runner:
@@ -37,11 +35,9 @@ class Runner:
         sleep_guard: SleepGuard | None = None,
         app_audio=None,
         assistant: Assistant | None = None,
-        study=None,
     ):
         self.config = config
         self.assistant = assistant
-        self.study = study  # StudyManager: Classroom між парами
         self.client = client
         self.joiner = joiner
         self.tz = ZoneInfo(config.timezone)
@@ -98,8 +94,8 @@ class Runner:
             log.info("Розклад оновлено. Найближчими %d днями пар з посиланнями немає", self.config.schedule.days_ahead)
 
     def _load_classmates(self) -> None:
-        """Список групи з сайту розкладу — щоб помічник упізнавав перекличку голосом (і номер для варіантів)."""
-        if self.assistant is None and self.study is None:
+        """Список групи з сайту розкладу — щоб помічник упізнавав перекличку голосом."""
+        if self.assistant is None:
             return
         target = self.target
         try:
@@ -107,11 +103,7 @@ class Runner:
         except (RozkladError, AttributeError) as e:
             log.debug("Не вдалося взяти список групи: %s", e)
             return
-        names = [student.name for student in students]
-        if self.assistant is not None:
-            self.assistant.set_classmates(names)
-        if self.study is not None:
-            self.study.set_classmates(names)
+        self.assistant.set_classmates([student.name for student in students])
         log.info("Список групи: %d студентів", len(students))
 
     def _warn_once(self, key: str, message: str) -> None:
@@ -153,18 +145,6 @@ class Runner:
                 self._act(action, now)
 
         self.sleep_guard.hold(self._lessons_left_today(now))
-
-        if self.study is not None and self._free_for_study(now):
-            self.study.browser_tick(now)
-
-    def _free_for_study(self, now: datetime) -> bool:
-        """Classroom — лише коли не на парі й найближча пара не скоро: браузер має бути вільний для входу."""
-        if self.active:
-            return False
-        return not any(
-            visit.key not in self.finished and visit.join_at - STUDY_QUIET_BEFORE_CLASS <= now < visit.leave_at
-            for visit in self.plan.visits + self.extra_visits
-        )
 
     def _look(self, key: str, session: Session, now: datetime) -> Observation:
         """Очі: що зараз у зустрічі (лише для вкладок браузера)."""

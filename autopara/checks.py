@@ -83,12 +83,6 @@ def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
     if config.brain.enabled:
         problem = OllamaBrain(config.brain.url, config.brain.model).check()
         checks.append(Check(problem is None, "мозок", problem or config.brain.model))
-    if config.study.enabled:
-        from .agent import Agent
-
-        agent = Agent(config.agent, config.data_dir / "agent-usage.json")
-        problem = agent.problem()
-        checks.append(Check(problem is None, "агент", problem or f"{config.agent.command} знайдено"))
     else:
         checks.append(Check(None, "мозок", "вимкнено"))
     if config.ears.enabled:

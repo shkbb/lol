@@ -330,67 +330,8 @@ def test_timetable_tab_shows_the_week(running_app):
             browser.close()
 
 
-def test_study_api(running_app, tmp_path):
-    from .test_study import LAB, make, run_jobs, ticks
-
-    server, controller, _ = running_app
-    assert call(server, "GET", "/api/study")[1]["off"] == "вимкнено"
-    controller.config.study.enabled = True
-    assert "автовхід вимкнено" in call(server, "GET", "/api/study")[1]["off"]
-    assert call(server, "POST", "/api/study/check")[0] == 400
-
-    study, _, _, classroom = make(tmp_path, [LAB])
-    ticks(study, 2)
-    run_jobs(study)
-    controller.study = study
-    status, data = call(server, "GET", "/api/study")
-    task = data["tasks"][0]
-    assert status == 200 and task["status"] == "ready" and task["version"] == 1 and data["agent_problem"] is None
-
-    status, data = call(server, "POST", "/api/study/action", {"number": 1, "action": "yes", "version": 0})
-    assert "старішої версії" in data["result"] and data["tasks"][0]["status"] == "ready"
-    status, data = call(server, "POST", "/api/study/action", {"number": 1, "action": "redo", "comment": "додай висновок", "version": 1})
-    assert data["tasks"][0]["status"] == "working" and data["tasks"][0]["feedback"] == ["додай висновок"]
-    assert call(server, "POST", "/api/study/check")[0] == 200
-    assert call(server, "POST", "/api/study/open", {"number": 99})[0] == 404
-
-    status, details = call(server, "GET", "/api/study/task?number=1")
-    assert status == 200 and "Виконайте запити" in details["assignment"] and details["defense"].startswith("Питання")
-    assert details["files_info"][0]["name"] == "Ляшко_Д.О._ПР1.2.pdf" and details["url"].startswith("https://classroom.google.com/c/C1/a/A1")
-    assert call(server, "GET", "/api/study/task?number=42")[0] == 404
-
-    status, data = call(server, "POST", "/api/study/pause", {"paused": True})
-    assert data["paused"] and "паузі" in data["result"]
-    assert not call(server, "POST", "/api/study/pause", {"paused": False})[1]["paused"]
-    status, agent = call(server, "POST", "/api/study/agent")
-    assert status == 200 and agent["ok"] is False and "agy" in agent["problem"]  # тут agy не встановлено
-    controller.study = None
-
-
-def test_study_notes_api(running_app):
-    server, controller, _ = running_app
-    controller.config.study.folder = str(controller.config_path.parent / "навчання")
-    assert call(server, "GET", "/api/study/notes")[1] == {"subjects": []}
-    lecture = controller.config.study_dir / "Конспекти" / "Бази даних" / "2026-10-01 10-00"
-    lecture.mkdir(parents=True)
-    (lecture / "SUMMARY.md").write_text("# Нормалізація\n\nТекст.", encoding="utf-8")
-    other = controller.config.study_dir / "Конспекти" / "Java" / "2026-09-30 13-15"
-    other.mkdir(parents=True)
-    (other / "LECTURE.md").write_text("Інструкція агентові\n\n## Розшифровка\n\n[10:00] колекції", encoding="utf-8")
-    subjects = call(server, "GET", "/api/study/notes")[1]["subjects"]
-    assert [(s["name"], s["lectures"][0]["ready"], s["lectures"][0]["preview"]) for s in subjects] == [
-        ("Java", False, ""), ("Бази даних", True, "Нормалізація"),
-    ]
-    from urllib.parse import quote
-
-    assert call(server, "GET", f"/api/study/note?id={quote('Бази даних/2026-10-01 10-00')}")[1]["text"].startswith("# Нормалізація")
-    transcript = call(server, "GET", f"/api/study/note?id={quote('Java/2026-09-30 13-15')}")[1]["text"]
-    assert "колекції" in transcript and "Інструкція агентові" not in transcript  # лише розшифровка, без службового
-    assert call(server, "GET", f"/api/study/note?id={quote('../../config.toml')}")[0] == 404  # за межі теки — ні
-
-
 def test_window_sections_open_without_errors(running_app):
-    """Нова структура: 5 розділів, вкладки «Налаштувань», старі назви сторінок ведуть у потрібну вкладку."""
+    """Структура вікна: 3 розділи й журнал, вкладки «Налаштувань», старі назви сторінок ведуть у потрібну вкладку."""
     sync_api = pytest.importorskip("playwright.sync_api")
     server, _, _ = running_app
     with sync_api.sync_playwright() as playwright:
@@ -402,12 +343,12 @@ def test_window_sections_open_without_errors(running_app):
             page.goto(server.url)
             page.get_by_role("heading", name="Сьогодні").wait_for()
             labels = [button.inner_text() for button in page.locator(".sidebar [data-page]").all()]
-            assert labels == ["Сьогодні", "Розклад", "Навчання", "Конспекти", "Налаштування", "Журнал"]
-            for target, heading in (("study", "Навчання"), ("notes", "Конспекти"), ("settings", "Налаштування"), ("log", "Журнал")):
+            assert labels == ["Сьогодні", "Розклад", "Налаштування", "Журнал"]
+            for target, heading in (("timetable", "Розклад"), ("settings", "Налаштування"), ("log", "Журнал")):
                 page.click(f".sidebar [data-page={target}]")
                 page.get_by_role("heading", name=heading, exact=True).first.wait_for()
             page.click(".sidebar [data-page=settings]")
-            for tab in ("Пари", "Акаунти", "Помічник", "Telegram", "Навчання", "Загальне"):
+            for tab in ("Пари", "Акаунти", "Помічник", "Telegram", "Загальне"):
                 page.click(f".tabs >> text={tab}")
                 page.locator(".tabs button.on", has_text=tab).wait_for()
             page.get_by_text("Більше налаштувань").first.click()
