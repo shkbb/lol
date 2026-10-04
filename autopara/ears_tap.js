@@ -4,7 +4,9 @@
 // Звідки береться звук:
 // - Meet програє голоси учасників через <audio> з потоком WebRTC — підключаємо ці потоки;
 // - вхідні доріжки RTCPeerConnection — про всяк випадок теж (і як запасний шлях);
-// - програвачі на Web Audio (Zoom у браузері) — перехоплюємо їхнє підключення до динаміків.
+// - програвачі на Web Audio (Zoom у браузері, а часто й сам Meet) — перехоплюємо їхнє підключення до динаміків.
+// Справжній Meet буває, що віддає доріжки WebRTC тихими (нулі), а голоси грає через Web Audio, — тож слухаємо
+// всі шляхи, а віддаємо той, де справді є звук («смуга»), щоб той самий голос не потрапив двічі.
 // Усе це лише слухає: звук, який чуєш ти, не змінюється, а мікрофон не чіпаємо взагалі.
 //
 // Працює лише на сторінках Meet і Zoom, і лише у вкладці, де програма сама зайшла на пару
@@ -16,6 +18,7 @@
   const SEND_SAMPLES = RATE / 2;
   const state = {
     enabled: false, ctx: null, mix: null, tracks: new Map(), webAudio: new Map(), pending: [], pendingLength: 0,
+    lane: null, voiced: {}, sent: 0,
   };
   window.__autoparaTap = {
     enable() {
@@ -23,17 +26,42 @@
       scan();
       return true;
     },
+    stats() {  // для журналу в autopara -v: звідки береться звук
+      const now = Date.now();
+      const voiced = Object.fromEntries(Object.entries(state.voiced).map(([lane, at]) => [lane, Math.round((now - at) / 1000)]));
+      return { enabled: state.enabled, tracks: state.tracks.size, webAudio: state.webAudio.size, lane: state.lane,
+               secondsSinceVoice: voiced, sent: state.sent, context: state.ctx && state.ctx.state };
+    },
   };
 
-  function processor(ctx, onlyWithoutTracks) {
+  // Яку смугу віддавати: ту, де звук був щойно; поки вона звучить — не перемикаємось.
+  function chosen() {
+    const now = Date.now();
+    const recent = (lane) => state.voiced[lane] && now - state.voiced[lane] < 3000;
+    if (state.lane && recent(state.lane)) return state.lane;
+    for (const lane of Object.keys(state.voiced)) {
+      if (recent(lane)) {
+        state.lane = lane;
+        return lane;
+      }
+    }
+    return state.lane || (state.tracks.size ? "tracks" : null);
+  }
+
+  let webLanes = 0;
+  function processor(ctx, lane) {
     // Простий фільтр: середнє по вікну перед проріджуванням до 16 кГц прибирає частоти, яких whisper не чує.
     const node = ctx.createScriptProcessor(4096, 1, 1);
     const step = ctx.sampleRate / RATE;
     const down = { phase: 0, sum: 0, count: 0 };
     node.onaudioprocess = (event) => {
       if (!state.enabled) return;
-      if (onlyWithoutTracks ? state.tracks.size > 0 : state.tracks.size === 0) return;
       const input = event.inputBuffer.getChannelData(0);
+      let energy = 0;
+      for (let i = 0; i < input.length; i += 4) energy += input[i] * input[i];
+      if (energy / (input.length / 4) > 1e-7) state.voiced[lane] = Date.now();
+      const current = chosen();
+      if (current !== null ? current !== lane : lane !== "tracks") return;
       const out = new Int16Array(Math.ceil(input.length / step) + 1);
       let n = 0;
       for (let i = 0; i < input.length; i++) {
@@ -76,6 +104,7 @@
     const bytes = new Uint8Array(all.buffer);
     let binary = "";
     for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    state.sent += 1;
     if (typeof window.__autoparaAudio === "function") window.__autoparaAudio(btoa(binary)).catch(() => {});
   }
 
@@ -83,7 +112,7 @@
     if (!state.ctx) {
       state.ctx = new AudioContext();
       state.mix = state.ctx.createGain();
-      state.mix.connect(processor(state.ctx, false));
+      state.mix.connect(processor(state.ctx, "tracks"));
     }
     if (state.ctx.state === "suspended") state.ctx.resume().catch(() => {});
     return state.ctx;
@@ -139,7 +168,6 @@
   }
 
   // Програвачі на Web Audio: що підключається до динаміків чужого AudioContext, підключаємо ще й до себе.
-  // Береться лише тоді, коли немає доріжок WebRTC, — щоб той самий голос не потрапив двічі.
   const connect = AudioNode.prototype.connect;
   AudioNode.prototype.connect = function (destination, ...rest) {
     const result = connect.call(this, destination, ...rest);
@@ -147,7 +175,7 @@
       if (destination instanceof AudioDestinationNode && this.context !== state.ctx) {
         let tap = state.webAudio.get(this.context);
         if (!tap) {
-          tap = processor(this.context, true);
+          tap = processor(this.context, `web${++webLanes}`);
           state.webAudio.set(this.context, tap);
         }
         connect.call(this, tap);

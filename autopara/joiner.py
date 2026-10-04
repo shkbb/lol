@@ -845,6 +845,11 @@ class Joiner:
         if page is None:
             return Observation()
         self._enable_ears(page)  # якщо Meet перезавантажив сторінку, збирач звуку треба ввімкнути знову
+        if self.browser.audio_tap is not None and log.isEnabledFor(logging.DEBUG):
+            try:
+                log.debug("👂 збирач звуку: %s", page.evaluate("() => window.__autoparaTap && window.__autoparaTap.stats()"))
+            except PlaywrightError:
+                pass
         try:
             if session.visit.platform == "meet":
                 return observe_meet(page)

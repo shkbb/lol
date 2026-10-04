@@ -32,6 +32,17 @@ MEET_LIKE = """<!doctype html><meta charset="utf-8"><audio id="voice" autoplay><
 })();
 </script>"""
 
+# Як справжній Meet: доріжка WebRTC є, але тиха, а голос грає через Web Audio.
+MEET_REAL = MEET_LIKE.replace("tone.frequency.value = 440;", "tone.frequency.value = 440; const mute = ctx.createGain(); mute.gain.value = 0;").replace(
+    "tone.connect(out);", "tone.connect(mute); mute.connect(out);"
+).replace("})();\n</script>", """  const player = new AudioContext();
+  const voice = player.createOscillator();
+  voice.frequency.value = 440;
+  voice.connect(player.destination);
+  voice.start();
+})();
+</script>""")
+
 # Як у Zoom у браузері: звук грає через Web Audio, без <audio>.
 WEB_AUDIO = """<!doctype html><script>
 const ctx = new AudioContext();
@@ -70,8 +81,9 @@ def listen(tmp_path, url, html, enable=True, seconds=5):
 
 @pytest.mark.parametrize(
     "url, html",
-    [("https://meet.google.com/abc-defg-hij", MEET_LIKE), ("https://us02web.zoom.us/wc/123", WEB_AUDIO)],
-    ids=["meet-webrtc-audio-element", "zoom-web-audio"],
+    [("https://meet.google.com/abc-defg-hij", MEET_LIKE), ("https://us02web.zoom.us/wc/123", WEB_AUDIO),
+     ("https://meet.google.com/abc-defg-hij", MEET_REAL)],
+    ids=["meet-webrtc-audio-element", "zoom-web-audio", "meet-silent-track-web-audio-voice"],
 )
 def test_meeting_audio_reaches_the_ears_even_when_muted(tmp_path, url, html):
     pcm = listen(tmp_path, url, html)
