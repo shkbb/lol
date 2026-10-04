@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLineEdit, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QTabWidget, QVBoxLayout, QWidget
 
 from .. import app as app_module
 from . import widgets as w
@@ -121,6 +121,12 @@ class SettingsPage(QWidget):
             ("auto", "автоматично за потужністю комп'ютера"), ("small", "small — швидка"), ("medium", "medium"),
             ("large-v3-turbo", "large-v3-turbo — точна"),
         ], "Якщо комп'ютер не встигатиме, програма сама перейде на легшу.", default="auto"))
+        if platform_is_linux():
+            more.add(w.select_field(model, "ears.source", "Пари в браузері: звідки брати звук", [
+                ("auto", "зі вкладки пари (рекомендовано)"), ("pulse", "весь звук браузера програми (PipeWire/PulseAudio)"),
+            ], "Зі вкладки пари — вуха чують лише пару, навіть із вимкненим звуком.", default="auto"))
+        else:
+            more.add(self._zoom_cable())
         more.add(w.text_field(model, "brain.model", "Модель мозку", placeholder="gemma3:4b"))
         check = w.button("Перевірити мозок і вуха")
         result = w.label("", "muted")
@@ -140,6 +146,35 @@ class SettingsPage(QWidget):
         ears.add(more)
         page.add(ears)
         return page
+
+    def _zoom_cable(self) -> QWidget:
+        """Windows і macOS: щоб вуха чули Zoom-клієнт, Zoom виводить звук у віртуальний кабель."""
+        model = self.model
+        combo = QComboBox()
+        current = model.get("ears.app_device") or ""
+        combo.addItem("автоматично (знайду встановлений кабель сам)", "")
+        if current:
+            combo.addItem(current, current)
+            combo.setCurrentIndex(1)
+
+        def loaded(data: dict) -> None:
+            combo.blockSignals(True)
+            for name in data["devices"]:
+                if combo.findData(name) < 0:
+                    combo.addItem(name, name)
+            combo.blockSignals(False)
+
+        self.bridge.call_api(app_module.api_audio_devices, ok=loaded)
+        combo.currentIndexChanged.connect(lambda _: model.set("ears.app_device", combo.currentData() or None))
+        mac = sys.platform == "darwin"
+        cable = ('<a href="https://existential.audio/blackhole/">BlackHole</a>' if mac
+                 else '<a href="https://vb-audio.com/Cable/">VB-Cable</a>')
+        where = "BlackHole (або Multi-Output з ним)" if mac else "«CABLE Input»"
+        hint = w.label(f"Щоб помічник чув пари в Zoom-клієнті: встанови {cable}, у Zoom → Налаштування → Аудіо → Динамік "
+                       f"обери {where}. Без кабеля Zoom відкриватиметься в браузері програми — там помічник його чує.", "hint", rich=True)
+        box = w.field("Zoom-клієнт: віртуальний кабель", combo)
+        box.layout().addWidget(hint)
+        return box
 
     def _telegram(self) -> QWidget:
         page = w.Page("", "Твій особистий бот: пише, коли тебе кличуть, питає «написати «+»?» кнопками, шле звіт після пари. "
