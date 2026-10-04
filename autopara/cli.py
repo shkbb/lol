@@ -114,11 +114,12 @@ def _google_accounts(config: Config) -> list[str]:
 
 
 def cmd_login(args, config: Config) -> None:
+    from . import browser_setup
     from .joiner import Browser
 
-    browser = Browser(
-        config.profile_dir, config.join.browser_channel, mute_sound=False, executable_path=config.join.browser_path
-    )
+    if not browser_setup.ensure():
+        raise ConfigError(browser_setup.status()["error"])
+    browser = Browser(config.profile_dir, mute_sound=False)
     accounts = _google_accounts(config)
     try:
         browser.new_page().goto("https://accounts.google.com/")

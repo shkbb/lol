@@ -65,8 +65,6 @@ class JoinSettings:
     zoom_mode: str = "auto"
     display_name: str = ""
     meet_account: str = ""
-    browser_channel: str = "chrome"
-    browser_path: str = ""
 
 
 @dataclass
@@ -150,13 +148,17 @@ def _build(cls, data: Any, section: str):
     return cls(**values)
 
 
-# Розділи з прибраних функцій: старий файл налаштувань з ними не має ламати запуск.
+# Розділи й параметри з прибраних функцій: старий файл налаштувань з ними не має ламати запуск.
 RETIRED_SECTIONS = {"study", "agent"}
+RETIRED_KEYS = {"join": {"browser_channel", "browser_path"}}  # тепер завжди вбудований браузер програми
 
 
 def parse_config(data: dict) -> Config:
     allowed = {"schedule", "join", "links", "me", "telegram", "ears", "brain", "timezone", "data_dir"}
     data = {key: value for key, value in data.items() if key not in RETIRED_SECTIONS}
+    for section, keys in RETIRED_KEYS.items():
+        if isinstance(data.get(section), dict):
+            data[section] = {key: value for key, value in data[section].items() if key not in keys}
     unknown = set(data) - allowed
     if unknown:
         raise ConfigError(f"невідомі розділи конфіга: {', '.join(sorted(unknown))}")

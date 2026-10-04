@@ -46,12 +46,6 @@ display_name = ""
 # Якщо в браузері кілька Google-акаунтів — email того, з яким ходиш на пари.
 meet_account = ""
 
-# "chrome" — встановлений Google Chrome, "msedge" — Edge, "" — вбудований Chromium з Playwright.
-browser_channel = "chrome"
-# Або шлях до будь-якого Chromium-браузера (має пріоритет над browser_channel).
-# Arch Linux з пакетом chromium: browser_path = "/usr/bin/chromium"
-browser_path = ""
-
 # --- Помічник (див. README → «Помічник») ---------------------------------------
 
 [me]

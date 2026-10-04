@@ -439,11 +439,6 @@ def open_uri(uri: str) -> None:
 # --- Браузер і фасад ---------------------------------------------------------
 
 
-ANCHOR_PAGE = """<!doctype html><meta charset="utf-8"><title>autopara</title>
-<body style="font: 16px sans-serif; padding: 2em">
-<h2>autopara</h2><p>Тут відкриватимуться пари. Не закривай це вікно, поки працює autopara.</p></body>"""
-
-
 def disallow_browser_signin(profile_dir: Path) -> None:
     """У Google входимо лише на сайтах, а не в сам Chrome («Дозволити вхід у Chrome» — вимкнено).
 
@@ -471,44 +466,46 @@ def disallow_browser_signin(profile_dir: Path) -> None:
 
 
 class Browser:
-    """Один Chrome з окремим постійним профілем: логін у Google зберігається між запусками."""
+    """Вбудований Chromium програми з окремим постійним профілем: вхід у Google зберігається між запусками.
+
+    Вікно браузера з'являється лише тоді, коли воно потрібне (пара, вхід у Google), і закривається,
+    щойно стає непотрібним.
+    """
 
     def __init__(
         self,
         profile_dir: Path,
-        channel: str = "chrome",
         mute_sound: bool = True,
         headless: bool = False,
-        executable_path: str = "",
         audio_sink: str = "",
         audio_tap: Callable[[str], None] | None = None,
     ):
         self.profile_dir = profile_dir
-        self.channel = channel
-        self.executable_path = executable_path
         self.audio_sink = audio_sink  # куди віддавати звук, щоб «вуха» могли його слухати
         self.audio_tap = audio_tap  # або: сторінка пари сама віддає звук сюди (base64 PCM 16 кГц)
         self.mute_sound = mute_sound
         self.headless = headless
         self._playwright = None
         self._context: BrowserContext | None = None
+        self._blank: Page | None = None  # порожня вкладка щойно відкритого вікна — беремо її, без зайвих вкладок
 
     def context(self) -> BrowserContext:
         if self._context is None:
             self._context = self._launch()
-            self._context.on("close", lambda _: setattr(self, "_context", None))
+            self._context.on("close", lambda _: self._forget())
             if self.audio_tap is not None:
                 tap = self.audio_tap
                 self._context.expose_binding("__autoparaAudio", lambda source, data: tap(data))
                 self._context.add_init_script(script=TAP_SCRIPT.read_text(encoding="utf-8"))
-            # Перша вкладка — «якір»: пари відкриваються в нових вкладках і закриваються,
-            # а вікно браузера лишається.
-            if self._context.pages:
-                self._context.pages[0].set_content(ANCHOR_PAGE)
+            self._blank = self._context.pages[0] if self._context.pages else None
         return self._context
 
     def new_page(self) -> Page:
-        return self.context().new_page()
+        context = self.context()
+        page, self._blank = self._blank, None
+        if page is not None and not page.is_closed():
+            return page
+        return context.new_page()
 
     def any_page(self) -> Page | None:
         """Будь-яка відкрита вкладка, не запускаючи браузер."""
@@ -518,6 +515,21 @@ class Browser:
             return next((page for page in self._context.pages if not page.is_closed()), None)
         except PlaywrightError:
             return None
+
+    def close_if_idle(self) -> None:
+        """Пара скінчилась: якщо у вікні більше нічого немає — закриваємо його, а не тримаємо порожнім."""
+        if self._context is None:
+            return
+        try:
+            busy = any(not page.is_closed() and page.url != "about:blank" for page in self._context.pages)
+        except PlaywrightError:
+            busy = False
+        if not busy:
+            self.close()
+
+    def _forget(self) -> None:
+        self._context = None
+        self._blank = None
 
     def _launch(self) -> BrowserContext:
         if self._playwright is None:
@@ -533,7 +545,7 @@ class Browser:
             env = {**os.environ, "PULSE_SINK": self.audio_sink}
         elif self.mute_sound:
             args.append("--mute-audio")
-        options = dict(
+        return self._playwright.chromium.launch_persistent_context(
             env=env,
             user_data_dir=str(self.profile_dir),
             headless=self.headless,
@@ -542,22 +554,6 @@ class Browser:
             ignore_default_args=["--enable-automation"],
             no_viewport=True,
         )
-        preferred = {"executable_path": self.executable_path} if self.executable_path else {}
-        if not preferred and self.channel:
-            preferred = {"channel": self.channel}
-        if preferred:
-            try:
-                return self._playwright.chromium.launch_persistent_context(**preferred, **options)
-            except PlaywrightError as e:
-                which = next(iter(preferred.values()))
-                log.warning(
-                    "Не вдалося запустити браузер %r (%s). Беру вбудований Chromium — "
-                    "логін у Google, зроблений у %r, там може не зберегтися.",
-                    which,
-                    str(e).splitlines()[0],
-                    which,
-                )
-        return self._playwright.chromium.launch_persistent_context(**options)
 
     def close(self) -> None:
         if self._context is not None:
@@ -565,7 +561,7 @@ class Browser:
                 self._context.close()
             except PlaywrightError:
                 pass
-            self._context = None
+            self._forget()
         if self._playwright is not None:
             self._playwright.stop()
             self._playwright = None
@@ -589,10 +585,7 @@ class Joiner:
         # не пустив, запам'ятовуємо — туди надалі одразу клієнтом.
         self.zoom_app_heard = zoom_app_heard
         self._app_links_file = profile_dir.parent / "zoom-app-links.json"
-        self.browser = Browser(
-            profile_dir, settings.browser_channel, settings.mute_sound, headless, settings.browser_path, audio_sink,
-            audio_tap,
-        )
+        self.browser = Browser(profile_dir, settings.mute_sound, headless, audio_sink, audio_tap)
         self._open_uri = opener
 
     def join(self, visit: Visit) -> Session:
@@ -612,6 +605,7 @@ class Joiner:
                 raise JoinError(f"помилка браузера: {str(e).splitlines()[0]}") from e
         except JoinError as e:
             self._discard(page)
+            self.browser.close_if_idle()  # не лишати порожнє вікно після невдалої спроби
             if visit.platform == "zoom" and self.settings.zoom_mode == "auto":
                 # На пару важливіше потрапити: якщо браузер не пустив — Zoom-клієнт.
                 log.warning("Zoom у браузері не пустив (%s) — відкриваю Zoom-клієнт", e)
@@ -737,6 +731,7 @@ class Joiner:
             log.info("Zoom-клієнт не закриваю — вийди з конференції сам, коли зручно")
             return
         self._discard(session.page)
+        self.browser.close_if_idle()
 
     def _discard(self, page: Page) -> None:
         try:

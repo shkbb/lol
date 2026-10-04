@@ -60,7 +60,7 @@ def test_zoom_app_mode_opens_client_directly(tmp_path):
 
 
 def test_zoom_web_mode_mutes_inside_iframe(tmp_path):
-    settings = JoinSettings(zoom_mode="browser", browser_channel="", display_name="Тест Тестович")
+    settings = JoinSettings(zoom_mode="browser", display_name="Тест Тестович")
     joiner = Joiner(settings, tmp_path, headless=True)
     try:
         context = joiner.browser.context()
@@ -102,7 +102,7 @@ def test_auto_mode_falls_back_to_client_and_remembers(tmp_path, monkeypatch):
 
     monkeypatch.setattr(joiner_module, "join_zoom_web", web_refuses)
     opened = []
-    settings = JoinSettings(zoom_mode="auto", browser_channel="")
+    settings = JoinSettings(zoom_mode="auto")
     joiner = Joiner(settings, tmp_path / "profile", headless=True, opener=opened.append, zoom_app_heard=False)
     try:
         assert joiner.join(visit(ZOOM)).page is None  # таки на парі — у клієнті

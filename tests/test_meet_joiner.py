@@ -123,9 +123,10 @@ TZ = ZoneInfo("Europe/Kyiv")
 @pytest.fixture(scope="module", params=[False, True], ids=["plain", "with-ears"])
 def joiner(tmp_path_factory, request):
     """Двічі: звичайний браузер і з вухами через браузер — збирач звуку не має заважати входу."""
-    settings = JoinSettings(browser_channel="", display_name="Тест Тестович")
+    settings = JoinSettings(display_name="Тест Тестович")
     tap = AudioQueue().feed_base64 if request.param else None
     joiner = Joiner(settings, tmp_path_factory.mktemp("profile"), headless=True, audio_tap=tap)
+    joiner.browser.close_if_idle = lambda: None  # імітація Meet живе в цьому вікні — не закривати після кожної «пари»
     context = joiner.browser.context()
     context.route("https://meet.google.com/**", lambda route: route.fulfill(body=FAKE_MEET, content_type="text/html; charset=utf-8"))
     context.route("https://accounts.google.com/**", lambda route: route.fulfill(body="Sign in", content_type="text/html"))

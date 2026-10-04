@@ -7,15 +7,45 @@ pytest.importorskip("playwright")
 from autopara.joiner import Browser  # noqa: E402
 
 
-def test_bad_browser_path_falls_back_to_bundled_chromium(tmp_path, caplog):
-    browser = Browser(tmp_path, channel="", headless=True, executable_path="/nonexistent/chromium")
+def test_one_window_one_tab_and_closed_when_lesson_ends(tmp_path):
+    browser = Browser(tmp_path, headless=True)
     try:
-        page = browser.new_page()
+        page = browser.new_page()  # порожня вкладка нового вікна — без зайвої другої
+        assert browser.context().pages == [page]
         page.set_content("<p>ok</p>")
         assert page.inner_text("p") == "ok"
-        assert "/nonexistent/chromium" in caplog.text
+        page.goto("data:text/html,<p>пара</p>")
+        browser.close_if_idle()  # у вікні ще пара — не чіпаємо
+        assert browser.any_page() is page
+        page.close()
+        browser.close_if_idle()  # пара скінчилась — вікно закриваємо
+        assert browser.any_page() is None
+        assert browser.new_page().evaluate("1 + 1") == 2  # наступна пара — вікно відкривається знову
     finally:
         browser.close()
+
+
+def test_ensure_downloads_browser_only_when_missing(monkeypatch):
+    from autopara import browser_setup
+
+    present = {"path": ""}
+    installs = []
+    monkeypatch.setattr(browser_setup, "installed", lambda: present["path"] or None)
+
+    def install():
+        installs.append(1)
+        present["path"] = "/tmp/chrome"
+        return True, ""
+
+    monkeypatch.setattr(browser_setup, "_install", install)
+    assert browser_setup.ensure() and installs == [1] and browser_setup.status()["status"] == "ready"
+    assert browser_setup.ensure() and installs == [1]  # уже є — нічого не качаємо
+
+    present["path"] = ""
+    monkeypatch.setattr(browser_setup, "_install", lambda: (False, "немає мережі"))
+    assert not browser_setup.ensure()
+    state = browser_setup.status()
+    assert state["status"] == "error" and "інтернет" in state["error"] and "немає мережі" in state["error"]
 
 
 def test_browser_signin_is_disallowed_so_workspace_accounts_stay_in_profile(tmp_path):

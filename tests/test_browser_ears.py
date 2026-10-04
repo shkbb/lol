@@ -54,7 +54,7 @@ def pitch_and_loudness(pcm: bytes) -> tuple[float, float]:
 def listen(tmp_path, url, html, enable=True, seconds=5):
     """Відкрити сторінку в браузері програми й повернути, що почули вуха."""
     stream = AudioQueue()
-    browser = Browser(tmp_path, channel="", mute_sound=True, headless=True, audio_tap=stream.feed_base64)
+    browser = Browser(tmp_path, mute_sound=True, headless=True, audio_tap=stream.feed_base64)
     try:
         page = browser.new_page()
         page.route(url, lambda route: route.fulfill(body=html, content_type="text/html"))

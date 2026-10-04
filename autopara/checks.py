@@ -3,21 +3,13 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 from .config import Config
 from .rozklad import RozkladError
 from .sources import make_source, resolve_target
-
-CHROME_NAMES = ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser", "microsoft-edge", "msedge"]
-CHROME_PATHS = [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-]
 
 
 @dataclass(frozen=True)
@@ -27,19 +19,16 @@ class Check:
     text: str
 
 
-def find_chrome(config: Config | None = None) -> str | None:
-    if config is not None and config.join.browser_path:
-        return config.join.browser_path if Path(config.join.browser_path).exists() else None
-    for name in CHROME_NAMES:
-        if found := shutil.which(name):
-            return found
-    return next((path for path in CHROME_PATHS if Path(path).exists()), None)
-
-
-def install_hint(linux: str, windows: str, mac: str) -> str:
-    if sys.platform == "win32":
-        return windows
-    return mac if sys.platform == "darwin" else linux
+def zoom_client_found() -> bool:
+    """Чи є Zoom-клієнт. На Linux — команда zoom або будь-яка програма, що відкриває посилання zoommtg://
+    (так знаходиться й Zoom з Flatpak). На Windows і macOS шукати незручно — вважаємо, що є."""
+    if sys.platform != "linux" or shutil.which("zoom"):
+        return True
+    try:
+        query = ["xdg-mime", "query", "default", "x-scheme-handler/zoommtg"]
+        return bool(subprocess.run(query, capture_output=True, text=True, timeout=5).stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
@@ -54,8 +43,10 @@ def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
         checks.append(Check(True, "розклад", target.student_name or target.group_name or target.uid))
     except RozkladError as e:
         checks.append(Check(False, "розклад", str(e)))
-    chrome = find_chrome(config)
-    checks.append(Check(bool(chrome), "браузер", chrome or "Chrome не знайдено — встанови Google Chrome"))
+    from . import browser_setup
+
+    browser = browser_setup.installed()
+    checks.append(Check(bool(browser), "браузер", "браузер програми готовий" if browser else "ще не завантажено — програма завантажить сама"))
     checks.append(
         Check(
             config.profile_dir.exists(),
@@ -64,10 +55,8 @@ def run_checks(config: Config, telegram_ping: bool = True) -> list[Check]:
         )
     )
     if config.join.zoom_mode == "app":
-        zoom = shutil.which("zoom") or (sys.platform != "linux" and "zoom")  # на Windows/Mac шукати незручно
-        download = "встанови Zoom з zoom.us/download"
-        hint = install_hint("встанови Zoom (Arch: yay -S zoom)", download, download)
-        checks.append(Check(bool(zoom), "Zoom", "клієнт знайдено" if zoom else hint))
+        found = zoom_client_found()
+        checks.append(Check(found, "Zoom", "клієнт знайдено" if found else "встанови Zoom з zoom.us/download"))
     if config.telegram.clips and config.telegram.mentions:
         has_ffmpeg = ffmpeg_available()
         checks.append(Check(has_ffmpeg, "відеовирізки", "ffmpeg є" if has_ffmpeg else "немає ffmpeg — перевстанови autopara"))

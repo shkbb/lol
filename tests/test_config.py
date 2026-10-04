@@ -145,3 +145,9 @@ def test_retired_sections_are_ignored():
     """Розділ «Навчання» прибрано — старий config.toml з [study] / [agent] однаково читається."""
     config = parse_config({"schedule": {"group": "ТЦР-32"}, "study": {"enabled": True}, "agent": {"command": "agy"}})
     assert config.schedule.group == "ТЦР-32" and not hasattr(config, "study")
+
+
+def test_old_browser_settings_are_ignored():
+    """Вибору браузера більше немає (завжди вбудований) — старі файли з ним однаково читаються."""
+    config = parse_config({"join": {"browser_channel": "chrome", "browser_path": "/usr/bin/chromium", "meet_account": "a@b.c"}})
+    assert config.join.meet_account == "a@b.c" and not hasattr(config.join, "browser_channel")

@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from . import autostart
-from .checks import find_chrome, run_checks
+from .checks import run_checks
 from .config import UNIVERSITIES, Config, ConfigError, config_to_dict, parse_config, save_config, user_config_dir
 from .ears import whisper_available
 from .links import platform_of, resolve
@@ -229,8 +229,7 @@ class Controller:
         heavy = (
             any(getattr(old, section) != getattr(config, section) for section in ("ears", "brain", "timezone", "data_dir"))
             or replace(old.telegram, **light_telegram) != config.telegram
-            or (old.join.browser_channel, old.join.browser_path, old.join.mute_sound)
-            != (config.join.browser_channel, config.join.browser_path, config.join.mute_sound)
+            or old.join.mute_sound != config.join.mute_sound
         )
         if heavy:
             if runner.active:
@@ -774,17 +773,7 @@ def release_lock(lock: Path) -> None:
 
 
 def open_window(url: str, config: Config | None = None) -> None:
-    """Вікно програми — Chrome у режимі застосунку (без вкладок і адресного рядка), інакше — звичайний браузер."""
-    chrome = find_chrome(config)
-    if chrome:
-        profile = user_config_dir() / "window"
-        subprocess.Popen(
-            [chrome, f"--app={url}", f"--user-data-dir={profile}", "--no-first-run", "--window-size=1180,820"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    else:
-        webbrowser.open(url)
+    webbrowser.open(url)
 
 
 def serve(config: Config, config_path: Path, open_ui: bool, autostart: bool = True, port: int = 0) -> None:
