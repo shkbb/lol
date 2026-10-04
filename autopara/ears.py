@@ -37,6 +37,7 @@ SINK = "autopara"
 RATE = 16_000  # Гц, моно, 16 біт — те, що їсть whisper
 CHUNK_SECONDS = 10
 SILENCE_RMS = 150
+DEBUG_AUDIO = Path.home() / ".autopara" / "debug-ears.raw"  # лише в autopara -v: сирий звук 16 кГц моно s16le
 SOURCES = ("auto", "browser", "pulse")  # звук пар у браузері: зі сторінки пари чи весь звук браузера (Linux)
 APP_STREAM_RE = re.compile(r"zoom", re.I)  # аудіопотоки Zoom-клієнта в PipeWire/PulseAudio
 TAP_SCRIPT = Path(__file__).with_name("ears_tap.js")
@@ -211,13 +212,18 @@ class NullSink:
         self._modules = []
 
 
-def is_silence(pcm: bytes) -> bool:
+def loudness(pcm: bytes) -> int:
+    """Гучність шматка (RMS у відліках 16 біт): тиша — до ~150, звичайна мова — тисячі."""
     samples = array("h", pcm[: len(pcm) - len(pcm) % 2])
     if not samples:
-        return True
+        return 0
     step = max(1, len(samples) // 4000)  # для оцінки гучності вистачить кожного n-го відліку
     picked = samples[::step]
-    return sqrt(sum(s * s for s in picked) / len(picked)) < SILENCE_RMS
+    return int(sqrt(sum(s * s for s in picked) / len(picked)))
+
+
+def is_silence(pcm: bytes) -> bool:
+    return loudness(pcm) < SILENCE_RMS
 
 
 def clean_text(text: str) -> str:
@@ -668,6 +674,11 @@ class Ears:
                 self._stop.wait(5)
 
     def _hear(self, chunk: bytes) -> None:
+        if log.isEnabledFor(logging.DEBUG):  # autopara -v: рівень кожного шматка й сирий звук — щоб розібратись, що чують вуха
+            log.debug("👂 шматок %.0f с, рівень %d%s", len(chunk) / RATE / 2, loudness(chunk),
+                      " (тиша)" if is_silence(chunk) else "")
+            with open(DEBUG_AUDIO, "ab") as raw:
+                raw.write(chunk)
         if is_silence(chunk):
             return
         started = monotonic()
