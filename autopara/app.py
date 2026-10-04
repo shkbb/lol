@@ -134,6 +134,7 @@ class Controller:
                 self._publish()
                 if name == "quit":
                     self._done.set()
+                    self._refuse_waiting()
                     return
             self._tick_if_due()
             self._watch_login()
@@ -142,6 +143,15 @@ class Controller:
             else:
                 self._wake.wait(0.5)
                 self._wake.clear()
+
+    def _refuse_waiting(self) -> None:
+        """Програма зупиняється: усім, хто ще чекає на команду, — одразу відмова, а не тайм-аут."""
+        while True:
+            try:
+                _, _, future = self._commands.get_nowait()
+            except queue.Empty:
+                return
+            future.set_exception(ConfigError("програма вже зупиняється"))
 
     def _real_parts(self, stack: ExitStack):
         from .joiner import Joiner

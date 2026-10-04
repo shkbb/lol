@@ -50,7 +50,6 @@ def close_windows():
         window = WINDOWS.pop()
         window.poll.stop()
         window.model._timer.stop()
-        window.bridge.pool.clear()
         window._quitting = True
         window.close()
         window.deleteLater()

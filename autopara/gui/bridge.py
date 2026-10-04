@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
+import time
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from .. import app as app_module
 from ..config import ConfigError
@@ -41,9 +43,11 @@ class _Relay(QObject):
             log.debug("Відповідь для закритого віджета: %s", e)
 
 
-class _Task(QRunnable):
+class _Task:
+    """Фонова дія вікна. Звичайний потік-демон: на виході з програми його не чекаємо
+    (пул потоків Qt чекав би, поки допрацює, наприклад, 20-секундне завантаження списку груп)."""
+
     def __init__(self, work, ok, fail, relay):
-        super().__init__()
         self.work, self.ok, self.fail, self.relay = work, ok, fail, relay
 
     def run(self) -> None:
@@ -73,8 +77,6 @@ class Bridge(QObject):
         super().__init__()
         self.server = server
         self.relay = _Relay()
-        self.pool = QThreadPool()
-        self.pool.setMaxThreadCount(6)
 
     @property
     def controller(self):
@@ -91,7 +93,7 @@ class Bridge(QObject):
 
     def run(self, work: Callable[[], Any], ok: Callable[[Any], None] | None = None,
             fail: Callable[[str], None] | None = None) -> None:
-        self.pool.start(_Task(work, ok, fail, self.relay))
+        threading.Thread(target=_Task(work, ok, fail, self.relay).run, name="window-task", daemon=True).start()
 
     def call_api(self, handler, query=None, body=None, ok=None, fail=None) -> None:
         self.run(lambda: self.api(handler, query, body), ok, fail)
@@ -189,12 +191,12 @@ class ConfigModel(QObject):
 
     def _wait_for_save(self, seconds: float = 30) -> None:
         """Дочекатися збереження, що вже йде у фоні (крок майстра спирається на збережене)."""
-        from PySide6.QtCore import QCoreApplication, QDeadlineTimer
+        from PySide6.QtCore import QCoreApplication
 
-        deadline = QDeadlineTimer(int(seconds * 1000))
-        while self._saving and not deadline.hasExpired():
+        deadline = time.monotonic() + seconds
+        while self._saving and time.monotonic() < deadline:
             QCoreApplication.processEvents()
-            self.bridge.pool.waitForDone(20)
+            time.sleep(0.02)
 
     def _saved(self, result: dict) -> None:
         self._saving = False
