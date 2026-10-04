@@ -207,8 +207,12 @@ def cmd_app(args) -> None:
     from .app import running_instance, show_running
 
     if instance := running_instance():
-        if show_running(instance) == "no_window":
-            print("autopara вже працює у фоні без вікна (autopara run). Зупини її — і запусти autopara app ще раз.")
+        try:
+            shown = show_running(instance)
+        except OSError:  # стара версія програми ще не вміє показувати своє вікно
+            shown = "no_window"
+        if shown == "no_window":
+            print("autopara вже працює у фоні без вікна. Зупини її — і запусти autopara app ще раз.")
         return
     from .gui import run as run_gui
 

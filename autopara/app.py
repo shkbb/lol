@@ -118,6 +118,7 @@ class Controller:
 
     def _loop(self) -> None:
         self._publish()
+        self._first_accounts_check()
         while True:
             while True:
                 try:
@@ -317,6 +318,29 @@ class Controller:
         if time.monotonic() >= self._next_accounts_check:
             self._next_accounts_check = time.monotonic() + 3
             self._check_accounts()
+
+    def _first_accounts_check(self) -> None:
+        """Список Google-акаунтів ще невідомий (перший запуск нової версії) — один раз тихо дивимось, у які
+        акаунти вже увійдено, у невидимому браузері. Лише якщо браузер програми вже є й зараз не зайнятий."""
+        if _accounts_file(self.config).exists() or not self.config.profile_dir.exists():
+            return
+        if (self.joiner is not None and self.joiner.browser.is_open()) or browser_setup.status()["status"] == "installing":
+            return
+        from .joiner import Browser
+
+        browser = Browser(self.config.profile_dir, headless=True)
+        try:
+            accounts = browser.google_accounts() if browser.context() else None
+        except Exception as e:  # noqa: BLE001 — це лише підказка для вікна
+            log.debug("Не вдалося подивитись акаунти Google: %s", e)
+            accounts = None
+        finally:
+            browser.close()
+        if accounts is not None:
+            self.google_accounts = accounts
+            write_accounts(self.config, accounts)
+            log.info("Google: увійдено в %s", ", ".join(accounts) if accounts else "жоден акаунт")
+            self._publish()
 
     def _check_accounts(self) -> None:
         if self.joiner is None:
