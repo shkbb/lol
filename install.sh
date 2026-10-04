@@ -31,8 +31,9 @@ if ! .venv/bin/python -m pip install -q -e ".[ears]"; then
   .venv/bin/python -m pip install -q -e .
 fi
 
-say "3/4 Запасний браузер (знадобиться, лише якщо немає Google Chrome)"
-.venv/bin/python -m playwright install chromium || echo "Не вийшло — не страшно, якщо встановлений Google Chrome."
+say "3/4 Браузер програми (у ньому вона заходить на пари; ~150 МБ)"
+.venv/bin/python -m playwright install chromium --no-shell \
+  || echo "Не вийшло — не страшно: програма завантажить браузер сама при першому запуску."
 
 say "4/4 Ярлик"
 app="$PWD/.venv/bin/autopara"
@@ -49,17 +50,21 @@ Type=Application
 Name=autopara
 Comment=Автоматичний вхід на пари
 Exec="$app" app
-Icon=x-office-calendar
+Icon=$PWD/autopara/gui/icon.svg
 Terminal=false
 Categories=Education;
+StartupWMClass=autopara
 EOF
   echo "Ярлик «autopara» тепер є в меню програм."
+  if [ "${XDG_SESSION_TYPE:-}" = "x11" ] && command -v ldconfig >/dev/null 2>&1 && ! ldconfig -p | grep -q "libxcb-cursor.so.0"; then
+    echo "Для вікна програми потрібна бібліотека libxcb-cursor (Ubuntu/Mint: sudo apt install libxcb-cursor0)."
+  fi
   if ! command -v pactl >/dev/null 2>&1; then
     echo "Порада: щоб вуха чули Zoom-клієнт, встанови pactl (Arch: sudo pacman -S libpulse; Ubuntu: sudo apt install pulseaudio-utils)."
   fi
 fi
 
-say "Готово! Відкриваю вікно програми — далі все там."
+say "Готово! Відкриваю програму — далі простий майстер."
 if [ "${AUTOPARA_NO_LAUNCH:-}" != 1 ]; then
   nohup "$app" app >/dev/null 2>&1 &
   disown || true

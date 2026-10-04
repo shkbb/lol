@@ -11,7 +11,7 @@ def test_linux_autostart_entry(monkeypatch, tmp_path):
     assert autostart.status() == {"supported": True, "enabled": False, "note": ""}
     assert autostart.set_enabled(True)["enabled"]
     text = (tmp_path / "autostart" / "autopara.desktop").read_text(encoding="utf-8")
-    assert 'Exec="/home/me/my apps/autopara/.venv/bin/python" -m autopara run\n' in text
+    assert 'Exec="/home/me/my apps/autopara/.venv/bin/python" -m autopara app --hidden\n' in text
     assert not autostart.set_enabled(False)["enabled"]
 
 
@@ -63,7 +63,7 @@ def test_windows_run_key(monkeypatch, tmp_path):
     monkeypatch.setattr(autostart.sys, "executable", str(scripts / "python.exe"))
     assert autostart.status()["enabled"] is False
     assert autostart.set_enabled(True)["enabled"] is True
-    assert values["autopara"].endswith('pythonw.exe -m autopara run')  # без вікна консолі
+    assert values["autopara"].endswith('pythonw.exe -m autopara app --hidden')  # без вікна консолі
     assert autostart.set_enabled(False)["enabled"] is False
     assert autostart.set_enabled(False)["enabled"] is False  # повторне вимкнення не падає
 
@@ -73,5 +73,5 @@ def test_macos_launch_agent(monkeypatch, tmp_path):
     monkeypatch.setattr(autostart.Path, "home", lambda: tmp_path)
     assert autostart.set_enabled(True)["enabled"]
     agent = plistlib.loads((tmp_path / "Library" / "LaunchAgents" / "ua.autopara.plist").read_bytes())
-    assert agent["RunAtLoad"] and agent["ProgramArguments"][-3:] == ["-m", "autopara", "run"]
+    assert agent["RunAtLoad"] and agent["ProgramArguments"][-3:] == ["autopara", "app", "--hidden"]
     assert not autostart.set_enabled(False)["enabled"]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, time, tzinfo
 from time import sleep
@@ -261,6 +262,7 @@ class RozkladClient:
         self.timeout = timeout
         self._csrf: dict[str, str] = {}
         self._groups: list[Target] | None = None
+        self._groups_lock = threading.Lock()  # майстер підвантажує список заздалегідь, а пошук чекає на нього
 
     # Довідники
 
@@ -281,6 +283,10 @@ class RozkladClient:
 
     def all_groups(self) -> list[Target]:
         """Усі групи всіх факультетів і курсів (для пошуку у вікні програми; кешується)."""
+        with self._groups_lock:
+            return self._all_groups()
+
+    def _all_groups(self) -> list[Target]:
         if self._groups is None:
             groups = []
             for faculty in self.faculties():

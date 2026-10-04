@@ -465,6 +465,24 @@ def disallow_browser_signin(profile_dir: Path) -> None:
     prefs_file.write_text(json.dumps(prefs, ensure_ascii=False), encoding="utf-8")
 
 
+LIST_ACCOUNTS = "https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard"
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def parse_google_accounts(text: str) -> list[str]:
+    """Відповідь ListAccounts: ["gaia.l.a.r", [["gaia.l.a", 1, "Ім'я", "пошта", ...], ...]] — беремо пошти."""
+    try:
+        entries = json.loads(text)[1]
+    except (ValueError, IndexError, TypeError):
+        entries = [text]
+    found = []
+    for entry in entries if isinstance(entries, list) else []:
+        match = EMAIL_RE.search(json.dumps(entry, ensure_ascii=False))
+        if match and match.group(0).lower() not in found:
+            found.append(match.group(0).lower())
+    return found
+
+
 class Browser:
     """Вбудований Chromium програми з окремим постійним профілем: вхід у Google зберігається між запусками.
 
@@ -515,6 +533,22 @@ class Browser:
             return next((page for page in self._context.pages if not page.is_closed()), None)
         except PlaywrightError:
             return None
+
+    def google_accounts(self) -> list[str] | None:
+        """У які Google-акаунти увійдено в браузері програми — запитом з його кукі, без жодної вкладки.
+        None — браузер закритий або Google не відповів."""
+        if self._context is None:
+            return None
+        try:
+            response = self._context.request.post(LIST_ACCOUNTS, data=" ", timeout=10_000)
+            if not response.ok:
+                return None
+            return parse_google_accounts(response.text())
+        except PlaywrightError:
+            return None
+
+    def is_open(self) -> bool:
+        return self._context is not None
 
     def close_if_idle(self) -> None:
         """Пара скінчилась: якщо у вікні більше нічого немає — закриваємо його, а не тримаємо порожнім."""

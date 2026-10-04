@@ -41,16 +41,6 @@ if (-not $python) {
     }
 }
 
-$chrome = @(
-    "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
-    "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-    "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
-) | Where-Object { Test-Path $_ }
-if (-not $chrome -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Say "Встановлюю Google Chrome (у ньому програма заходить на пари)"
-    winget install -e --id Google.Chrome --accept-package-agreements --accept-source-agreements
-}
-
 Say "1/4 Окреме середовище Python (.venv)"
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     $exe, $prefix = $python
@@ -67,20 +57,23 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { throw "не вдалося встановити autopara" }
 }
 
-Say "3/4 Запасний браузер"
-& $venv -m playwright install chromium
-if ($LASTEXITCODE -ne 0) { Write-Host "Не вийшло — не страшно, якщо встановлений Google Chrome." -ForegroundColor Yellow }
+Say "3/4 Браузер програми (у ньому вона заходить на пари; ~150 МБ)"
+& $venv -m playwright install chromium --no-shell
+if ($LASTEXITCODE -ne 0) { Write-Host "Не вийшло — не страшно: програма завантажить браузер сама при першому запуску." -ForegroundColor Yellow }
 
 Say "4/4 Ярлики на робочому столі й у меню «Пуск»"
 $target = (Resolve-Path ".venv\Scripts\autopara-window.exe").Path
+$icon = Join-Path (Get-Location).Path "autopara.ico"
+& $venv -c "import sys; from PySide6.QtGui import QGuiApplication, QIcon; app = QGuiApplication(['x', '-platform', 'offscreen']); QIcon(sys.argv[1]).pixmap(256, 256).save(sys.argv[2])" "autopara\gui\icon.svg" $icon
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs"))) {
     $link = $shell.CreateShortcut((Join-Path $folder "autopara.lnk"))
     $link.TargetPath = $target
     $link.WorkingDirectory = (Get-Location).Path
     $link.Description = "Автоматичний вхід на пари"
+    if (Test-Path $icon) { $link.IconLocation = $icon }
     $link.Save()
 }
 
-Say "Готово! Відкриваю вікно програми — далі все там."
+Say "Готово! Відкриваю програму — далі простий майстер."
 Start-Process $target

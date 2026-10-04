@@ -1,4 +1,4 @@
-"""Запуск разом із комп'ютером — без вікна, як `autopara run`.
+"""Запуск разом із комп'ютером — програма стартує прихованою (``autopara app --hidden``), а ярлик лише показує її вікно.
 
 Windows — запис у реєстрі (HKCU\\...\\Run) через pythonw, тож чорного вікна консолі немає;
 Linux — ~/.config/autostart (GNOME, KDE та інші); macOS — LaunchAgent.
@@ -21,7 +21,7 @@ def command() -> list[str]:
     python = Path(sys.executable)
     if sys.platform == "win32" and python.with_name("pythonw.exe").exists():
         python = python.with_name("pythonw.exe")  # без вікна консолі
-    return [str(python), "-m", "autopara", "run"]
+    return [str(python), "-m", "autopara", "app", "--hidden"]
 
 
 def _config_home() -> Path:

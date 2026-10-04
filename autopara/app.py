@@ -1,10 +1,11 @@
-"""Програма з вікном.
+"""Фонова частина програми.
 
 - ``Controller`` — серце: розклад, браузер і помічник живуть в одному потоці (так вимагає Playwright),
-  а вікно налаштувань спілкується з ним через чергу команд.
-- ``AppServer`` — локальний сервер вікна (лише 127.0.0.1). Кожен запит до API несе випадковий токен,
-  який вікно отримує при відкритті, а заголовок Host перевіряється — тож сторонні сайти в браузері
-  нічого не змінять.
+  а вікно програми спілкується з ним через чергу команд.
+- ``api_*`` — що вікно може дізнатися чи змінити. Вікно (``gui``) викликає їх напряму.
+- ``AppServer`` — той самий API для інших копій програми (лише 127.0.0.1, з випадковим токеном і
+  перевіркою Host): ``autopara app`` показує вікно вже запущеної програми, ``import-config`` передає
+  їй налаштування.
 """
 
 from __future__ import annotations
@@ -19,9 +20,9 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 import urllib.request
-import webbrowser
 from collections import deque
 from concurrent.futures import Future
 from contextlib import ExitStack
@@ -32,7 +33,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
-from . import autostart
+from . import autostart, browser_setup
 from .checks import run_checks
 from .config import UNIVERSITIES, Config, ConfigError, config_to_dict, parse_config, save_config, user_config_dir
 from .ears import whisper_available
@@ -43,7 +44,6 @@ from .sources import make_source, resolve_target
 
 log = logging.getLogger(__name__)
 
-STATIC = Path(__file__).parent / "ui"
 PROFILES = Path(__file__).resolve().parent.parent / "profiles"  # профілі з репозиторію (якщо є)
 POLL_SECONDS = 20
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
@@ -86,6 +86,9 @@ class Controller:
         self._user_stopped = False  # вимкнули кнопкою — тоді й після збереження налаштувань не вмикаємо самі
         self._next_tick: datetime | None = None
         self._last_error = ""
+        self.google_accounts: list[str] = read_accounts(config)  # у які Google-акаунти увійдено (кеш)
+        self._login_open = False  # відкрито вікно «Увійти в Google» — стежимо, коли увійдуть
+        self._next_accounts_check = 0.0
 
     # --- Із будь-якого потоку ----------------------------------------------------
 
@@ -93,6 +96,8 @@ class Controller:
         self._thread.start()
 
     def call(self, name: str, *args, timeout: float = 60):
+        if self._done.is_set() or (self._thread.ident is not None and not self._thread.is_alive()):
+            raise ConfigError("програма вже зупиняється")
         future: Future = Future()
         self._commands.put((name, args, future))
         self._wake.set()
@@ -130,6 +135,7 @@ class Controller:
                     self._done.set()
                     return
             self._tick_if_due()
+            self._watch_login()
             if self.joiner is not None:
                 self.joiner.idle(0.5)  # чекаємо, даючи браузеру доставляти події
             else:
@@ -279,6 +285,8 @@ class Controller:
         return "not_found"
 
     def _do_login(self) -> str:
+        if not browser_setup.ensure():
+            raise ConfigError(browser_setup.status()["error"])
         if self.joiner is None:
             from .joiner import Joiner
 
@@ -286,7 +294,39 @@ class Controller:
         self.joiner.browser.new_page().goto("https://accounts.google.com/")
         if self.config.join.zoom_mode == "browser":
             self.joiner.browser.new_page().goto("https://zoom.us/signin")
+        self._login_open = True
+        self._next_accounts_check = 0.0
         return "opened"
+
+    def _do_close_login(self) -> str:
+        """«Готово» після входу: закрити вікно браузера (якщо в ньому не йде пара)."""
+        self._check_accounts()
+        self._login_open = False
+        if self.joiner is not None and (self.runner is None or not self.runner.active):
+            self.joiner.browser.close()
+        return "closed"
+
+    def _watch_login(self) -> None:
+        """Поки відкрито вікно входу — раз на кілька секунд дивимось, у які акаунти вже увійшли."""
+        if not self._login_open:
+            return
+        if self.joiner is None or not self.joiner.browser.is_open():
+            self._login_open = False  # вікно входу закрили
+            self._publish()
+            return
+        if time.monotonic() >= self._next_accounts_check:
+            self._next_accounts_check = time.monotonic() + 3
+            self._check_accounts()
+
+    def _check_accounts(self) -> None:
+        if self.joiner is None:
+            return
+        accounts = self.joiner.browser.google_accounts()
+        if accounts is not None and accounts != self.google_accounts:
+            self.google_accounts = accounts
+            write_accounts(self.config, accounts)
+            log.info("Google: увійдено в %s", ", ".join(accounts) if accounts else "жоден акаунт")
+            self._publish()
 
     def _publish(self) -> None:
         runner = self.runner
@@ -294,6 +334,9 @@ class Controller:
             "running": runner is not None,
             "restart_pending": self._restart_pending,
             "now": self.clock().isoformat(),
+            "google_accounts": list(self.google_accounts),
+            "login_open": self._login_open,
+            "browser": browser_setup.status(),
         }
         if runner is not None:
             target = runner.target
@@ -330,6 +373,27 @@ class Controller:
 
 
 # --- Дані для вікна ------------------------------------------------------------
+
+
+def _accounts_file(config: Config) -> Path:
+    return config.data_dir / "google-accounts.json"
+
+
+def read_accounts(config: Config) -> list[str]:
+    """Останній відомий список Google-акаунтів — щоб показувати його й без відкритого браузера."""
+    try:
+        accounts = json.loads(_accounts_file(config).read_text(encoding="utf-8"))
+        return [a for a in accounts if isinstance(a, str)]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def write_accounts(config: Config, accounts: list[str]) -> None:
+    try:
+        config.data_dir.mkdir(parents=True, exist_ok=True)
+        _accounts_file(config).write_text(json.dumps(accounts, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        log.debug("Не вдалося запам'ятати акаунти: %s", e)
 
 
 def configured(config: Config) -> bool:
@@ -391,6 +455,7 @@ class AppServer(ThreadingHTTPServer):
         self.sources: dict[str, object] = {}  # кеш клієнтів розкладу для пошуку груп
         self.targets: dict[tuple, object] = {}  # уже знайдені групи — щоб гортати тижні без зайвих запитів
         self.autostart = autostart
+        self.show_window = None  # вікно програми ставить сюди «показати себе»
 
     def autostart_once(self) -> bool:
         """Щойно налаштували вперше — вмикаємо запуск разом із комп'ютером (вимкнути можна у «Поведінці»)."""
@@ -467,8 +532,6 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._json(403, {"error": "чужий Host"})
         parts = urlsplit(self.path)
-        if method == "GET" and not parts.path.startswith("/api/"):
-            return self._static(parts.path)
         if not secrets.compare_digest(self.headers.get("X-Token", ""), self.server.token):
             return self._json(403, {"error": "немає токена — відкрий вікно через `autopara app`"})
         handler = ROUTES.get((method, parts.path))
@@ -486,13 +549,6 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("UI: помилка в %s %s", method, parts.path)
             status, data = 500, {"error": str(e)}
         self._json(status, data)
-
-    def _static(self, path: str) -> None:
-        name = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/style.css": "style.css"}.get(path)
-        if name is None:
-            return self._json(404, {"error": "немає такого"})
-        types = {"html": "text/html", "js": "text/javascript", "css": "text/css"}
-        self._send(200, (STATIC / name).read_bytes(), f"{types[name.rsplit('.', 1)[1]]}; charset=utf-8")
 
 
 def api_state(server: AppServer, query: dict, body: dict):
@@ -513,6 +569,7 @@ def api_get_config(server: AppServer, query: dict, body: dict):
         "platform": sys.platform,
         "autostart": server.autostart.status(),
         "ears_installed": whisper_available() is None,
+        "google_accounts": list(controller.google_accounts),
     }
 
 
@@ -690,6 +747,14 @@ def api_log(server: AppServer, query: dict, body: dict):
     return 200, {"lines": server.logs.since(int(query.get("after", 0)))}
 
 
+def api_show(server: AppServer, query: dict, body: dict):
+    """Іншу копію запустили з ярлика — показуємо вікно цієї (якщо вона з вікном)."""
+    if server.show_window is None:
+        return 200, {"result": "no_window"}
+    server.show_window()
+    return 200, {"result": "shown"}
+
+
 ROUTES = {
     ("GET", "/api/state"): api_state,
     ("GET", "/api/config"): api_get_config,
@@ -711,6 +776,7 @@ ROUTES = {
     ("POST", "/api/autostart"): api_autostart,
     ("GET", "/api/audio-devices"): api_audio_devices,
     ("POST", "/api/install-ears"): api_install_ears,
+    ("POST", "/api/show"): api_show,
 }
 
 
@@ -754,6 +820,18 @@ def push_config(instance: dict, config: Config) -> str:
         return json.loads(response.read())["result"]
 
 
+def show_running(instance: dict) -> str:
+    """Попросити вже запущену програму показати своє вікно: "shown" або "no_window" (autopara run)."""
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{instance['port']}/api/show",
+        data=b"{}",
+        method="POST",
+        headers={"X-Token": instance["token"], "Content-Type": "application/json"},
+    )
+    with _local_opener().open(request, timeout=10) as response:
+        return json.loads(response.read())["result"]
+
+
 def write_lock(port: int, token: str) -> Path:
     lock = lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -772,33 +850,44 @@ def release_lock(lock: Path) -> None:
         pass
 
 
-def open_window(url: str, config: Config | None = None) -> None:
-    webbrowser.open(url)
+class Program:
+    """Фонова частина: контролер і локальний API. Без вікна (``autopara run``) чи з ним (``gui``)."""
+
+    def __init__(self, config: Config, config_path: Path, port: int = 0):
+        self.config = config
+        self.logs = LogBuffer()
+        logging.getLogger().addHandler(self.logs)
+        self.controller = Controller(config, config_path)
+        self.server = AppServer(self.controller, port=port, logs=self.logs)
+        self.lock: Path | None = None
+
+    def start(self, autostart: bool = True) -> None:
+        self.controller.start()
+        self.lock = write_lock(self.server.port, self.server.token)
+        browser_setup.prepare_in_background()  # якщо браузер програми ще не завантажено — докачати, поки налаштовують
+        if autostart and configured(self.config):
+            threading.Thread(target=_autostart, args=(self.controller,), daemon=True).start()
+        elif not configured(self.config):
+            log.warning("Група ще не вибрана — відкрий вікно програми (autopara app) і заповни налаштування")
+
+    def stop(self) -> None:
+        self.server.server_close()
+        self.controller.shutdown()
+        if self.lock is not None:
+            release_lock(self.lock)
 
 
-def serve(config: Config, config_path: Path, open_ui: bool, autostart: bool = True, port: int = 0) -> None:
-    """Запустити контролер і сервер вікна; блокує до Ctrl+C / SIGTERM."""
-    logs = LogBuffer()
-    logging.getLogger().addHandler(logs)
-    controller = Controller(config, config_path)
-    server = AppServer(controller, port=port, logs=logs)
-    controller.start()
-    lock = write_lock(server.port, server.token)
-    log.info("Вікно програми: http://127.0.0.1:%d (відкрити: autopara app)", server.port)
-    if autostart and configured(config):
-        threading.Thread(target=_autostart, args=(controller,), daemon=True).start()
-    elif not configured(config):
-        log.warning("Група ще не вибрана — відкрий вікно програми (autopara app) і заповни налаштування")
-    if open_ui:
-        open_window(server.url, config)
+def serve(config: Config, config_path: Path, autostart: bool = True, port: int = 0) -> None:
+    """Без вікна (``autopara run``): блокує до Ctrl+C / SIGTERM."""
+    program = Program(config, config_path, port=port)
+    program.start(autostart)
+    log.info("autopara працює у фоні без вікна")
     try:
-        server.serve_forever()
+        program.server.serve_forever()
     except KeyboardInterrupt:
         log.info("Зупинено")
     finally:
-        server.server_close()
-        controller.shutdown()
-        release_lock(lock)
+        program.stop()
 
 
 def _autostart(controller: Controller) -> None:

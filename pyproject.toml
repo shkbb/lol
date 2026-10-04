@@ -13,6 +13,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "playwright>=1.49",  # 1.49+: install chromium --no-shell
     "tomli-w>=1.0",  # збереження налаштувань із вікна програми
+    "PySide6-Essentials>=6.8",  # вікно програми (Qt): звичайна програма для Linux, Windows і macOS
     "imageio-ffmpeg>=0.5",  # свій ffmpeg для відеовирізок — нічого не треба встановлювати окремо
     "tzdata",  # часові пояси для Windows
 ]
@@ -29,11 +30,11 @@ autopara = "autopara.cli:main"
 autopara-window = "autopara.cli:window"  # на Windows — без вікна консолі (для ярлика)
 
 [tool.setuptools]
-packages = ["autopara", "autopara.ui"]
+packages = ["autopara", "autopara.gui"]
 
 [tool.setuptools.package-data]
 autopara = ["*.js"]  # збирач звуку пари для вух (ears_tap.js)
-"autopara.ui" = ["*.html", "*.js", "*.css"]  # вікно програми (не Python-код, лише файли)
+"autopara.gui" = ["*.svg"]  # значок програми
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

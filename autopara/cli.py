@@ -37,6 +37,8 @@ def setup_logging(config: Config | None, verbose: bool) -> None:
         datefmt="%d.%m %H:%M:%S",
         handlers=handlers,
     )
+    for noisy in ("httpx", "httpcore", "huggingface_hub", "urllib3"):  # «HTTP Request: …» лише засмічує журнал
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def _client(config: Config):
@@ -189,7 +191,7 @@ def _app_config(explicit: str | None) -> tuple[Config, Path]:
     return read_config(path), path
 
 
-def _serve(args, open_ui: bool) -> None:
+def _serve(args) -> None:
     from .app import serve
 
     config, path = _app_config(args.config)
@@ -197,19 +199,22 @@ def _serve(args, open_ui: bool) -> None:
     # systemctl stop і kill шлють SIGTERM: перетворюємо його на звичайний вихід, щоб закрити браузер
     # і зняти заборону сну.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    serve(config, path, open_ui=open_ui)
+    serve(config, path)
 
 
 def cmd_app(args) -> None:
-    """Відкрити вікно програми; якщо вона ще не працює — запустити."""
-    from .app import open_window, running_instance
+    """Програма з вікном. Якщо вона вже працює — просто показати її вікно (друга копія не запускається)."""
+    from .app import running_instance, show_running
 
     if instance := running_instance():
-        print("autopara вже працює — відкриваю її вікно.")
-        path = find_config(args.config)
-        open_window(instance["url"], read_config(path) if path else None)
+        if show_running(instance) == "no_window":
+            print("autopara вже працює у фоні без вікна (autopara run). Зупини її — і запусти autopara app ще раз.")
         return
-    _serve(args, open_ui=True)
+    from .gui import run as run_gui
+
+    config, path = _app_config(args.config)
+    setup_logging(config, args.verbose)
+    run_gui(config, path, hidden=args.hidden)
 
 
 def cmd_run(args) -> None:
@@ -218,7 +223,7 @@ def cmd_run(args) -> None:
 
     if instance := running_instance():
         raise ConfigError(f"autopara вже працює (процес {instance.get('pid')}) — відкрий її вікно: autopara app")
-    _serve(args, open_ui=False)
+    _serve(args)
 
 
 def cmd_import_config(args) -> None:
@@ -362,6 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
     join.set_defaults(func=cmd_join)
 
     app = sub.add_parser("app", help="відкрити вікно програми (налаштування, стан, журнал)")
+    app.add_argument("--hidden", action="store_true", help="не показувати вікно одразу (для автозапуску)")
     app.set_defaults(func=cmd_app, needs_config=False)
 
     run = sub.add_parser("run", help="працювати у фоні без вікна (для автозапуску)")
