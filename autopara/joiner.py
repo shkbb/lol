@@ -59,6 +59,8 @@ NEVER_ASK_RE = re.compile(
 )
 CONTINUE_WITHOUT_RE = re.compile(r"continue without|продовжити без|продолжить без", re.I)
 DISMISS_RE = re.compile(r"^\s*(got it|dismiss|зрозуміло|закрити|понятно|закрыть)\s*$", re.I)
+# Підказки поверх зустрічі під час пари — лише «зрозуміло»: «Закрити» там закрив би, наприклад, чат.
+TIP_RE = re.compile(r"^\s*(got it|зрозуміло|понятно)\s*$", re.I)
 NAME_RE = re.compile(r"name|ім.я|имя", re.I)
 LEAVE_RE = re.compile(r"leave|покинути|вийти з|покинуть|выйти из", re.I)
 DENIED_RE = re.compile(
@@ -287,15 +289,48 @@ def _meet_chat_input(page: Page) -> Locator | None:
     return _first_visible(page.get_by_role("textbox", name=CHAT_INPUT_RE))
 
 
+def _dismiss_popups(page: Page) -> None:
+    """Підказки Meet поверх зустрічі («Користувачі можуть бачити ваше відео інакше… Зрозуміло») заважають чату."""
+    for _ in range(3):
+        button = _first_visible(page.get_by_role("button", name=TIP_RE))
+        if button is None:
+            return
+        try:
+            button.click(timeout=2000)
+        except PlaywrightError:
+            return
+        page.wait_for_timeout(300)
+
+
 def open_meet_chat(page: Page) -> bool:
     if _meet_chat_input(page) is not None:
         return True  # уже відкритий: повторний клік його б закрив
+    _dismiss_popups(page)
     button = _first_visible(page.get_by_role("button", name=CHAT_BUTTON_RE))
-    if button is None:
-        return False
-    button.click()
-    page.wait_for_timeout(1000)
+    if button is not None:
+        try:
+            button.click(timeout=3000)
+        except PlaywrightError:
+            pass
+        page.wait_for_timeout(1000)
+    if _meet_chat_input(page) is None:
+        # Вузьке вікно — Meet ховає кнопку чату в «⋮». Тоді — його ж клавіші: Ctrl+Alt+C відкриває чат.
+        page.keyboard.press("Control+Alt+c")
+        page.wait_for_timeout(1000)
     return _meet_chat_input(page) is not None
+
+
+def describe_controls(page: Page) -> str:
+    """Які кнопки й поля видно на сторінці — для журналу, коли щось не знайшлося (верстку Meet змінили)."""
+    try:
+        names = page.eval_on_selector_all(
+            "button, [role=button], textarea, input, [contenteditable=true]",
+            "els => els.filter(e => e.offsetParent).map(e => e.tagName.toLowerCase() + ':' +"
+            " (e.getAttribute('aria-label') || e.getAttribute('placeholder') || e.innerText || '').trim().slice(0, 40))",
+        )
+    except PlaywrightError:
+        return "?"
+    return ", ".join(dict.fromkeys(name for name in names if not name.endswith(":")))
 
 
 def read_meet_chat(page: Page) -> list[ChatMessage]:
@@ -765,9 +800,9 @@ class Joiner:
                 denied, first = e, account
         raise denied
 
-    def _snapshot(self, page: Page) -> None:
-        """Що показав браузер, коли зайти не вдалося, — щоб причину було видно, а не вгадувати."""
-        path = self._app_links_file.parent / "last-join-failure.png"
+    def _snapshot(self, page: Page, name: str = "last-join-failure.png") -> None:
+        """Що показав браузер, коли щось не вдалося, — щоб причину було видно, а не вгадувати."""
+        path = self._app_links_file.parent / name
         try:
             if not page.is_closed():
                 page.screenshot(path=str(path))
@@ -852,6 +887,7 @@ class Joiner:
                 pass
         try:
             if session.visit.platform == "meet":
+                _dismiss_popups(page)  # підказки Meet закривають зустріч у вирізках і заважають чату
                 return observe_meet(page)
             if session.visit.platform == "zoom":
                 return observe_zoom(page)
@@ -872,10 +908,13 @@ class Joiner:
         if session.page is None or session.visit.platform != "meet":
             return False
         try:
-            return send_meet_chat(session.page, text)
+            if send_meet_chat(session.page, text):
+                return True
+            log.warning("Не знайшов чат Meet. На сторінці видно: %s", describe_controls(session.page))
         except PlaywrightError as e:
             log.warning("Не вдалося написати в чат: %s", e)
-            return False
+        self._snapshot(session.page, "last-chat-failure.png")
+        return False
 
     def screenshot(self, session: Session) -> bytes | None:
         if session.page is None:

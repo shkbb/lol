@@ -42,6 +42,9 @@ FAKE_MEET = """<!doctype html>
   </div>
 </div>
 <div id="ended" hidden>You left the meeting <button>Rejoin</button><button>Return to home screen</button></div>
+<div id="cover" hidden style="position:fixed;inset:0;background:#0003"></div>
+<div id="tip" hidden style="position:fixed;top:30%;left:30%;z-index:10;background:#fff">Users may see your video differently
+  <button id="gotit">Got it</button></div>
 <script>
 const scenario = location.pathname.slice(1);
 const $ = (id) => document.getElementById(id);
@@ -82,6 +85,11 @@ navigator.permissions.query({name: "microphone"}).then((p) => {
 });
 
 $("chatbtn").onclick = () => { $("chatpanel").hidden = !$("chatpanel").hidden; };
+// Як справжній Meet: Ctrl+Alt+C відкриває чат; у вузькому вікні кнопки чату не видно, а поверх буває підказка.
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.altKey && e.key.toLowerCase() === "c") $("chatpanel").hidden = false;
+});
+$("gotit").onclick = () => { $("tip").hidden = true; $("cover").hidden = true; };
 let sent = 0;
 $("chatbox").addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
@@ -112,6 +120,11 @@ $("join").onclick = () => {
   if (scenario === "denied" || (scenario === "only-gmail" && !account.endsWith("@gmail.com"))) {
     $("denied").hidden = false;
     return;
+  }
+  if (scenario === "tip") {
+    $("chatbtn").hidden = true;
+    $("tip").hidden = false;
+    $("cover").hidden = false;
   }
   if (scenario === "lobby") {
     $("lobby").hidden = false;
@@ -218,6 +231,18 @@ def test_chat_is_read_with_authors_and_written(joiner):
         assert joiner.send_chat(session, "+")
         # Чат уже відкритий — повторне «відкриття» не має його закрити.
         assert joiner.read_chat(session)[-1] == ChatMessage("me1", "You", "+")
+    finally:
+        joiner.leave(session)
+
+
+def test_chat_behind_a_tip_and_without_a_chat_button(joiner):
+    """Підказка «Зрозуміло» поверх зустрічі й вузьке вікно без кнопки чату — однаково пишемо в чат."""
+    session = joiner.join(visit("tip"))
+    try:
+        joiner.observe(session)  # під час пари підказки закриваються самі
+        assert session.page.locator("#tip").is_hidden()
+        assert joiner.send_chat(session, "Так, я тут")
+        assert joiner.read_chat(session)[-1] == ChatMessage("me1", "You", "Так, я тут")
     finally:
         joiner.leave(session)
 
