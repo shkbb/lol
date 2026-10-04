@@ -694,11 +694,14 @@ class Browser:
         args = ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
         if self.audio_tap is not None:
             args.append("--autoplay-policy=no-user-gesture-required")  # щоб збирач звуку стартував одразу
+            # Вуха беруть звук вкладки пари (getDisplayMedia) — без запитання на екрані. «Без звуку» тоді робить
+            # сам збирач (suppressLocalAudioPlayback): з --mute-audio записувалася б тиша.
+            args.append("--auto-accept-this-tab-capture")
         env = None
         if self.audio_sink:
             # Звук іде у віртуальний вихід: у динаміках тиша, а вуха його чують.
             env = {**os.environ, "PULSE_SINK": self.audio_sink}
-        elif self.mute_sound:
+        elif self.mute_sound and self.audio_tap is None:
             args.append("--mute-audio")
         return self._playwright.chromium.launch_persistent_context(
             env=env,
@@ -837,7 +840,24 @@ class Joiner:
         if self.browser.audio_tap is None:
             return
         try:
-            page.evaluate("() => window.__autoparaTap ? window.__autoparaTap.enable() : false")
+            if not page.evaluate("() => window.__autoparaTap ? window.__autoparaTap.enable() : false"):
+                return
+            # Звук самої вкладки — так чути справжній Meet на будь-якій ОС. Потрібен «жест користувача»,
+            # тож через CDP з userGesture; запит на дозвіл браузер програми не показує (див. Browser._launch).
+            cdp = page.context.new_cdp_session(page)
+            try:
+                suppress = "true" if self.settings.mute_sound else "false"
+                result = cdp.send("Runtime.evaluate", {
+                    "expression": f"window.__autoparaTap.captureTab({suppress})",
+                    "awaitPromise": True, "userGesture": True, "returnByValue": True,
+                })
+            finally:
+                cdp.detach()
+            outcome = (result.get("result") or {}).get("value")
+            if outcome == "ок":
+                log.info("👂 Слухаю звук вкладки пари")
+            elif outcome != "уже":
+                log.warning("Звук вкладки пари недоступний (%s) — слухаю, як вийде", outcome)
         except PlaywrightError as e:
             log.debug("Не вдалося увімкнути вуха у вкладці: %s", e)
 

@@ -18,7 +18,7 @@
   const SEND_SAMPLES = RATE / 2;
   const state = {
     enabled: false, ctx: null, mix: null, tracks: new Map(), webAudio: new Map(), pending: [], pendingLength: 0,
-    lane: null, voiced: {}, sent: 0,
+    lane: null, voiced: {}, sent: 0, tab: null,
   };
   window.__autoparaTap = {
     enable() {
@@ -26,16 +26,38 @@
       scan();
       return true;
     },
+    // Найнадійніше: звук самої вкладки (як «поділитися вкладкою зі звуком»), — хоч би як сторінка його грала.
+    // Браузер програми запущено так, що дозвіл дається без запитання. suppress — не грати в колонки («Без звуку»).
+    async captureTab(suppress) {
+      if (state.tab && state.tab.readyState === "live") return "уже";
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true, audio: true, preferCurrentTab: true, selfBrowserSurface: "include",
+          suppressLocalAudioPlayback: !!suppress, systemAudio: "exclude",
+        });
+        stream.getVideoTracks().forEach((track) => track.stop());
+        const track = stream.getAudioTracks()[0];
+        if (!track) return "без звукової доріжки";
+        state.tab = track;
+        const source = context().createMediaStreamSource(new MediaStream([track]));
+        source.connect(processor(state.ctx, "tab"));
+        return "ок";
+      } catch (e) {
+        return `не вийшло: ${e.name}`;
+      }
+    },
     stats() {  // для журналу в autopara -v: звідки береться звук
       const now = Date.now();
       const voiced = Object.fromEntries(Object.entries(state.voiced).map(([lane, at]) => [lane, Math.round((now - at) / 1000)]));
-      return { enabled: state.enabled, tracks: state.tracks.size, webAudio: state.webAudio.size, lane: state.lane,
+      return { enabled: state.enabled, tab: !!(state.tab && state.tab.readyState === "live"),
+               tracks: state.tracks.size, webAudio: state.webAudio.size, lane: state.lane,
                secondsSinceVoice: voiced, sent: state.sent, context: state.ctx && state.ctx.state };
     },
   };
 
   // Яку смугу віддавати: ту, де звук був щойно; поки вона звучить — не перемикаємось.
   function chosen() {
+    if (state.tab && state.tab.readyState === "live") return "tab";  // там уже все, що грає вкладка
     const now = Date.now();
     const recent = (lane) => state.voiced[lane] && now - state.voiced[lane] < 3000;
     if (state.lane && recent(state.lane)) return state.lane;
