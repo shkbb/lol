@@ -167,6 +167,8 @@ def test_telegram_commands():
     assistant.on_participants(KEY, 23)
     status = assistant.on_command("статус", at("10:00"))
     assert "Бази даних" in status and "до кінця 50 хв" in status and "23" in status
+    assistant.on_heard("Ляшко Денис, ви тут?", at("10:01"))  # наживо «статус» падав, щойно вуха щось чули
+    assert "👂 Ляшко Денис, ви тут?" in assistant.on_command("статус", at("10:02"))
 
 
 def test_snapshot_for_the_brain():
@@ -440,6 +442,15 @@ def test_teacher_asks_you_directly():
     say(assistant, "Ляшко, ви з нами?")
     [action] = assistant.take_actions()
     assert action.text == "Так, я тут" and "питає, чи ти тут" in action.reason
+
+
+@pytest.mark.parametrize("phrase", ["Ляшко Денис, ви присутні на парі?", "Ляшко Денис втут", "Ляшко, ти присутній?"])
+def test_teacher_asks_you_directly_as_heard_live(phrase):
+    """Так розпізнав Whisper наживо: «присутні на парі?» і злите «втут» — теж питання саме тобі."""
+    assistant, inbox = listening()
+    say(assistant, phrase)
+    [action] = assistant.take_actions()
+    assert action.text == "Так, я тут"
 
 
 def test_unclear_direct_question_is_not_answered():

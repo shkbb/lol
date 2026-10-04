@@ -121,7 +121,12 @@ class TelegramBot:
                         continue
                     if incoming.callback_id:  # прибрати «годинник» на кнопці
                         self._call("answerCallbackQuery", callback_query_id=incoming.callback_id)
-                    if reply := handle(incoming.text, incoming.is_reply):
+                    try:
+                        reply = handle(incoming.text, incoming.is_reply)
+                    except Exception:  # noqa: BLE001 — одна зламана команда не має глушити бота
+                        log.exception("Команда «%s» з Telegram не вдалася", incoming.text[:40])
+                        reply = "⚠️ Не вийшло — подробиці в журналі програми."
+                    if reply:
                         self.send(reply)
             except TelegramError as e:
                 log.warning("%s — повторю за хвилину", e)

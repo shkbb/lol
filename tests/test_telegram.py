@@ -51,6 +51,23 @@ def test_commands_only_from_my_chat():
     assert bot._offset == 4  # наступного разу ці оновлення не прийдуть знову
 
 
+def test_a_broken_command_does_not_silence_the_bot():
+    """Наживо «статус» упав — і бот замовк до перезапуску програми. Тепер — відповідь про помилку, і далі слухає."""
+    api = FakeApi([update(1, 42, "статус"), update(2, 42, "напиши тест")])
+    bot = TelegramBot("123:abc", chat_id=42, session=api)
+    stop = threading.Event()
+
+    def handle(text, is_reply):
+        if text == "статус":
+            raise ValueError("зламано")
+        stop.set()
+        return "Пишу «тест»."
+
+    bot.listen(handle, stop)
+    sent = [params["text"] for method, params, _ in api.calls if method == "sendMessage"]
+    assert sent == ["⚠️ Не вийшло — подробиці в журналі програми.", "Пишу «тест»."]
+
+
 def test_photo_is_uploaded_and_long_caption_follows_as_text():
     api = FakeApi()
     notifier = Notifier(TelegramBot("123:abc", chat_id=42, session=api), desktop=False)

@@ -86,8 +86,9 @@ PRESENCE_ANSWER_RE = re.compile(
 )
 # Викладач питає саме тебе, чи ти на парі: «Ляшко, ви тут?», «Ляшко, чуєте?».
 PRESENCE_QUESTION_RE = re.compile(
-    r"\b(ви|ти|вы|ты)\s+(тут|є|з нами|с нами|здесь|на зв'?язку|на связи|чуєте|чуєш|слышите|слышишь)|"
-    r"присутн\w*\s*\?|\bє\s*\?|\bесть\s*\?|\bтут\s*\?",
+    r"\b(ви|ти|вы|ты)\s+(тут|є|присутн\w*|присутству\w*|з нами|с нами|здесь|на зв'?язку|на связи|чуєте|чуєш|слышите|слышишь)|"
+    r"присутн\w*(\s+\S+){0,3}\s*\?|\bє\s*\?|\bесть\s*\?|\bтут\s*\?|"
+    r"\b(в|ві|ви)тут\b",  # Whisper зливає «ви тут» в одне слово: «Ляшко Денис втут»
     re.I,
 )
 BRAIN_ANSWER_TIMEOUT = timedelta(seconds=90)
@@ -925,7 +926,7 @@ class Assistant:
         if meeting.participants:
             lines.append(f"👥 Учасників: {meeting.participants}")
         if meeting.heard:
-            lines.append("👂 " + " … ".join(text for _, text in list(meeting.heard)[-3:]))
+            lines.append("👂 " + " … ".join(item[1] for item in list(meeting.heard)[-3:]))  # (час, текст, впевнено)
         if meeting.chat:
             lines.append("💬 " + " | ".join(f"{m.author}: {m.text}" for _, m in list(meeting.chat)[-3:]))
         return "\n".join(lines)

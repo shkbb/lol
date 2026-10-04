@@ -91,6 +91,12 @@ def test_transcriber_reports_confidence_and_uses_name_hints(monkeypatch):
 def test_real_call_by_name_is_not_mistaken_for_hint_echo():
     assert not ears.is_hint_echo("Ляшко Денис", "Ляшко Денис, Петренко П.П., Бази даних")
     assert ears.is_hint_echo("Ляшко Денис. Бази даних.", "Ляшко Денис, Петренко П.П., Бази даних")
+    # Наживо на «ар ар ар» з Discord Whisper «почув» шматок імені й назву пари — це вигадка, не виклик.
+    hint = "Ляшко Денис, Тестовий вхід"
+    assert ears.is_hint_echo("Денис, Тестовий вхід", hint)
+    assert ears.is_hint_echo("Тестовий вхід, Денис, Тестовий вхід, момент з Тестовий вхід", hint)
+    assert not ears.is_hint_echo("Ляшко Денис, ви тут?", hint)
+    assert not ears.is_hint_echo("Денисе, а що скажете про тестовий вхід у базу?", hint)
 
 
 def test_old_faster_whisper_without_hotwords(monkeypatch):

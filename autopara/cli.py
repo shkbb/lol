@@ -7,6 +7,7 @@ import logging
 import secrets
 import signal
 import sys
+import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -39,6 +40,11 @@ def setup_logging(config: Config | None, verbose: bool) -> None:
     )
     for noisy in ("httpx", "httpcore", "huggingface_hub", "urllib3"):  # «HTTP Request: …» лише засмічує журнал
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Падіння фонового потоку (Telegram, вуха, мозок) — у журнал, а не в нікуди (без консолі stderr не видно).
+    threading.excepthook = lambda args: log.error(
+        "Фоновий потік «%s» упав", args.thread.name if args.thread else "?",
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+    )
 
 
 def _client(config: Config):

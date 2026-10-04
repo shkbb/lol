@@ -318,7 +318,10 @@ class WhisperTranscriber:
         import numpy as np
 
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-        options = dict(language=self.language, vad_filter=True, beam_size=1, condition_on_previous_text=False)
+        # temperature=0 — один прохід: на нечіткому звуці Whisper інакше перерозпізнає шматок до 6 разів
+        # (0,2…1,0) — і точна модель перестає встигати за парою, а «гарячіші» спроби ще й вигадують.
+        options = dict(language=self.language, vad_filter=True, beam_size=1, condition_on_previous_text=False,
+                       temperature=0.0)
         hint = self.hints() if self.hints else ""
         if hint and self._hotwords:
             options["hotwords"] = hint
@@ -336,11 +339,21 @@ class WhisperTranscriber:
 
 
 def is_hint_echo(text: str, hint: str) -> bool:
-    """Whisper іноді «вимовляє» саму підказку на тиші. Справжня мова рідко містить разом
-    кілька її частин (твоє ім'я, викладача й назву пари), а сам виклик «Ляшко Денис» — лишаємо."""
+    """Whisper іноді «вимовляє» саму підказку на тиші чи незрозумілому звуці («Денис, Тестовий вхід»).
+    Справжня мова рідко складається майже лише зі слів підказки, ще й з кількох її частин (твоє ім'я,
+    викладач, назва пари), а сам виклик «Ляшко Денис» — лишаємо."""
     letters = _letters(text)
     parts = [_letters(part) for part in hint.split(",")]
-    return sum(1 for part in parts if part and part in letters) >= 2
+    if sum(1 for part in parts if part and part in letters) >= 2:
+        return True
+    words = [word for word in letters.split() if len(word) > 1]  # «з», «і» нічого не важать
+    part_words = [set(part.split()) for part in parts if part]
+    known = set().union(*part_words) if part_words else set()
+    if not words or not known:
+        return False
+    share = sum(1 for word in words if word in known) / len(words)
+    touched = sum(1 for part in part_words if part & set(words))
+    return share >= 0.75 and touched >= 2
 
 
 def is_confident(avg_logprob: float, no_speech_prob: float) -> bool:
