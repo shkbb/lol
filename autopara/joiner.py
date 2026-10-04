@@ -31,13 +31,14 @@ from .ears import TAP_SCRIPT
 from .leaving import Observation
 from .links import meet_url, with_account, zoom_app_url, zoom_web_url
 from .planner import Visit
+from .screen import Screen, Viewer
 from .session import JoinDenied, JoinError, Session
 
 log = logging.getLogger(__name__)
 
 MEET_ORIGIN = "https://meet.google.com"
 ZOOM_ORIGIN = "https://app.zoom.us"
-LOGIN_HINT = "потрібно увійти в Google-акаунт: запусти `autopara login`"
+LOGIN_HINT = "потрібно увійти в Google: «Налаштування» → «Акаунти» → «Увійти в Google»"
 
 # Інтерфейс Meet/Zoom буває англійською, українською чи російською — шукаємо всіма трьома.
 # Ці шаблони перевіряє браузер (JavaScript), а там \w і \b не розуміють кирилиці — тож лише \s, \S і «.*».
@@ -435,7 +436,7 @@ def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime, helper
         name_box = _first_visible(page.get_by_role("textbox", name=NAME_RE))
         if name_box is not None and not name_box.input_value():
             if not settings.display_name:
-                raise JoinError(f"Meet просить ім'я гостя — {LOGIN_HINT} (або задай display_name)", retry=False)
+                raise JoinError(f"Meet просить ім'я гостя — {LOGIN_HINT} (або впиши «Ім'я для входу гостем» в «Акаунтах»)", retry=False)
             name_box.fill(settings.display_name)
         if button := _first_visible(page.get_by_role("button", name=JOIN_RE)):
             if button.is_enabled():
@@ -590,6 +591,20 @@ LIST_ACCOUNTS = "https://accounts.google.com/ListAccounts?gpsia=1&source=Chromiu
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
+def chrome_user_agent() -> str:
+    """Підпис звичайного Chrome тієї ж версії, що й браузер програми (невидимий підписується «HeadlessChrome»)."""
+    try:
+        import playwright
+
+        data = json.loads((Path(playwright.__file__).parent / "driver" / "package" / "browsers.json").read_text())
+        version = next(b["browserVersion"] for b in data["browsers"] if b["name"] == "chromium").split(".")[0]
+    except (OSError, ValueError, KeyError, StopIteration):
+        return ""
+    system = {"win32": "Windows NT 10.0; Win64; x64", "darwin": "Macintosh; Intel Mac OS X 10_15_7"}.get(
+        sys.platform, "X11; Linux x86_64")
+    return f"Mozilla/5.0 ({system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version}.0.0.0 Safari/537.36"
+
+
 def parse_google_accounts(text: str) -> list[str]:
     """Відповідь ListAccounts: ["gaia.l.a.r", [["gaia.l.a", 1, "Ім'я", "пошта", ...], ...]] — беремо пошти."""
     try:
@@ -607,25 +622,29 @@ def parse_google_accounts(text: str) -> list[str]:
 class Browser:
     """Вбудований Chromium програми з окремим постійним профілем: вхід у Google зберігається між запусками.
 
-    Вікно браузера з'являється лише тоді, коли воно потрібне (пара, вхід у Google), і закривається,
-    щойно стає непотрібним.
+    Працює невидимо, а його вкладки видно у вікні програми (див. screen.py) — окремого вікна браузера немає.
+    Запускається, лише коли потрібен (пара, вхід у Google), і закривається, щойно стає непотрібним.
     """
 
     def __init__(
         self,
         profile_dir: Path,
         mute_sound: bool = True,
-        headless: bool = False,
+        headless: bool = True,
         audio_sink: str = "",
         audio_tap: Callable[[str], None] | None = None,
+        screen: Screen | None = None,
     ):
         self.profile_dir = profile_dir
         self.audio_sink = audio_sink  # куди віддавати звук, щоб «вуха» могли його слухати
         self.audio_tap = audio_tap  # або: сторінка пари сама віддає звук сюди (base64 PCM 16 кГц)
         self.mute_sound = mute_sound
-        self.headless = headless
+        # Для розробки: AUTOPARA_BROWSER_WINDOW=1 — звичайне вікно браузера замість картинки у вікні програми.
+        self.headless = headless and not os.environ.get("AUTOPARA_BROWSER_WINDOW")
+        self.screen = screen if self.headless else None
         self._playwright = None
         self._context: BrowserContext | None = None
+        self._viewer: Viewer | None = None
         self._blank: Page | None = None  # порожня вкладка щойно відкритого вікна — беремо її, без зайвих вкладок
 
     def context(self) -> BrowserContext:
@@ -637,14 +656,18 @@ class Browser:
                 self._context.expose_binding("__autoparaAudio", lambda source, data: tap(data))
                 self._context.add_init_script(script=TAP_SCRIPT.read_text(encoding="utf-8"))
             self._blank = self._context.pages[0] if self._context.pages else None
+            if self.screen is not None:
+                self._viewer = Viewer(self.screen, self._context)
         return self._context
 
     def new_page(self) -> Page:
         context = self.context()
         page, self._blank = self._blank, None
-        if page is not None and not page.is_closed():
-            return page
-        return context.new_page()
+        if page is None or page.is_closed():
+            page = context.new_page()
+        if self._viewer is not None:
+            self._viewer.show(page, own=True)  # у вікні програми видно саме її
+        return page
 
     def any_page(self) -> Page | None:
         """Будь-яка відкрита вкладка, не запускаючи браузер."""
@@ -682,9 +705,38 @@ class Browser:
         if not busy:
             self.close()
 
+    def pump(self, seconds: float) -> None:
+        """Чекає ``seconds``, але весь час обслуговує браузер: доставляє події (кадри для вирізок), а коли
+        браузер видно у вікні програми — трансляцію й дії людини, без помітної затримки."""
+        deadline = monotonic() + seconds
+        while True:
+            viewer = self._viewer
+            if viewer is not None:
+                viewer.serve()
+            left = deadline - monotonic()
+            if left <= 0:
+                return
+            page = self.any_page()
+            if page is None:
+                time.sleep(left)
+                return
+            step = min(left, 0.03) if self.screen is not None and self.screen.watching else left
+            if viewer is not None:
+                viewer.pumping = True
+            try:
+                page.wait_for_timeout(step * 1000)
+            except PlaywrightError:
+                time.sleep(min(left, 0.05))
+            finally:
+                if viewer is not None:
+                    viewer.pumping = False
+
     def _forget(self) -> None:
         self._context = None
         self._blank = None
+        if self._viewer is not None:
+            self._viewer.closed()
+            self._viewer = None
 
     def _launch(self) -> BrowserContext:
         if self._playwright is None:
@@ -692,6 +744,8 @@ class Browser:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         disallow_browser_signin(self.profile_dir)
         args = ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
+        # Без цього прапорця Google не пускає логінитись («браузер може бути небезпечним»).
+        ignore = ["--enable-automation"]
         if self.audio_tap is not None:
             args.append("--autoplay-policy=no-user-gesture-required")  # щоб збирач звуку стартував одразу
             # Вуха беруть звук вкладки пари (getDisplayMedia) — без запитання на екрані. «Без звуку» тоді робить
@@ -701,16 +755,32 @@ class Browser:
         if self.audio_sink:
             # Звук іде у віртуальний вихід: у динаміках тиша, а вуха його чують.
             env = {**os.environ, "PULSE_SINK": self.audio_sink}
-        elif self.mute_sound and self.audio_tap is None:
-            args.append("--mute-audio")
+        mute = self.mute_sound and not self.audio_sink and self.audio_tap is None
+        options: dict = {}
+        if self.headless:
+            # Невидимий Chromium — справжній Chrome, лише без вікна. Але без відеокарти Meet гальмує,
+            # а з підписом «HeadlessChrome» Google може не пустити — тож вмикаємо її й підписуємось як Chrome.
+            args.append("--enable-gpu")
+            agent = chrome_user_agent()
+            if agent:
+                args.append(f"--user-agent={agent}")
+            ignore.append("--hide-scrollbars")  # людині у вікні програми смуги прокрутки потрібні
+            if not mute:
+                ignore.append("--mute-audio")  # Playwright глушить невидимий браузер сам
+            width, height = self.screen.size if self.screen is not None else (1280, 800)
+            options = {"channel": "chromium", "viewport": {"width": width, "height": height},
+                       "device_scale_factor": self.screen.scale if self.screen is not None else 1}
+        else:
+            if mute:
+                args.append("--mute-audio")
+            options = {"no_viewport": True}
         return self._playwright.chromium.launch_persistent_context(
             env=env,
             user_data_dir=str(self.profile_dir),
             headless=self.headless,
             args=args,
-            # Без цього прапорця Google не пускає логінитись («браузер може бути небезпечним»).
-            ignore_default_args=["--enable-automation"],
-            no_viewport=True,
+            ignore_default_args=ignore,
+            **options,
         )
 
     def close(self) -> None:
@@ -730,13 +800,14 @@ class Joiner:
         self,
         settings: JoinSettings,
         profile_dir: Path,
-        headless: bool = False,
+        headless: bool = True,
         opener=open_uri,
         audio_sink: str = "",
         frames=None,
         audio_tap: Callable[[str], None] | None = None,
         zoom_app_heard: bool = True,
         chooser: Callable[[str, list[str]], int | None] | None = None,
+        screen: Screen | None = None,
     ):
         self.settings = settings
         self.frames = frames  # FrameBuffer для відеовирізок, або None
@@ -744,7 +815,7 @@ class Joiner:
         # не пустив, запам'ятовуємо — туди надалі одразу клієнтом.
         self.zoom_app_heard = zoom_app_heard
         self._app_links_file = profile_dir.parent / "zoom-app-links.json"
-        self.browser = Browser(profile_dir, settings.mute_sound, headless, audio_sink, audio_tap)
+        self.browser = Browser(profile_dir, settings.mute_sound, headless, audio_sink, audio_tap, screen)
         # Мозок — запасний вихід, коли знайомої кнопки входу немає (див. ButtonHelper).
         self.helper = ButtonHelper(chooser, profile_dir.parent / "learned-buttons.json") if chooser else None
         self._open_uri = opener
@@ -884,15 +955,8 @@ class Joiner:
             log.warning("Не вдалося увімкнути запис кадрів для вирізок: %s", e)
 
     def idle(self, seconds: float) -> None:
-        """Чекає, але дає браузеру доставляти події (кадри для вирізок). time.sleep їх би затримав."""
-        page = self.browser.any_page()
-        if page is not None:
-            try:
-                page.wait_for_timeout(seconds * 1000)
-                return
-            except PlaywrightError:
-                pass
-        time.sleep(seconds)
+        """Чекає, але дає браузеру доставляти події (кадри, дії людини у вікні). time.sleep їх би затримав."""
+        self.browser.pump(seconds)
 
     def observe(self, session: Session) -> Observation:
         """Що зараз у зустрічі. Якщо щось пішло не так — «нічого не відомо», і ніхто нікуди не виходить."""

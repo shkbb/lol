@@ -73,7 +73,7 @@ def test_main_window_sections(running_app, qt):
     window, _ = window_for(server, qt)
     assert window.root.currentWidget() is window.main  # група вже є — одразу програма, без майстра
     labels = [window.nav.item(i).text() for i in range(window.nav.count())]
-    assert labels == ["Сьогодні", "Розклад", "Налаштування"] and window.log_button.text() == "Журнал"
+    assert labels == ["Сьогодні", "Розклад", "Браузер", "Налаштування"] and window.log_button.text() == "Журнал"
     tabs = [window.settings.tabs.tabText(i) for i in range(window.settings.tabs.count())]
     assert tabs == ["Пари", "Акаунти", "Помічник", "Telegram", "Загальне"]
     window.go("settings", "telegram")
@@ -257,3 +257,71 @@ def test_show_window_of_the_running_copy(running_app, qt, tmp_path, monkeypatch)
         assert app_module.show_running(instance) == "shown" and shown == [1]
     finally:
         app_module.release_lock(lock)
+
+
+def test_browser_page_passes_mouse_keys_and_clipboard(running_app, qt):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtTest import QTest
+
+    from autopara.gui.browser import key_event
+
+    server, controller, _ = running_app
+    window, _ = window_for(server, qt)
+    page, screen = window.browser, controller.screen
+    window.show()
+    window.go("browser")
+    wait_until(lambda: screen.watching)  # сторінку видно — браузер транслює
+    assert "закритий" in page.placeholder.text()  # браузер ще не відкривався
+
+    view = page.view
+    view.resize(900, 600)
+    view._meta = {"deviceWidth": 450, "deviceHeight": 300}  # кадр удвічі менший за вікно — координати масштабуються
+    screen.take_input()
+    QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(300, 200))
+    sent = [params for _, method, params in screen.take_input() if method == "Input.dispatchMouseEvent"]
+    assert [(p["type"], p["x"], p["y"], p["button"]) for p in sent] == [
+        ("mousePressed", 150.0, 100.0, "left"), ("mouseReleased", 150.0, 100.0, "left")]
+
+    QTest.keyClick(view, Qt.Key.Key_A)
+    QTest.keyClick(view, Qt.Key.Key_Return)
+    keys = [(p["type"], p["key"], p.get("text")) for _, _, p in screen.take_input()]
+    assert keys == [("keyDown", "a", "a"), ("keyUp", "a", None), ("keyDown", "Enter", "\r"), ("keyUp", "Enter", None)]
+    ctrl = 2
+    assert key_event(ord("С"), "\x03", ctrl)["key"] == "c"  # Ctrl+С в українській розкладці — це Ctrl+C
+    assert key_event(ord("ї"), "ї", 0)["text"] == "ї"
+
+    QGuiApplication.clipboard().setText("посилання")
+    QTest.keyClick(view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)  # вставка — з буфера системи
+    QTest.keyClick(view, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    clipboard = [item for item in screen.take_input() if item[1] != "Input.dispatchKeyEvent"]  # без самої клавіші Ctrl
+    assert clipboard == [("input", "Input.insertText", {"text": "посилання"}), ("copy", "", {})]
+    view._on_copy("скопійовано зі сторінки")
+    wait_until(lambda: QGuiApplication.clipboard().text() == "скопійовано зі сторінки")
+
+    page._emit_tabs([{"title": "Meet", "url": "https://meet.google.com/abc", "closable": False}], 0)
+    wait_until(lambda: page.stack.currentWidget() is view)
+    assert page.tab_bar.tabText(0) == "Meet" and page.host.text() == "meet.google.com"
+    window.go("today")
+    wait_until(lambda: not screen.watching)  # сторінку сховали — трансляція зупиняється
+
+
+def test_login_opens_browser_inside_the_wizard_and_returns(running_app, qt):
+    server, _, _ = running_app
+    window, _ = window_for(server, qt)
+    window.show_wizard()
+    window.bridge.browser_wanted.emit()  # «Увійти в Google» у майстрі
+    assert window.root.currentWidget() is window.wizard_browser and window.browser.wizard_back.isVisibleTo(window.browser)
+    window.browser.update_state({"login_open": True})
+    window._login_seen = True
+    assert window.browser.title.text() == "Вхід у Google" and not window.browser.done.isVisibleTo(window.browser)
+    window.refresh()  # програма каже: входу вже немає (увійшли) — назад до майстра
+    assert window.root.currentWidget() is window.wizard and not window.browser.wizard_mode
+
+    window.show_main()
+    window.go("settings", "accounts")
+    window.bridge.browser_wanted.emit()  # «Увійти ще в один акаунт» у налаштуваннях
+    assert window.current_key() == "browser"
+    window._login_seen = True
+    window.refresh()
+    assert window.current_key() == "settings"

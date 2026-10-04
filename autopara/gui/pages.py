@@ -126,6 +126,8 @@ class TodayPage(w.Page):
             line.addWidget(name, 1)
             if session.get("participants"):
                 line.addWidget(w.label(f"{session['participants']} учасників", "muted"))
+            if session.get("in_browser", True):
+                line.addWidget(w.button("Дивитись", "", lambda: self.go("browser")))
             line.addWidget(w.button("Вийти", "", lambda key=session["key"]: self.bridge.command("leave", key)))
             self.banners.addWidget(row)
 

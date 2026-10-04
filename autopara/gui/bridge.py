@@ -73,6 +73,8 @@ class _Task:
 class Bridge(QObject):
     """Доступ вікна до програми: ``api()`` — одразу, ``run()`` — у фоні."""
 
+    browser_wanted = Signal()  # відкрили вхід у Google — показати сторінку «Браузер»
+
     def __init__(self, server):
         super().__init__()
         self.server = server

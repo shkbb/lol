@@ -514,7 +514,7 @@ class AccountsPanel(QWidget):
         self.choice.setSpacing(6)
         self.login = w.button("Увійти в Google", "big", self._login)
         self.another = w.button("Увійти ще в один акаунт", "", self._login)
-        self.done = w.button("Готово — закрити вікно входу", "", self._close_login)
+        self.done = w.button("Готово — закрити вхід", "", self._close_login)
         self.message = w.label("", "hint")
         layout.addWidget(self.status)
         layout.addWidget(self.explain)
@@ -539,10 +539,13 @@ class AccountsPanel(QWidget):
         self.update_state({})
 
     def _login(self) -> None:
-        self.message.setText("Відкриваю вікно браузера програми…")
-        self.bridge.command("login", ok=lambda _: self.message.setText(
-            "Увійди у вікні браузера. Програма побачить акаунт сама — тут з'явиться «✓ Увійдено»."),
-            fail=lambda m: self.message.setText(f"⚠ {m}"), timeout=900)
+        self.message.setText("Відкриваю браузер програми…")
+        self.bridge.command("login", ok=lambda _: self._opened(), fail=lambda m: self.message.setText(f"⚠ {m}"),
+                            timeout=900)
+
+    def _opened(self) -> None:
+        self.message.setText("Увійди на сторінці «Браузер». Програма побачить акаунт сама — тут з'явиться «✓ Увійдено».")
+        self.bridge.browser_wanted.emit()
 
     def _close_login(self) -> None:
         self.bridge.command("close_login", ok=lambda _: self.message.setText(""))
@@ -571,7 +574,7 @@ class AccountsPanel(QWidget):
                                  "З цього акаунта програма заходитиме на пари.")
         else:
             self.status.setText("Ще не увійшов у Google")
-            self.explain.setText("Відкриється окреме вікно браузера програми — увійди в університетську пошту. "
+            self.explain.setText("Браузер програми відкриється прямо тут, у вікні, — увійди в університетську пошту. "
                                  "Вхід збережеться: робити це треба лише раз.")
 
     def _draw_accounts(self) -> None:

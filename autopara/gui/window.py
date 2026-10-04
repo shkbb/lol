@@ -25,12 +25,13 @@ from PySide6.QtWidgets import (
 
 from .. import app as app_module
 from . import widgets as w
+from .browser import BrowserPage
 from .pages import LogPage, SchedulePage, TodayPage
 from .settings import SettingsPage
 from .wizard import Wizard
 
 ICON = Path(__file__).with_name("icon.svg")
-PAGES = [("today", "Сьогодні"), ("schedule", "Розклад"), ("settings", "Налаштування")]
+PAGES = [("today", "Сьогодні"), ("schedule", "Розклад"), ("browser", "Браузер"), ("settings", "Налаштування")]
 
 
 def app_icon() -> QIcon:
@@ -59,6 +60,16 @@ class MainWindow(QMainWindow):
         self.main.setObjectName("root")
         self.root.addWidget(self.wizard)
         self.root.addWidget(self.main)
+        # Браузер програми — одна сторінка: у меню «Браузер», а під час майстра — на весь екран замість майстра.
+        self.browser = BrowserPage(model, bridge)
+        self.browser.back_to_wizard.connect(self._back_to_wizard)
+        self.browser_slot = self._slot()
+        self.wizard_browser = self._slot()
+        self.root.addWidget(self.wizard_browser)
+        self._login_shown = False  # браузер показано заради входу в Google…
+        self._login_seen = False  # …і програма вже підтвердила, що вхід відкрито
+        self._return_to = ""
+        bridge.browser_wanted.connect(self.show_browser)
 
         body = QHBoxLayout(self.main)
         body.setContentsMargins(0, 0, 0, 0)
@@ -69,7 +80,8 @@ class MainWindow(QMainWindow):
         self.schedule = SchedulePage(model, bridge, self.go)
         self.settings = SettingsPage(model, bridge, self)
         self.log = LogPage(model, bridge)
-        for page in (self.today, self.schedule, self.settings, self.log):
+        self.browser_slot.layout().addWidget(self.browser)
+        for page in (self.today, self.schedule, self.browser_slot, self.settings, self.log):
             self.pages.addWidget(page)
         body.addWidget(self.pages, 1)
 
@@ -132,6 +144,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.log_button)
         return side
 
+    @staticmethod
+    def _slot() -> QWidget:
+        slot = QWidget()
+        slot.setObjectName("root")
+        layout = QVBoxLayout(slot)
+        layout.setContentsMargins(0, 0, 0, 0)
+        return slot
+
     def _tray(self) -> QSystemTrayIcon | None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return None  # напр., GNOME без розширення AppIndicator — тоді вікно відкривають ярликом
@@ -173,12 +193,44 @@ class MainWindow(QMainWindow):
         self.log_button.setProperty("active", False)
         w.restyle(self.log_button)
 
+    def current_key(self) -> str:
+        row = self.nav.currentRow()
+        return PAGES[row][0] if 0 <= row < len(PAGES) and self.pages.currentWidget() is not self.log else "log"
+
+    def show_browser(self) -> None:
+        """Відкрили вхід у Google — показати браузер програми: у майстрі — замість майстра, інакше — сторінку «Браузер»."""
+        self._login_shown, self._login_seen = True, False
+        if self.root.currentWidget() in (self.wizard, self.wizard_browser):
+            self.wizard_browser.layout().addWidget(self.browser)
+            self.browser.set_wizard_mode(True)
+            self.root.setCurrentWidget(self.wizard_browser)
+            return
+        if self.current_key() != "browser":
+            self._return_to = self.current_key()
+        self.go("browser")
+
+    def _back_to_wizard(self) -> None:
+        self.browser_slot.layout().addWidget(self.browser)
+        self.browser.set_wizard_mode(False)
+        self.root.setCurrentWidget(self.wizard)
+
+    def _login_finished(self) -> None:
+        """Увійшли — повернутися туди, звідки відкривали вхід (майстер чи «Налаштування» → «Акаунти»)."""
+        self._login_shown = False
+        if self.root.currentWidget() is self.wizard_browser:
+            self._back_to_wizard()
+        elif self.current_key() == "browser" and self._return_to:
+            self.go(self._return_to)
+        self._return_to = ""
+
     def show_wizard(self) -> None:
         self.wizard.go(0)
         self.root.setCurrentWidget(self.wizard)
         self.statusBar().show()
 
     def show_main(self) -> None:
+        if self.browser.wizard_mode:
+            self._back_to_wizard()
         self.root.setCurrentWidget(self.main)
         self.go("today")
 
@@ -196,6 +248,11 @@ class MainWindow(QMainWindow):
         self.today.update_state(state)
         self.settings.update_state(state)
         self.wizard.update_state(state)
+        self.browser.update_state(state)
+        if state.get("login_open"):
+            self._login_seen = True
+        elif self._login_shown and self._login_seen:
+            self._login_finished()
 
     def show_status(self, state: str, text: str) -> None:
         self.save_state.setText(text)

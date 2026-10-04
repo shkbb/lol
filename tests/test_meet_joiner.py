@@ -202,7 +202,7 @@ def test_denied_meeting_is_not_retried(joiner):
 
 
 def test_login_required(joiner):
-    with pytest.raises(JoinError, match="autopara login") as error:
+    with pytest.raises(JoinError, match="Увійти в Google") as error:
         joiner.join(visit("login"))
     assert not error.value.retry
     assert LOGIN_HINT in str(error.value)

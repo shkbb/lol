@@ -127,7 +127,7 @@ def cmd_login(args, config: Config) -> None:
 
     if not browser_setup.ensure():
         raise ConfigError(browser_setup.status()["error"])
-    browser = Browser(config.profile_dir, mute_sound=False)
+    browser = Browser(config.profile_dir, mute_sound=False, headless=False)  # без вікна програми — звичайне вікно
     accounts = _google_accounts(config)
     try:
         browser.new_page().goto("https://accounts.google.com/")
@@ -163,7 +163,7 @@ def cmd_join(args, config: Config) -> None:
     with assistant_stack(config, clock) as stack:
         joiner = Joiner(
             config.join, config.profile_dir, audio_sink=stack.audio_sink, frames=stack.frames, audio_tap=stack.audio_tap,
-            zoom_app_heard=stack.zoom_app_heard, chooser=stack.choose,
+            zoom_app_heard=stack.zoom_app_heard, chooser=stack.choose, headless=False,
         )
         runner = Runner(config, _client(config), joiner, clock=clock, assistant=stack.assistant, app_audio=stack.app_audio)
         runner.plan = Plan(visits=[visit])

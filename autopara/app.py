@@ -40,12 +40,16 @@ from .ears import whisper_available
 from .links import platform_of, resolve
 from .planner import Visit
 from .rozklad import Lesson, RozkladError
+from .screen import Screen
 from .sources import make_source, resolve_target
 
 log = logging.getLogger(__name__)
 
 PROFILES = Path(__file__).resolve().parent.parent / "profiles"  # профілі з репозиторію (якщо є)
 POLL_SECONDS = 20
+GOOGLE_LOGIN = "https://accounts.google.com/ServiceLogin?hl=uk"
+GOOGLE_ADD_ACCOUNT = "https://accounts.google.com/AddSession?hl=uk"
+LOGIN_SETTLE_SECONDS = 2  # увійшли — ще мить, щоб Google доставив кукі, і вкладку входу закриваємо
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 
 
@@ -87,8 +91,13 @@ class Controller:
         self._next_tick: datetime | None = None
         self._last_error = ""
         self.google_accounts: list[str] = read_accounts(config)  # у які Google-акаунти увійдено (кеш)
-        self._login_open = False  # відкрито вікно «Увійти в Google» — стежимо, коли увійдуть
+        self._login_open = False  # відкрито вхід у Google — стежимо, коли увійдуть
+        self._login_pages: list = []
+        self._accounts_at_login: set[str] = set()
+        self._login_done_at = 0.0
         self._next_accounts_check = 0.0
+        # Браузер програми показується у її вікні (див. screen.py); вікно й браузер спілкуються через це.
+        self.screen = Screen()
 
     # --- Із будь-якого потоку ----------------------------------------------------
 
@@ -138,7 +147,11 @@ class Controller:
                     return
             self._tick_if_due()
             self._act_now()
-            self._watch_login()
+            try:
+                self._watch_login()
+            except Exception:  # noqa: BLE001 — вхід не повинен зупиняти програму
+                log.exception("Помилка під час входу в Google")
+                self._login_open = False
             if self.joiner is not None:
                 self.joiner.idle(0.5)  # чекаємо, даючи браузеру доставляти події
             else:
@@ -162,7 +175,7 @@ class Controller:
         info = stack.enter_context(assistant_stack(self.config, self.clock))
         joiner = Joiner(
             self.config.join, self.config.profile_dir, audio_sink=info.audio_sink, frames=info.frames,
-            audio_tap=info.audio_tap, zoom_app_heard=info.zoom_app_heard, chooser=info.choose,
+            audio_tap=info.audio_tap, zoom_app_heard=info.zoom_app_heard, chooser=info.choose, screen=self.screen,
         )
         runner = Runner(
             self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant,
@@ -310,38 +323,63 @@ class Controller:
         return "not_found"
 
     def _do_login(self) -> str:
+        """Вхід у Google — у браузері програми, який видно в її вікні. Уже є акаунт — одразу «додати ще один»."""
         if not browser_setup.ensure():
             raise ConfigError(browser_setup.status()["error"])
         if self.joiner is None:
             from .joiner import Joiner
 
-            self.joiner = Joiner(self.config.join, self.config.profile_dir)
-        self.joiner.browser.new_page().goto("https://accounts.google.com/")
+            self.joiner = Joiner(self.config.join, self.config.profile_dir, screen=self.screen)
+        browser = self.joiner.browser
+        pages = []
         if self.config.join.zoom_mode == "browser":
-            self.joiner.browser.new_page().goto("https://zoom.us/signin")
+            pages.append(browser.new_page())
+            pages[-1].goto("https://zoom.us/signin", wait_until="commit")
+        pages.append(browser.new_page())  # Google — останньою, щоб саме її було видно
+        pages[-1].goto(GOOGLE_ADD_ACCOUNT if self.google_accounts else GOOGLE_LOGIN, wait_until="commit")
+        self._login_pages = [page for page in self._login_pages if not page.is_closed()] + pages
+        self._accounts_at_login = set(self.google_accounts)
         self._login_open = True
+        self._login_done_at = 0.0
         self._next_accounts_check = 0.0
         return "opened"
 
     def _do_close_login(self) -> str:
-        """«Готово» після входу: закрити вікно браузера (якщо в ньому не йде пара)."""
+        """Увійшли (або передумали): закрити вкладки входу, а браузер — якщо в ньому не йде пара."""
         self._check_accounts()
         self._login_open = False
-        if self.joiner is not None and (self.runner is None or not self.runner.active):
-            self.joiner.browser.close()
+        self._login_done_at = 0.0
+        pages, self._login_pages = self._login_pages, []
+        if self.joiner is not None:
+            for page in pages:
+                try:
+                    if not page.is_closed():
+                        page.close()
+                except Exception:  # noqa: BLE001 — браузер уже закрили
+                    pass
+            self.joiner.browser.close_if_idle()
         return "closed"
 
     def _watch_login(self) -> None:
-        """Поки відкрито вікно входу — раз на кілька секунд дивимось, у які акаунти вже увійшли."""
+        """Поки відкрито вхід — раз на кілька секунд дивимось, у які акаунти вже увійшли. З'явився новий —
+        вхід готовий: вкладку входу закриваємо самі, натискати нічого не треба."""
         if not self._login_open:
             return
         if self.joiner is None or not self.joiner.browser.is_open():
-            self._login_open = False  # вікно входу закрили
+            self._login_open = False  # браузер закрився
+            self._publish()
+            return
+        if self._login_done_at and time.monotonic() >= self._login_done_at:
+            log.info("Вхід у Google готовий — закриваю вкладку входу")
+            self._do_close_login()
             self._publish()
             return
         if time.monotonic() >= self._next_accounts_check:
             self._next_accounts_check = time.monotonic() + 3
             self._check_accounts()
+            fresh = set(self.google_accounts) - self._accounts_at_login
+            if fresh and not self._login_done_at and self.config.join.zoom_mode != "browser":
+                self._login_done_at = time.monotonic() + LOGIN_SETTLE_SECONDS
 
     def _first_accounts_check(self) -> None:
         """Список Google-акаунтів ще невідомий (перший запуск нової версії) — один раз тихо дивимось, у які
@@ -397,6 +435,7 @@ class Controller:
                     "platform": session.visit.platform,
                     "url": session.visit.url,
                     "participants": getattr(runner.last_seen.get(key), "participants", None),
+                    "in_browser": getattr(session, "page", None) is not None,  # а не в Zoom-клієнті
                 }
                 for key, session in runner.active.items()
             ]
