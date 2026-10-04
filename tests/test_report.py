@@ -119,3 +119,17 @@ def test_decisions_go_before_background_summaries():
         threading.Event().wait(0.05)
     worker.stop()
     assert order == ["decision", "summary"]
+
+
+def test_summary_is_kept_for_questions_about_past_lessons(tmp_path):
+    from autopara.report import past_lessons
+
+    (tmp_path / "2026-10-05 09-30 Бази даних (Лк).txt").write_text(
+        "Бази даних (Лк) — 05.10.2026 09:30–10:50, Петренко П.П.\n\n--- Підсумок ---\nПро що: індекси.\n"
+        "--- Розшифровка ---\n[09:31:00] Добрий день\n", encoding="utf-8")
+    (tmp_path / "2026-10-05 11-10 Java (Лб).txt").write_text(
+        "Java (Лб) — 05.10.2026 11:10–12:30, Коваль\n\n[11:12:00] Сьогодні колекції\n", encoding="utf-8")
+    text = past_lessons(tmp_path)
+    assert "Бази даних (Лк)" in text and "Підсумок: Про що: індекси." in text and "Добрий день" not in text
+    assert "Java (Лб)" in text and "Сьогодні колекції" in text
+    assert past_lessons(tmp_path / "немає") == ""

@@ -22,6 +22,11 @@ CHUNK_PROMPT = (
     "розшифровки (можливі помилки розпізнавання). Випиши 2–5 коротких пунктів українською: що пояснювали, "
     "що робили, і окремо — будь-які завдання, дедлайни, оголошення. Без вступу."
 )
+QUESTION_PROMPT = (
+    "Ти помічник студента на онлайн-парах. Тобі дають, що відомо: стан пари, автоматичну розшифровку "
+    "(з помилками розпізнавання), чат і підсумки минулих пар. Відповідай на питання студента українською, "
+    "коротко (до 100 слів) і лише за цими даними. Якщо даних не вистачає — так і скажи, не вигадуй."
+)
 FINAL_PROMPT = (
     "Ти складаєш короткий звіт про пару для студента, якого на ній не було. Тобі дають конспект пари "
     "частинами і, можливо, повідомлення з чату. Напиши українською, до 150 слів, рівно в такому форматі:\n"
@@ -77,23 +82,50 @@ class Reporter:
                 log.warning("Не вдалося скласти звіт: %s", e)
                 summary = "\n".join(notes)  # хоч би конспект частинами
         self.notifier(render(record, summary))
-        if (path := self.save(record)) is not None:
+        if (path := self.save(record, summary)) is not None:
             self.notifier.document(path.read_bytes(), path.name, f"Розшифровка «{record.title}»")
 
-    def save(self, record: LessonRecord) -> Path | None:
-        """Розшифровка й чат пари — у ~/.autopara/transcripts (лише локально)."""
+    def save(self, record: LessonRecord, summary: str = "") -> Path | None:
+        """Розшифровка й чат пари — у ~/.autopara/transcripts (лише локально). Підсумок — угорі: з нього
+        мозок відповідає на питання про минулі пари."""
         if self.folder is None or not (record.transcript or record.chat):
             return None
         self.folder.mkdir(parents=True, exist_ok=True)
         safe_title = re.sub(r'[\\/:*?"<>|]+', " ", record.title).strip()
         path = self.folder / f"{record.start:%Y-%m-%d %H-%M} {safe_title}.txt"
         lines = [f"{record.title} — {record.start:%d.%m.%Y %H:%M}–{record.end:%H:%M}, {record.teacher}", ""]
+        if summary:
+            lines += [SUMMARY_MARK, summary.strip(), TRANSCRIPT_MARK]
         lines += [f"[{t:%H:%M:%S}] {text}" for t, text in record.transcript]
         if record.chat:
             lines += ["", "--- Чат ---"]
             lines += [f"[{t:%H:%M:%S}] {m.author or '?'}: {m.text}" for t, m in record.chat]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
+
+
+SUMMARY_MARK = "--- Підсумок ---"
+TRANSCRIPT_MARK = "--- Розшифровка ---"
+
+
+def past_lessons(folder: Path | None, limit: int = 3, chars: int = 800) -> str:
+    """Що було на останніх парах — для питань до мозку: підсумок кожної (або кінець розшифровки)."""
+    if folder is None or not folder.is_dir():
+        return ""
+    files = sorted(folder.glob("*.txt"), key=lambda path: path.stat().st_mtime)[-limit:]
+    parts = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        head, _, body = text.partition("\n")
+        if SUMMARY_MARK in body:
+            body = body.split(SUMMARY_MARK, 1)[1].split(TRANSCRIPT_MARK, 1)[0]
+            parts.append(f"{head}\nПідсумок: {body.strip()[:chars]}")
+        else:
+            parts.append(f"{head}\nКінець розшифровки: …{body.strip()[-chars:]}")
+    return "Минулі пари:\n\n" + "\n\n".join(parts) if parts else ""
 
 
 def render(record: LessonRecord, summary: str) -> str:

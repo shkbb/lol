@@ -118,7 +118,9 @@ HELP = (
     "+ — написати «+» у чат\n"
     "напиши <текст> — написати твій текст у чат\n"
     "↩️ відповідь на будь-яке моє повідомлення — теж піде в чат пари\n"
-    "вийди — вийти з пари"
+    "вийди — вийти з пари\n"
+    "Будь-що інше — питання до мозку: «скільки людей на парі?», «про що зараз говорять?», "
+    "«що було на минулих парах?»"
 )
 COMMANDS = {
     "/start", "/help", "help", "допомога", "?", "/status", "статус", "так", "yes", "ок", "ok", "давай", "+",
@@ -252,6 +254,8 @@ class Assistant:
         self.on_chunk: Callable[[str, str], None] | None = None  # (звіт, шматок розшифровки) → конспект
         self.on_finished: Callable[[LessonRecord], None] | None = None  # пара скінчилась → звіт
         self.wake_brain = wake_brain  # None — «мозок» вимкнено, працюють лише рефлекси
+        # Вільне питання з Telegram → мозок (питання, контекст). None — мозку немає, лише команди.
+        self.ask_brain: Callable[[str, str], None] | None = None
         self.meetings: dict[str, Meeting] = {}
         self._order: list[str] = []
         self._actions: list[Action] = []
@@ -704,7 +708,10 @@ class Assistant:
             # Zoom: писати в його чат помічник не вміє — підказує тобі, що написати.
             self.notify(f"{reason} на «{meeting.title}».{quote}\n✍️ У цей чат я писати не вмію — напиши сам: «{text}»", urgent=True)
         elif policy == "off":
-            self.notify(f"{reason} на «{meeting.title}».{quote}\nСам не пишу — так налаштовано.", urgent=True)
+            if kind == "polite":
+                return  # «дякую» за групою — без сповіщень
+            self._alert(f"{reason} на «{meeting.title}».{quote}\nСам не пишу — так налаштовано. Якщо треба — натисни:",
+                        self._quick_buttons(meeting, plus=True))
         elif not self._can_chat(meeting, now):
             self.notify(f"{reason} на «{meeting.title}», але я вже писав у чат нещодавно — пропускаю.{quote}", urgent=True)
         elif needs_you and not self.can_ask:
@@ -822,6 +829,11 @@ class Assistant:
                 return
             if decision.action == "notify":
                 self.notify(f"🧠 {decision.message or why} («{meeting.title}»)", urgent=True)
+            elif decision.action in ("chat_plus", "chat_name") and self.me.chat_reply == "off":
+                if meeting.expect_roll_call is None or now - meeting.expect_roll_call > EXPECT_WINDOW:
+                    meeting.expect_roll_call = now
+                    self._alert(f"🧠 Схоже, на «{meeting.title}» перекличка ({why}). Сам не пишу — якщо треба, натисни:",
+                                self._quick_buttons(meeting, plus=True))
             elif decision.action in ("chat_plus", "chat_name"):
                 # Мозок спирається лише на розпізнану мову, а вона може помилитись («плюс» з лекції про C++).
                 # Тож чекаємо підтвердження від групи: щойно двоє однокурсників відмітяться — відмічаємось теж.
@@ -845,6 +857,10 @@ class Assistant:
                 return HELP
             if low in ("/status", "статус"):
                 return self._status(meeting, now)
+            if self.ask_brain is not None and self._is_question(low, is_reply):
+                # Не команда — питання до мозку: «скільки людей?», «про що зараз говорять?», «що було минулі пари?»
+                self.ask_brain(command[:500], self._question_context(meeting, now))
+                return "🧠 Думаю… відповім за хвилину."
             if meeting is None:
                 return "Зараз я не на парі."
             if not meeting.can_chat and (
@@ -890,6 +906,35 @@ class Assistant:
                 return "Виходжу."
             return "Не зрозумів.\n\n" + HELP
 
+    @staticmethod
+    def _is_question(low: str, is_reply: bool) -> bool:
+        """Усе, що не команда й не відповідь на повідомлення бота (та йде в чат пари), — питання до мозку."""
+        prefixes = ("напиши ", "/say ", "say:", "/start", "/")
+        return not is_reply and low not in COMMANDS and not low.startswith(prefixes) and len(low) > 1
+
+    def _question_context(self, meeting: Meeting | None, now: datetime) -> str:
+        """Що мозок знає про зараз: пара, учасники, остання розшифровка й чат (стисло — модель маленька)."""
+        lines = [f"Зараз {now:%d.%m %H:%M}."]
+        if meeting is None:
+            lines.append("Студент зараз не на парі.")
+            return "\n".join(lines)
+        left = int((meeting.end - now).total_seconds() // 60)
+        lines.append(
+            f"Йде пара «{meeting.title}» ({meeting.start:%H:%M}–{meeting.end:%H:%M}), викладач: {meeting.teacher or 'невідомо'}, "
+            + (f"до кінця {left} хв." if left > 0 else f"затримується на {-left} хв.")
+        )
+        if meeting.participants:
+            lines.append(f"Учасників у зустрічі зараз: {meeting.participants} (найбільше було {meeting.peak}).")
+        transcript = "\n".join(f"[{t:%H:%M}] {text}" for t, text in meeting.transcript)
+        if transcript:
+            lines.append("Що говорили на парі (автоматична розшифровка з помилками, найсвіжіше внизу):\n" + transcript[-3000:])
+        else:
+            lines.append("Розшифровки цієї пари поки немає.")
+        chat = [f"{m.author or '?'}: {m.text}" for _, m in list(meeting.chat)[-15:]]
+        if chat:
+            lines.append("Чат зустрічі:\n" + "\n".join(chat)[-800:])
+        return "\n".join(lines)
+
     def _chat_view(self, meeting: Meeting) -> str:
         messages = [(None, m) for m in meeting.history] + list(meeting.chat)
         if not messages:
@@ -908,10 +953,12 @@ class Assistant:
         else:
             self.notify(text, urgent=True)
 
-    def _quick_buttons(self, meeting: Meeting) -> list:
+    def _quick_buttons(self, meeting: Meeting, plus: bool = False) -> list:
         if not meeting.can_chat:
             return []  # кнопки «написати в чат» тут нічого б не зробили
         replies = [(f"💬 {reply}", f"say:{index}") for index, reply in enumerate(self.me.quick_replies[:3])]
+        if plus:
+            replies = [("➕ Написати «+»", "+")] + replies[:2]
         return [replies, [("📋 Чат", "чат"), ("🖥 Екран", "екран")]] if replies else [[("📋 Чат", "чат"), ("🖥 Екран", "екран")]]
 
     def photo(self, content: bytes, caption: str) -> None:

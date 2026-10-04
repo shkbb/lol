@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Callable, Iterator
 
 from .assistant import Assistant
-from .brain import BrainConnector, BrainWorker, OllamaBrain
+from .brain import BrainConnector, BrainError, BrainWorker, OllamaBrain
 from .config import Config
 from .ears import (
     AudioQueue,
@@ -28,7 +28,7 @@ from .ears import (
     whisper_available,
 )
 from .media import AudioBuffer, Clipper, FrameBuffer
-from .report import Reporter
+from .report import QUESTION_PROMPT, Reporter, past_lessons
 from .telegram import Notifier, TelegramBot
 
 log = logging.getLogger(__name__)
@@ -118,8 +118,22 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     if worker:
 
+        transcripts = config.data_dir / "transcripts"
+
+        def answer(question: str, context: str) -> None:
+            """Вільне питання з Telegram — окремим потоком, щоб не стояти в черзі за конспектами."""
+            material = "\n\n".join(part for part in (context, past_lessons(transcripts)) if part)
+            try:
+                reply = brain.summarize(QUESTION_PROMPT, f"{material}\n\nПитання студента: {question}")
+            except BrainError as e:
+                reply = f"не вийшло відповісти: {e}"
+            notifier(f"🧠 {reply}")
+
         def brain_ready() -> None:
             assistant.wake_brain = worker.wake
+            assistant.ask_brain = lambda question, context: threading.Thread(
+                target=answer, args=(question, context), name="brain-question", daemon=True
+            ).start()
             if reporter is not None:
                 reporter.brain, reporter.worker = brain, worker
             log.info("Мозок: модель %s", config.brain.model)

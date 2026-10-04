@@ -108,6 +108,19 @@ def test_off_mode_only_notifies():
     assert assistant.take_actions() == [] and "Сам не пишу" in inbox.text()
 
 
+def test_off_mode_never_writes_by_itself_but_your_commands_do():
+    """«Ніколи»: лише слухає, сповіщає й пропонує кнопки; пише тільки за твоєю командою."""
+    assistant, inbox = listening("off")
+    say(assistant, "Ляшко, ви тут?")
+    assistant.apply_decision(KEY, Decision("chat_plus", reason="перекличка"), at("10:01"))
+    chat(assistant, "10:02", ("Іван Коваль", "Дякую"), ("Олена Бойко", "дякую!"), ("Марко Лис", "Дякую за пару"))
+    assert assistant.take_actions() == []
+    assert "Сам не пишу" in inbox.text() and "Відмічусь" not in inbox.text() and "Дякую" not in inbox.text()
+    assistant.on_command("+", at("10:03"))
+    assistant.on_command("напиши Так, я тут", at("10:03"))
+    assert [a.text for a in assistant.take_actions()] == ["+", "Так, я тут"]
+
+
 def test_chat_rate_limit():
     assistant, inbox, _ = make()
     chat(assistant, "10:00", ("Петренко П.П.", "Перекличка: +"), ("Іван Коваль", "+"), ("Олена Бойко", "+"), ("Марко Лис", "+"))
@@ -576,3 +589,26 @@ def test_mention_alerts_can_be_switched_off():
     assistant.on_heard("Ляшко, яка відповідь?", at("10:00"))
     assert inbox.messages == [] and moments == []
     assert assistant.meetings[KEY].mentions  # у звіт згадка однаково потрапить
+
+
+def test_free_question_goes_to_the_brain_with_what_we_know():
+    assistant, inbox = listening("off")
+    asked = []
+    assistant.ask_brain = lambda question, context: asked.append((question, context))
+    assistant.on_participants(KEY, 23)
+    say(assistant, "Сьогодні говоримо про індекси й B-дерева.")
+    assert assistant.on_command("Про що зараз говорить викладач?", at("10:05")).startswith("🧠")
+    [(question, context)] = asked
+    assert question == "Про що зараз говорить викладач?"
+    assert "Бази даних" in context and "23" in context and "B-дерева" in context
+    assert assistant.on_command("статус", at("10:05")).startswith("📚")  # команди — як і були, без мозку
+    assistant.on_command("напиши тест", at("10:05"))
+    assert len(asked) == 1
+
+
+def test_question_without_a_lesson_is_about_past_ones():
+    assistant = Assistant(MeSettings(name="Ляшко Денис"), Inbox())
+    asked = []
+    assistant.ask_brain = lambda question, context: asked.append(context)
+    assistant.on_command("Що було на минулих парах?", at("12:00"))
+    assert asked and "не на парі" in asked[0]
