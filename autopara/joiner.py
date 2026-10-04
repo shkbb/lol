@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import time
+from urllib.parse import parse_qs, urlsplit
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -28,9 +29,9 @@ from .assistant import ChatMessage
 from .config import JoinSettings
 from .ears import TAP_SCRIPT
 from .leaving import Observation
-from .links import meet_url, zoom_app_url, zoom_web_url
+from .links import meet_url, with_account, zoom_app_url, zoom_web_url
 from .planner import Visit
-from .session import JoinError, Session
+from .session import JoinDenied, JoinError, Session
 
 log = logging.getLogger(__name__)
 
@@ -190,7 +191,7 @@ def _wait_in_call(page: Page, deadline: datetime, in_call: Callable[[Page], bool
         if in_call(page):
             return
         if _visible_text(page, DENIED_RE):
-            raise JoinError("організатор не впустив або зустріч недоступна", retry=False)
+            raise JoinDenied("організатор не впустив або зустріч недоступна")
         if not waiting_logged:
             log.info("Чекаю, поки впустять у зустріч...")
             waiting_logged = True
@@ -311,7 +312,7 @@ def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime) -> Loc
         if "accounts.google.com" in page.url:
             raise JoinError(LOGIN_HINT, retry=False)
         if _visible_text(page, DENIED_RE):
-            raise JoinError("Meet каже, що приєднатися до цієї зустрічі не можна", retry=False)
+            raise JoinDenied("Meet каже, що приєднатися до цієї зустрічі не можна")
         if _visible_text(page, NOT_STARTED_RE):
             log.info("Зустріч ще не почалася — перевірю знову за 30 с")
             page.wait_for_timeout(30_000)
@@ -629,7 +630,7 @@ class Joiner:
         try:
             try:
                 if visit.platform == "meet":
-                    join_meet(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
+                    self._join_meet(page, visit)
                 elif visit.platform == "zoom":
                     join_zoom_web(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
                 else:
@@ -638,6 +639,7 @@ class Joiner:
             except PlaywrightError as e:
                 raise JoinError(f"помилка браузера: {str(e).splitlines()[0]}") from e
         except JoinError as e:
+            self._snapshot(page)
             self._discard(page)
             self.browser.close_if_idle()  # не лишати порожнє вікно після невдалої спроби
             if visit.platform == "zoom" and self.settings.zoom_mode == "auto":
@@ -650,6 +652,39 @@ class Joiner:
         self._screencast(page)
         self._enable_ears(page)
         return Session(visit, visit.leave_at, page)
+
+    def _join_meet(self, page: Page, visit: Visit) -> None:
+        """Meet не пускає з основного акаунта (напр., університетський Workspace не пускає на зовнішні
+        зустрічі) — пробуємо інші акаунти, в які увійдено: на пару важливіше потрапити."""
+        query = parse_qs(urlsplit(visit.url).query)
+        first = (query.get("authuser") or [self.settings.meet_account])[0]
+        others = [a for a in [self.settings.meet_account, *self.settings.accounts] if a and a != first]
+        try:
+            join_meet(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
+            return
+        except JoinDenied as e:
+            if not others:
+                raise
+            denied = e
+        for account in dict.fromkeys(others):
+            log.warning("Meet не пускає з %s (%s) — пробую з %s", first or "основного акаунта", denied, account)
+            try:
+                join_meet(self.browser.context(), page, with_account(visit.url, account), self.settings, visit.leave_at)
+                log.info("Зайшов з акаунта %s", account)
+                return
+            except JoinDenied as e:
+                denied, first = e, account
+        raise denied
+
+    def _snapshot(self, page: Page) -> None:
+        """Що показав браузер, коли зайти не вдалося, — щоб причину було видно, а не вгадувати."""
+        path = self._app_links_file.parent / "last-join-failure.png"
+        try:
+            if not page.is_closed():
+                page.screenshot(path=str(path))
+                log.info("Що показав браузер: %s", path)
+        except PlaywrightError:
+            pass
 
     def _open_zoom_app(self, visit: Visit) -> Session:
         self._open_uri(zoom_app_url(visit.url) or visit.url)

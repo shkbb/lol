@@ -106,7 +106,11 @@ $("join").onclick = () => {
   };
   $("mic2").dataset.isMuted = $("mic").dataset.isMuted;
   $("prejoin").hidden = true;
-  if (scenario === "denied") { $("denied").hidden = false; return; }
+  const account = new URLSearchParams(location.search).get("authuser") || "";
+  if (scenario === "denied" || (scenario === "only-gmail" && !account.endsWith("@gmail.com"))) {
+    $("denied").hidden = false;
+    return;
+  }
   if (scenario === "lobby") {
     $("lobby").hidden = false;
     setTimeout(() => { $("lobby").hidden = true; $("call").hidden = false; }, 2500);

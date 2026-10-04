@@ -15,6 +15,13 @@ class JoinError(Exception):
         self.retry = retry
 
 
+class JoinDenied(JoinError):
+    """Зустріч не пускає (саме цей акаунт чи взагалі) — повторювати з тим самим акаунтом немає сенсу."""
+
+    def __init__(self, message: str):
+        super().__init__(message, retry=False)
+
+
 @dataclass
 class Session:
     visit: Visit

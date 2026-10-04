@@ -90,6 +90,13 @@ def meet_url(url: str, account: str = "") -> str:
     return urlunsplit(parts._replace(query=urlencode(query, doseq=True)))
 
 
+def with_account(url: str, account: str) -> str:
+    """Те саме посилання на Meet, але з іншим Google-акаунтом."""
+    parts = urlsplit(normalize_url(url))
+    query = {key: values for key, values in parse_qs(parts.query).items() if key != "authuser"}
+    return meet_url(urlunsplit(parts._replace(query=urlencode(query, doseq=True))), account)
+
+
 def zoom_meeting(url: str) -> tuple[str, str | None, str | None]:
     """(хост, номер конференції, пароль) з будь-якого посилання на Zoom."""
     parts = urlsplit(normalize_url(url))
