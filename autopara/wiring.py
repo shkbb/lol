@@ -42,6 +42,7 @@ class Stack:
     app_audio: object | None = None  # звук Zoom-клієнта на час пари: start() / stop()
     zoom_app_heard: bool = True  # чи чують вуха Zoom-клієнт (інакше в режимі auto Zoom відкривається в браузері)
     frames: FrameBuffer | None = None  # кадри сторінки для відеовирізок, або None
+    choose: Callable[[str, list[str]], int | None] | None = None  # мозок обирає зі списку (кнопку входу тощо)
 
 
 @contextmanager
@@ -69,6 +70,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         worker.assistant = assistant
         worker.start()
     stack = Stack(assistant)
+    if brain is not None:
+        stack.choose = brain.choose  # запасний вихід для входу на пару: яка кнопка «увійти»
 
     if listening:
         stop = threading.Event()

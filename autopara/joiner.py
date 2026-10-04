@@ -40,9 +40,21 @@ ZOOM_ORIGIN = "https://app.zoom.us"
 LOGIN_HINT = "потрібно увійти в Google-акаунт: запусти `autopara login`"
 
 # Інтерфейс Meet/Zoom буває англійською, українською чи російською — шукаємо всіма трьома.
+# Ці шаблони перевіряє браузер (JavaScript), а там \w і \b не розуміють кирилиці — тож лише \s, \S і «.*».
 JOIN_RE = re.compile(
-    r"^\s*(join now|join|ask to join|приєднатися( зараз)?|попросити\b.*приєдна\w*"
-    r"|присоединиться( сейчас)?|попросить\b.*присоедин\w*)\s*$",
+    r"^\s*(join now|join|ask to join|request to join|приєднатися( зараз)?|попросити\s.*приєдна\S*"
+    r"|надіслати запит\s.*приєдна\S*|присоединиться( сейчас)?|попросить\s.*присоедин\S*"
+    r"|отправить запрос\s.*присоедин\S*)\s*$",
+    re.I,
+)
+# Кнопки, яких мозок навіть не бачить, коли обирає «увійти»: мікрофон, камера, чат, вихід, акаунт тощо.
+NEVER_ASK_RE = re.compile(
+    r"micro|мікрофон|микрофон|camera|камер|video|відео|видео|chat|чат|leave|покинути|вийти|выйти|end call|hang"
+    r"|present|демонстр|екран|экран|record|запис|raise|підня|подня|react|реакц|caption|субтитр|share|поділит|поделит"
+    r"|setting|налаштуван|настро|people|люди|учасник|участник|more|\bще\b|ещ[её]|other|інші|другие|effect|ефект|эффект"
+    r"|background|фон|switch|змін|смен|account|акаунт|обліков|аккаунт|companion|супутн|cancel|скасу|отмен|help|довідк|справк"
+    r"|home|головн|главн|support|підтримк|поддержк|apps|додатк|приложен"
+    r"|audio|звук|sound|check|перевір|провер|test|report|скарг|поскарж|жалоб|feedback|відгук|отзыв",
     re.I,
 )
 CONTINUE_WITHOUT_RE = re.compile(r"continue without|продовжити без|продолжить без", re.I)
@@ -305,9 +317,66 @@ def send_meet_chat(page: Page, text: str) -> bool:
     return True
 
 
-def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime) -> Locator:
+class ButtonHelper:
+    """Знайомої кнопки «Приєднатися» немає (інша мова, Google перейменував) — мозок обирає її зі списку кнопок
+    на сторінці. Мікрофон, камеру, чат і подібне він не бачить зовсім, а перед натисканням програма однаково
+    перевіряє, що мікрофон і камера вимкнені. Вдалий вибір запам'ятовуємо — далі без мозку."""
+
+    QUESTION = ("Це сторінка входу в онлайн-зустріч (Google Meet). Яка з цих кнопок приєднує до зустрічі "
+                "(входить у дзвінок або надсилає запит на вхід)?")
+
+    def __init__(self, choose: Callable[[str, list[str]], int | None], learned_file: Path):
+        self.choose = choose
+        self.learned_file = learned_file
+        self.pending = ""
+
+    def learned(self) -> list[str]:
+        try:
+            return [label for label in json.loads(self.learned_file.read_text(encoding="utf-8")) if isinstance(label, str)]
+        except (OSError, ValueError, TypeError):
+            return []
+
+    def known_button(self, page: Page) -> Locator | None:
+        for label in self.learned():
+            button = _first_visible(page.get_by_role("button", name=label, exact=True))
+            if button is not None and button.is_enabled():
+                return button
+        return None
+
+    def ask(self, page: Page) -> Locator | None:
+        names = page.eval_on_selector_all(
+            "button, [role=button]",
+            "els => els.filter(e => e.offsetParent !== null).map(e => (e.getAttribute('aria-label') || e.innerText || '').trim())",
+        )
+        options = list(dict.fromkeys(name for name in names if name and len(name) < 80 and not NEVER_ASK_RE.search(name)))
+        if not options:
+            return None
+        log.info("Не впізнаю кнопку входу — питаю мозок (кнопки: %s)", ", ".join(f"«{o}»" for o in options))
+        try:
+            index = self.choose(self.QUESTION, options)
+        except Exception as e:  # noqa: BLE001 — мозок лише допомагає; без нього вхід іде далі як завжди
+            log.warning("Мозок не відповів: %s", e)
+            index = None
+        if index is None or not 0 <= index < len(options):
+            log.warning("Мозок не знайшов кнопку входу")
+            return None
+        log.info("Мозок: вхід — кнопка «%s»", options[index])
+        self.pending = options[index]
+        return _first_visible(page.get_by_role("button", name=options[index], exact=True))
+
+    def confirm(self) -> None:
+        """Зайшли — запам'ятати кнопку, щоб наступного разу натиснути її одразу."""
+        if self.pending and self.pending not in self.learned():
+            self.learned_file.parent.mkdir(parents=True, exist_ok=True)
+            self.learned_file.write_text(json.dumps(self.learned() + [self.pending], ensure_ascii=False), encoding="utf-8")
+            log.info("Запам'ятав кнопку входу «%s»", self.pending)
+        self.pending = ""
+
+
+def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime, helper: ButtonHelper | None = None) -> Locator:
     """Чекає на кнопку «Приєднатися», попутно закриваючи діалоги та заповнюючи ім'я гостя."""
     stuck_since = monotonic()
+    asked = False
     while _now(deadline) < deadline:
         if "accounts.google.com" in page.url:
             raise JoinError(LOGIN_HINT, retry=False)
@@ -322,6 +391,12 @@ def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime) -> Loc
         for pattern in (CONTINUE_WITHOUT_RE, DISMISS_RE):
             if button := _first_visible(page.get_by_role("button", name=pattern)):
                 button.click()
+        # Вимикаємо одразу, щойно Meet показав кнопки, — щоб камера не світилась, поки чекаємо.
+        # Остаточна перевірка однаково буде перед самим входом (join_meet → _devices_off).
+        if settings.mute_microphone:
+            _ensure_off(page, MEET_MIC)
+        if settings.camera_off:
+            _ensure_off(page, MEET_CAM)
         name_box = _first_visible(page.get_by_role("textbox", name=NAME_RE))
         if name_box is not None and not name_box.input_value():
             if not settings.display_name:
@@ -330,23 +405,33 @@ def _meet_prejoin(page: Page, settings: JoinSettings, deadline: datetime) -> Loc
         if button := _first_visible(page.get_by_role("button", name=JOIN_RE)):
             if button.is_enabled():
                 return button
+        if helper is not None:
+            if button := helper.known_button(page):
+                return button
+            if not asked and monotonic() - stuck_since > 20:
+                asked = True
+                if (button := helper.ask(page)) is not None and button.is_enabled():
+                    return button
         if monotonic() - stuck_since > 90:
             raise JoinError("не дочекався кнопки «Приєднатися» в Meet")
         page.wait_for_timeout(1000)
     raise JoinError("пара вже закінчилась", retry=False)
 
 
-def join_meet(context: BrowserContext, page: Page, url: str, settings: JoinSettings, deadline: datetime) -> None:
+def join_meet(context: BrowserContext, page: Page, url: str, settings: JoinSettings, deadline: datetime,
+              helper: ButtonHelper | None = None) -> None:
     context.grant_permissions(["microphone", "camera"], origin=MEET_ORIGIN)
     page.goto(meet_url(url, settings.meet_account), wait_until="domcontentloaded")
-    join_button = _meet_prejoin(page, settings, deadline)
+    join_button = _meet_prejoin(page, settings, deadline, helper)
     if (settings.mute_microphone or settings.camera_off) and not _devices_off(page, settings, MEET_MIC, MEET_CAM):
         log.warning("Не вдалося переконатися, що мікрофон/камера вимкнені — забороняю Meet доступ до них")
         _block_media(context, page, MEET_ORIGIN)
         page.reload(wait_until="domcontentloaded")
-        join_button = _meet_prejoin(page, settings, deadline)
+        join_button = _meet_prejoin(page, settings, deadline, helper)
     join_button.click()
     _wait_in_call(page, deadline, _meet_in_call)
+    if helper is not None:
+        helper.confirm()
     if settings.mute_microphone and MEET_MIC(page) is not None and not _ensure_off(page, MEET_MIC):
         log.error("УВАГА: у дзвінку мікрофон, схоже, увімкнений — вимкни його вручну!")
 
@@ -613,6 +698,7 @@ class Joiner:
         frames=None,
         audio_tap: Callable[[str], None] | None = None,
         zoom_app_heard: bool = True,
+        chooser: Callable[[str, list[str]], int | None] | None = None,
     ):
         self.settings = settings
         self.frames = frames  # FrameBuffer для відеовирізок, або None
@@ -621,6 +707,8 @@ class Joiner:
         self.zoom_app_heard = zoom_app_heard
         self._app_links_file = profile_dir.parent / "zoom-app-links.json"
         self.browser = Browser(profile_dir, settings.mute_sound, headless, audio_sink, audio_tap)
+        # Мозок — запасний вихід, коли знайомої кнопки входу немає (див. ButtonHelper).
+        self.helper = ButtonHelper(chooser, profile_dir.parent / "learned-buttons.json") if chooser else None
         self._open_uri = opener
 
     def join(self, visit: Visit) -> Session:
@@ -660,7 +748,7 @@ class Joiner:
         first = (query.get("authuser") or [self.settings.meet_account])[0]
         others = [a for a in [self.settings.meet_account, *self.settings.accounts] if a and a != first]
         try:
-            join_meet(self.browser.context(), page, visit.url, self.settings, visit.leave_at)
+            join_meet(self.browser.context(), page, visit.url, self.settings, visit.leave_at, self.helper)
             return
         except JoinDenied as e:
             if not others:
@@ -669,7 +757,8 @@ class Joiner:
         for account in dict.fromkeys(others):
             log.warning("Meet не пускає з %s (%s) — пробую з %s", first or "основного акаунта", denied, account)
             try:
-                join_meet(self.browser.context(), page, with_account(visit.url, account), self.settings, visit.leave_at)
+                join_meet(self.browser.context(), page, with_account(visit.url, account), self.settings, visit.leave_at,
+                          self.helper)
                 log.info("Зайшов з акаунта %s", account)
                 return
             except JoinDenied as e:

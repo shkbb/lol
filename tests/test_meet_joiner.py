@@ -46,6 +46,8 @@ FAKE_MEET = """<!doctype html>
 const scenario = location.pathname.slice(1);
 const $ = (id) => document.getElementById(id);
 if (scenario === "login") location.replace("https://accounts.google.com/signin");
+if (scenario === "ask-uk") $("join").innerHTML = "<span>Надіслати запит на приєднання</span>";  // так Meet українською
+if (scenario === "renamed") $("join").innerHTML = "<span>Увійти до зустрічі</span>";  // назва, якої програма не знає
 
 function setState(btn, what, muted) {
   btn.dataset.isMuted = String(muted);
@@ -152,6 +154,12 @@ def join(joiner, scenario):
 
 def test_mic_and_camera_are_turned_off_before_joining(joiner):
     assert join(joiner, "normal") == {"mic": "true", "cam": "true", "perm": "granted", "name": ""}
+
+
+def test_ukrainian_ask_to_join_button(joiner):
+    """Зустріч, куди треба просити впустити: українською кнопка зветься «Надіслати запит на приєднання»."""
+    state = join(joiner, "ask-uk")
+    assert (state["mic"], state["cam"]) == ("true", "true")
 
 
 def test_camera_that_turns_on_late_is_caught(joiner):

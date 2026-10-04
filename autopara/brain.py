@@ -125,6 +125,31 @@ class OllamaBrain:
         except (requests.RequestException, KeyError, ValueError) as e:
             raise BrainError(f"Ollama недоступна ({self.url}): {e}") from e
 
+    def choose(self, question: str, options: list[str]) -> int | None:
+        """Вибір зі списку: номер варіанта (з нуля) або None, якщо жоден не підходить чи мозок недоступний.
+        Тільки вибір — нічого вигадати модель тут не може."""
+        listing = "\n".join(f"{index}. {option}" for index, option in enumerate(options, 1))
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "format": {"type": "object", "properties": {"number": {"type": "integer"}}, "required": ["number"]},
+            "keep_alive": "30m",
+            "options": {"temperature": 0, "num_predict": 20},
+            "messages": [
+                {"role": "system", "content": "Ти обираєш один варіант зі списку. Відповідай JSON {\"number\": N}, "
+                                              "де N — номер варіанта, або 0, якщо жоден не підходить."},
+                {"role": "user", "content": f"{question}\n\n{listing}"},
+            ],
+        }
+        try:
+            response = self.session.post(f"{self.url}/api/chat", json=payload, timeout=self.timeout)
+            response.raise_for_status()
+            number = int(json.loads(response.json()["message"]["content"])["number"])
+        except (requests.RequestException, KeyError, ValueError, TypeError) as e:
+            log.warning("Мозок не зміг обрати: %s", e)
+            return None
+        return number - 1 if 1 <= number <= len(options) else None
+
     def check(self) -> str | None:
         """None, якщо все гаразд, інакше — що не так."""
         try:

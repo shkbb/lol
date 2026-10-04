@@ -161,7 +161,7 @@ class Controller:
         info = stack.enter_context(assistant_stack(self.config, self.clock))
         joiner = Joiner(
             self.config.join, self.config.profile_dir, audio_sink=info.audio_sink, frames=info.frames,
-            audio_tap=info.audio_tap, zoom_app_heard=info.zoom_app_heard,
+            audio_tap=info.audio_tap, zoom_app_heard=info.zoom_app_heard, chooser=info.choose,
         )
         runner = Runner(
             self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant,

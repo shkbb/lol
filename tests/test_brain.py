@@ -100,3 +100,14 @@ def test_brain_downloads_missing_model_itself():
     brain = FakeBrain([("модель не завантажена", True)])
     BrainConnector(brain, lambda: ready.append(True))._run()
     assert brain.pulled == 1 and ready == [True]
+
+
+def test_choose_only_picks_from_the_list():
+    options = ["Увійти до зустрічі", "Інші способи"]
+    ollama = FakeOllama(json.dumps({"number": 1}))
+    brain = OllamaBrain("http://127.0.0.1:11434", "gemma3:4b", session=ollama)
+    assert brain.choose("Яка кнопка входить?", options) == 0
+    assert "1. Увійти до зустрічі\n2. Інші способи" in ollama.payload["messages"][1]["content"]
+    for answer in ({"number": 0}, {"number": 3}, {"oops": 1}):  # «жодна», поза списком, не той формат
+        assert OllamaBrain("http://x", "m", session=FakeOllama(json.dumps(answer))).choose("?", options) is None
+    assert OllamaBrain("http://x", "m", session=FakeOllama("не json")).choose("?", options) is None
