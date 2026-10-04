@@ -109,7 +109,10 @@ def test_old_faster_whisper_without_hotwords(monkeypatch):
 def test_warns_when_model_is_too_slow(caplog):
     listener = Ears(lambda chunk: [], lambda text, confident: None, source="x")
     for _ in range(4):
-        listener._watch_speed(9.5)
+        listener._watch_speed(12)  # трохи відстає — це нормально: точність важливіша, наздожене в паузах
+    assert "не встигає" not in caplog.text
+    for _ in range(4):
+        listener._watch_speed(35)  # утричі повільніше за мову — тут уже відставання росло б без меж
     assert caplog.text.count("не встигає") == 1
 
 
@@ -165,7 +168,10 @@ def test_too_slow_model_switches_to_a_lighter_one(monkeypatch):
     transcriber = WhisperTranscriber("large-v3-turbo", "uk")
     listener = Ears(transcriber, lambda text, confident: None, source="x")
     for _ in range(3):
-        listener._watch_speed(9.5)
+        listener._watch_speed(12)
+    assert transcriber.name == "large-v3-turbo"  # трохи повільніше — лишаємо точну
+    for _ in range(3):
+        listener._watch_speed(35)
     assert transcriber.name == "small" and transcriber.model.name == "small"
     listener._watch_speed(2.0)
     assert transcriber.name == "small"

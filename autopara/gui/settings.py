@@ -120,7 +120,7 @@ class SettingsPage(QWidget):
         more.add(w.select_field(model, "ears.model", "Модель розпізнавання", [
             ("auto", "автоматично за потужністю комп'ютера"), ("small", "small — швидка"), ("medium", "medium"),
             ("large-v3-turbo", "large-v3-turbo — точна"),
-        ], "Якщо комп'ютер не встигатиме, програма сама перейде на легшу.", default="auto"))
+        ], "Точна модель може відставати від пари на хвилину-дві — зате розпізнає значно краще.", default="auto"))
         if platform_is_linux():
             more.add(w.select_field(model, "ears.source", "Пари в браузері: звідки брати звук", [
                 ("auto", "звук браузера програми (рекомендовано)"), ("browser", "зі сторінки пари (запасний спосіб)"),

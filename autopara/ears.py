@@ -127,7 +127,7 @@ class AudioQueue:
     найстаріший звук відкидаємо, щоб не відставати від пари все більше.
     """
 
-    def __init__(self, max_seconds: int = 120):
+    def __init__(self, max_seconds: int = 600):  # до 10 хв відставання: точна модель наздоганяє в паузах
         self.max_bytes = RATE * 2 * max_seconds
         self._chunks: deque[bytes] = deque()
         self._size = 0
@@ -679,9 +679,10 @@ class Ears:
                         self._hear(buffer)
                         buffer = b""
                     continue
-                if quiet >= 30 or not self._hearing:
-                    log.info("👂 Чую пару — звук надходить до вух")
-                self._hearing = True
+                if not is_silence(data):  # системний звук іде й тишею — «чую» лише справжній звук
+                    if quiet >= 30 or not self._hearing:
+                        log.info("👂 Чую пару — звук надходить до вух")
+                    self._hearing = True
                 quiet = 0
                 if self.on_audio:
                     self.on_audio(data)
@@ -714,8 +715,9 @@ class Ears:
                 self.on_text(text, item.confident)
 
     def _watch_speed(self, seconds: float) -> None:
-        """Якщо модель розпізнає повільніше, ніж говорять, — текст відставатиме все більше."""
-        self._slow = self._slow + 1 if seconds > CHUNK_SECONDS * 0.8 else 0
+        """Точність важливіша за швидкість: точна модель може трохи відставати й наздоганяти в паузах.
+        На легшу переходимо, лише якщо комп'ютер аж утричі повільніший за мову — тоді відставання росло б без меж."""
+        self._slow = self._slow + 1 if seconds > CHUNK_SECONDS * 3 else 0
         if self._slow < 3:
             return
         downgrade = getattr(self.transcribe, "downgrade", None)
