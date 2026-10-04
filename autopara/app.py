@@ -219,6 +219,11 @@ class Controller:
         sleep_guard = getattr(self.runner, "sleep_guard", None)
         if sleep_guard is not None:
             sleep_guard.release()
+        if hasattr(self.runner, "finish_all"):
+            try:
+                self.runner.finish_all()  # запис пари, що ще йде, — зберегти
+            except Exception:  # noqa: BLE001
+                log.exception("Не вдалося зберегти запис пари")
         if self.joiner is not None:
             self.joiner.close()
         if self._stack is not None:

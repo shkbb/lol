@@ -248,12 +248,27 @@ class SettingsPage(QWidget):
         move.add(w.label(f"Налаштування лежать у {model.meta.get('path', '')}", "hint"))
         page.add(move)
 
+        records = w.Card("Записи пар", "Кожна пара зберігається тут, по теках предметів: підсумок, розшифровка й чат. "
+                                        "З них і мозок відповідає на питання в Telegram.")
+        records.add(w.hbox(w.button("📂 Відкрити записи пар", "", self._open_records), "stretch"))
+        page.add(records)
+
         program = w.Card("Програма")
         program.add(w.hbox(w.button("Пройти майстер ще раз", "", self.window.show_wizard),
                            w.button("Вийти з програми", "", self.window.quit_program), "stretch"))
         program.add(w.label("«Вийти» — програма перестане заходити на пари до наступного запуску.", "hint"))
         page.add(program)
         return page
+
+    def _open_records(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        from .. import notes
+
+        folder = self.bridge.controller.config.data_dir / notes.FOLDER
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     # --- Імпорт ---------------------------------------------------------------------------
 

@@ -8,10 +8,10 @@
 from __future__ import annotations
 
 import logging
-import re
 import threading
 from pathlib import Path
 
+from . import notes
 from .assistant import LessonRecord
 from .brain import BrainError
 
@@ -35,11 +35,14 @@ FINAL_PROMPT = (
 
 
 class Reporter:
-    def __init__(self, notifier, brain=None, worker=None, folder: Path | None = None):
+    """Після кожної пари: запис у ~/.autopara/Пари/<Предмет>/ (завжди) і звіт у Telegram (якщо ввімкнено)."""
+
+    def __init__(self, notifier, brain=None, worker=None, folder: Path | None = None, send: bool = True):
         self.notifier = notifier
         self.brain = brain
         self.worker = worker
         self.folder = folder
+        self.send = send
         self._notes: dict[str, list[str]] = {}
         self._lock = threading.Lock()
 
@@ -50,11 +53,13 @@ class Reporter:
         self.worker.submit(lambda: self._summarize_chunk(report_id, text))
 
     def finish(self, record: LessonRecord) -> None:
-        """Пара скінчилась — складаємо звіт (після всіх конспектів, що вже в черзі)."""
+        """Пара скінчилась: запис — одразу (щоб не загубився, навіть якщо програму зараз закриють),
+        підсумок і звіт — потім (після всіх конспектів, що вже в черзі)."""
+        path = self.save(record)
         if self.worker is not None:
-            self.worker.submit(lambda: self._finish(record))
+            self.worker.submit(lambda: self._finish(record, path))
         else:
-            threading.Thread(target=self._finish, args=(record,), daemon=True).start()
+            threading.Thread(target=self._finish, args=(record, path), daemon=True).start()
 
     def _summarize_chunk(self, report_id: str, text: str) -> None:
         try:
@@ -65,67 +70,39 @@ class Reporter:
         with self._lock:
             self._notes.setdefault(report_id, []).append(note)
 
-    def _finish(self, record: LessonRecord) -> None:
+    def _finish(self, record: LessonRecord, path: Path | None = None) -> None:
         if record.rest and self.brain is not None:
             self._summarize_chunk(record.report_id, record.rest)
         with self._lock:
-            notes = self._notes.pop(record.report_id, [])
+            parts = self._notes.pop(record.report_id, [])
         summary = ""
         others = [f"{m.author or '?'}: {m.text}" for _, m in record.chat]
-        if self.brain is not None and (notes or len(others) >= 5):
-            material = "\n\n".join(f"Частина {i}:\n{note}" for i, note in enumerate(notes, 1))
+        if self.brain is not None and (parts or len(others) >= 5):
+            material = "\n\n".join(f"Частина {i}:\n{note}" for i, note in enumerate(parts, 1))
             if others:
                 material += "\n\nЧат:\n" + "\n".join(others[-40:])
             try:
                 summary = self.brain.summarize(FINAL_PROMPT, material)
             except BrainError as e:
                 log.warning("Не вдалося скласти звіт: %s", e)
-                summary = "\n".join(notes)  # хоч би конспект частинами
-        self.notifier(render(record, summary))
-        if (path := self.save(record, summary)) is not None:
-            self.notifier.document(path.read_bytes(), path.name, f"Розшифровка «{record.title}»")
+                summary = "\n".join(parts)  # хоч би конспект частинами
+        if summary and path is not None:
+            notes.add_summary(path, summary)
+        if self.send:
+            self.notifier(render(record, summary))
+            if path is not None:
+                self.notifier.document(path.read_bytes(), path.name, f"Розшифровка «{record.title}»")
 
     def save(self, record: LessonRecord, summary: str = "") -> Path | None:
-        """Розшифровка й чат пари — у ~/.autopara/transcripts (лише локально). Підсумок — угорі: з нього
-        мозок відповідає на питання про минулі пари."""
+        """Розшифровка й чат пари — у теку її предмета (лише локально)."""
         if self.folder is None or not (record.transcript or record.chat):
             return None
-        self.folder.mkdir(parents=True, exist_ok=True)
-        safe_title = re.sub(r'[\\/:*?"<>|]+', " ", record.title).strip()
-        path = self.folder / f"{record.start:%Y-%m-%d %H-%M} {safe_title}.txt"
-        lines = [f"{record.title} — {record.start:%d.%m.%Y %H:%M}–{record.end:%H:%M}, {record.teacher}", ""]
-        if summary:
-            lines += [SUMMARY_MARK, summary.strip(), TRANSCRIPT_MARK]
-        lines += [f"[{t:%H:%M:%S}] {text}" for t, text in record.transcript]
-        if record.chat:
-            lines += ["", "--- Чат ---"]
-            lines += [f"[{t:%H:%M:%S}] {m.author or '?'}: {m.text}" for t, m in record.chat]
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        path = notes.lesson_path(self.folder, record.title, record.start)
+        header = f"{record.title} — {record.start:%d.%m.%Y %H:%M}–{record.end:%H:%M}, {record.teacher}"
+        transcript = [f"[{t:%H:%M:%S}] {text}" for t, text in record.transcript]
+        chat = [f"[{t:%H:%M:%S}] {m.author or '?'}: {m.text}" for t, m in record.chat]
+        notes.write(path, header, summary, transcript, chat)
         return path
-
-
-SUMMARY_MARK = "--- Підсумок ---"
-TRANSCRIPT_MARK = "--- Розшифровка ---"
-
-
-def past_lessons(folder: Path | None, limit: int = 3, chars: int = 800) -> str:
-    """Що було на останніх парах — для питань до мозку: підсумок кожної (або кінець розшифровки)."""
-    if folder is None or not folder.is_dir():
-        return ""
-    files = sorted(folder.glob("*.txt"), key=lambda path: path.stat().st_mtime)[-limit:]
-    parts = []
-    for path in files:
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        head, _, body = text.partition("\n")
-        if SUMMARY_MARK in body:
-            body = body.split(SUMMARY_MARK, 1)[1].split(TRANSCRIPT_MARK, 1)[0]
-            parts.append(f"{head}\nПідсумок: {body.strip()[:chars]}")
-        else:
-            parts.append(f"{head}\nКінець розшифровки: …{body.strip()[-chars:]}")
-    return "Минулі пари:\n\n" + "\n\n".join(parts) if parts else ""
 
 
 def render(record: LessonRecord, summary: str) -> str:

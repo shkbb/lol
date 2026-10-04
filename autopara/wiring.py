@@ -28,7 +28,8 @@ from .ears import (
     whisper_available,
 )
 from .media import AudioBuffer, Clipper, FrameBuffer
-from .report import QUESTION_PROMPT, Reporter, past_lessons
+from . import notes
+from .report import QUESTION_PROMPT, Reporter
 from .telegram import Notifier, TelegramBot
 
 log = logging.getLogger(__name__)
@@ -110,19 +111,19 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     if clips:
         assistant.on_moment = Clipper(stack.frames, audio, notifier, assistant.quote).capture
 
-    reporter = None
-    if config.telegram.reports:
-        reporter = Reporter(notifier, None, None, config.data_dir / "transcripts")
-        assistant.on_chunk = reporter.chunk
-        assistant.on_finished = reporter.finish
+    # Кожна пара — запис у теку її предмета (завжди); звіт у Telegram — якщо ввімкнено.
+    lessons_folder = config.data_dir / notes.FOLDER
+    reporter = Reporter(notifier, None, None, lessons_folder, send=config.telegram.reports)
+    assistant.on_chunk = reporter.chunk
+    assistant.on_finished = reporter.finish
 
     if worker:
 
-        transcripts = config.data_dir / "transcripts"
-
-        def answer(question: str, context: str) -> None:
-            """Вільне питання з Telegram — окремим потоком, щоб не стояти в черзі за конспектами."""
-            material = "\n\n".join(part for part in (context, past_lessons(transcripts)) if part)
+        def answer(question: str, context: str, current: str) -> None:
+            """Вільне питання з Telegram — окремим потоком, щоб не стояти в черзі за конспектами.
+            Мозок сам заглядає в записи пар: потрібний предмет, його останні пари, згадки слів з питання."""
+            found = notes.gather(lessons_folder, question, current, brain.choose)
+            material = "\n\n".join(part for part in (context, found) if part)
             try:
                 reply = brain.summarize(QUESTION_PROMPT, f"{material}\n\nПитання студента: {question}")
             except BrainError as e:
@@ -131,11 +132,10 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
         def brain_ready() -> None:
             assistant.wake_brain = worker.wake
-            assistant.ask_brain = lambda question, context: threading.Thread(
-                target=answer, args=(question, context), name="brain-question", daemon=True
+            assistant.ask_brain = lambda question, context, current: threading.Thread(
+                target=answer, args=(question, context, current), name="brain-question", daemon=True
             ).start()
-            if reporter is not None:
-                reporter.brain, reporter.worker = brain, worker
+            reporter.brain, reporter.worker = brain, worker
             log.info("Мозок: модель %s", config.brain.model)
 
         connector = BrainConnector(brain, brain_ready)

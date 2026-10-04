@@ -254,8 +254,8 @@ class Assistant:
         self.on_chunk: Callable[[str, str], None] | None = None  # (звіт, шматок розшифровки) → конспект
         self.on_finished: Callable[[LessonRecord], None] | None = None  # пара скінчилась → звіт
         self.wake_brain = wake_brain  # None — «мозок» вимкнено, працюють лише рефлекси
-        # Вільне питання з Telegram → мозок (питання, контекст). None — мозку немає, лише команди.
-        self.ask_brain: Callable[[str, str], None] | None = None
+        # Вільне питання з Telegram → мозок (питання, контекст, поточна пара). None — мозку немає, лише команди.
+        self.ask_brain: Callable[[str, str, str], None] | None = None
         self.meetings: dict[str, Meeting] = {}
         self._order: list[str] = []
         self._actions: list[Action] = []
@@ -859,7 +859,7 @@ class Assistant:
                 return self._status(meeting, now)
             if self.ask_brain is not None and self._is_question(low, is_reply):
                 # Не команда — питання до мозку: «скільки людей?», «про що зараз говорять?», «що було минулі пари?»
-                self.ask_brain(command[:500], self._question_context(meeting, now))
+                self.ask_brain(command[:500], self._question_context(meeting, now), meeting.title if meeting else "")
                 return "🧠 Думаю… відповім за хвилину."
             if meeting is None:
                 return "Зараз я не на парі."

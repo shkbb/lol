@@ -64,9 +64,19 @@ def test_report_with_brain_and_transcript_file(tmp_path):
     assert "на парі з 09:28 до 10:52 · 👥 до 24 учасників" in report
     assert "Завдання й дедлайни: лаба 3 до п'ятниці" in report
     assert "🔔 Тебе згадували:\n  09:41 «Ляшко, ви тут?»" in report
-    assert filename == "2026-10-05 09-30 Бази даних (Лк).txt" and caption == "Розшифровка «Бази даних (Лк)»"
+    assert filename == "2026-10-05 09-30 Лк.txt" and caption == "Розшифровка «Бази даних (Лк)»"
     assert "[09:41:00] Ляшко, ви тут?" in transcript and "Іван Коваль: А лаба 3 до коли?" in transcript
-    assert (tmp_path / filename).exists()
+    saved = (tmp_path / "Бази даних" / filename).read_text(encoding="utf-8")  # тека предмета
+    assert "--- Підсумок ---\nПро що:" in saved and "[09:41:00] Ляшко, ви тут?" in saved
+
+
+def test_lesson_is_kept_even_without_telegram_reports(tmp_path):
+    inbox = Inbox()
+    reporter = Reporter(inbox, None, None, tmp_path, send=False)
+    assistant = lesson_assistant(reporter)
+    assistant.on_heard("Сьогодні нормалізація", at("09:40"))
+    assistant.detach("pair", at("10:52"))
+    assert list(inbox) == [] and (tmp_path / "Бази даних" / "2026-10-05 09-30 Лк.txt").exists()
 
 
 def test_report_without_brain_or_ears():
@@ -119,17 +129,3 @@ def test_decisions_go_before_background_summaries():
         threading.Event().wait(0.05)
     worker.stop()
     assert order == ["decision", "summary"]
-
-
-def test_summary_is_kept_for_questions_about_past_lessons(tmp_path):
-    from autopara.report import past_lessons
-
-    (tmp_path / "2026-10-05 09-30 Бази даних (Лк).txt").write_text(
-        "Бази даних (Лк) — 05.10.2026 09:30–10:50, Петренко П.П.\n\n--- Підсумок ---\nПро що: індекси.\n"
-        "--- Розшифровка ---\n[09:31:00] Добрий день\n", encoding="utf-8")
-    (tmp_path / "2026-10-05 11-10 Java (Лб).txt").write_text(
-        "Java (Лб) — 05.10.2026 11:10–12:30, Коваль\n\n[11:12:00] Сьогодні колекції\n", encoding="utf-8")
-    text = past_lessons(tmp_path)
-    assert "Бази даних (Лк)" in text and "Підсумок: Про що: індекси." in text and "Добрий день" not in text
-    assert "Java (Лб)" in text and "Сьогодні колекції" in text
-    assert past_lessons(tmp_path / "немає") == ""

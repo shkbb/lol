@@ -146,6 +146,11 @@ class Runner:
 
         self.sleep_guard.hold(self._lessons_left_today(now))
 
+    def finish_all(self) -> None:
+        """Програму закривають посеред пари — запис пари однаково має зберегтися."""
+        for key in list(self.active):
+            self._forget(key)
+
     def act_now(self, now: datetime | None = None) -> None:
         """Дії помічника («+» на перекличці, «напиши …», кнопка в Telegram) — одразу, а не на наступному
         кроці (раз на 20 с): на перекличці відповідь, що прийшла через півхвилини, нікому не потрібна."""

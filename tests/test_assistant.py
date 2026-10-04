@@ -594,7 +594,7 @@ def test_mention_alerts_can_be_switched_off():
 def test_free_question_goes_to_the_brain_with_what_we_know():
     assistant, inbox = listening("off")
     asked = []
-    assistant.ask_brain = lambda question, context: asked.append((question, context))
+    assistant.ask_brain = lambda question, context, current: asked.append((question, context))
     assistant.on_participants(KEY, 23)
     say(assistant, "Сьогодні говоримо про індекси й B-дерева.")
     assert assistant.on_command("Про що зараз говорить викладач?", at("10:05")).startswith("🧠")
@@ -609,6 +609,6 @@ def test_free_question_goes_to_the_brain_with_what_we_know():
 def test_question_without_a_lesson_is_about_past_ones():
     assistant = Assistant(MeSettings(name="Ляшко Денис"), Inbox())
     asked = []
-    assistant.ask_brain = lambda question, context: asked.append(context)
+    assistant.ask_brain = lambda question, context, current: asked.append(context)
     assistant.on_command("Що було на минулих парах?", at("12:00"))
     assert asked and "не на парі" in asked[0]
