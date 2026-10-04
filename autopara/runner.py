@@ -146,6 +146,15 @@ class Runner:
 
         self.sleep_guard.hold(self._lessons_left_today(now))
 
+    def act_now(self, now: datetime | None = None) -> None:
+        """Дії помічника («+» на перекличці, «напиши …», кнопка в Telegram) — одразу, а не на наступному
+        кроці (раз на 20 с): на перекличці відповідь, що прийшла через півхвилини, нікому не потрібна."""
+        if self.assistant is None:
+            return
+        now = now or self.clock()
+        for action in self.assistant.take_actions():
+            self._act(action, now)
+
     def _look(self, key: str, session: Session, now: datetime) -> Observation:
         """Очі: що зараз у зустрічі (лише для вкладок браузера)."""
         if session.page is None:

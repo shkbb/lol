@@ -137,6 +137,7 @@ class Controller:
                     self._refuse_waiting()
                     return
             self._tick_if_due()
+            self._act_now()
             self._watch_login()
             if self.joiner is not None:
                 self.joiner.idle(0.5)  # чекаємо, даючи браузеру доставляти події
@@ -185,6 +186,14 @@ class Controller:
                 self._do_stop()
                 self._do_start()
             self._publish()
+
+    def _act_now(self) -> None:
+        if self.runner is None or not hasattr(self.runner, "act_now"):
+            return
+        try:
+            self.runner.act_now(self.clock())
+        except Exception:  # noqa: BLE001
+            log.exception("Помилка під час дії в зустрічі")
 
     def _do_start(self) -> str:
         self._user_stopped = False

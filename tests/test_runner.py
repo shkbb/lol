@@ -338,3 +338,12 @@ def test_zoom_client_class_is_heard_and_reported():
     assert audio.log == ["start", "stop"]
     [record] = finished
     assert record.transcript and "Ляшко, ви тут?" in record.transcript[0][1]  # у звіт розшифровка потрапила
+
+
+def test_chat_actions_happen_at_once_not_on_the_next_tick():
+    """«напиши …» з Telegram (і «+» на перекличці) — одразу, а не через 20 с на наступному кроці."""
+    runner, joiner, inbox = make_assisted_runner([make_lesson()])
+    runner.tick(at("09:28"))
+    runner.assistant.on_command("напиши тест", at("09:40"))
+    runner.act_now(at("09:40"))  # так робить програма кожні пів секунди між кроками
+    assert joiner.written == ["тест"]
