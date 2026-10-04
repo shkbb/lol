@@ -37,6 +37,9 @@ FAKE_MEET = """<!doctype html>
       <div><div>Іван Коваль <span>10:23</span></div>
         <div><div data-message-id="m1">Поставте плюс</div><div data-message-id="m2">+</div></div></div>
       <div><div>Олена Бойко 10:24</div><div><div data-message-id="m3">+</div></div></div>
+      <div><div>Марта Ткач <div role="tooltip">Наведіть курсор на повідомлення, щоб закріпити його</div> 10:25</div>
+        <div><div data-message-id="m4">asdkhhsdlk<button aria-label="Закріпити повідомлення"><i aria-hidden="true">keep</i></button>
+        <span>Наведіть курсор на повідомлення, щоб закріпити його</span> keep</div></div></div>
     </div>
     <textarea id="chatbox" aria-label="Send a message"></textarea>
   </div>
@@ -227,6 +230,7 @@ def test_chat_is_read_with_authors_and_written(joiner):
             ChatMessage("m1", "Іван Коваль", "Поставте плюс"),
             ChatMessage("m2", "Іван Коваль", "+"),
             ChatMessage("m3", "Олена Бойко", "+"),
+            ChatMessage("m4", "Марта Ткач", "asdkhhsdlk"),  # без підказки й значка «keep» кнопки закріплення
         ]
         assert joiner.send_chat(session, "+")
         # Чат уже відкритий — повторне «відкриття» не має його закрити.

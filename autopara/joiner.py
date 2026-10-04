@@ -268,8 +268,22 @@ def observe_meet(page: Page) -> Observation:
 CHAT_BUTTON_RE = re.compile(r"chat|чат", re.I)
 CHAT_INPUT_RE = re.compile(r"send a message|message|повідомлення|сообщение", re.I)
 # Повідомлення в чаті Meet мають data-message-id; автора шукаємо в заголовку групи повідомлень.
+# Текст беремо без кнопок, значків і підказок Meet («Наведіть курсор на повідомлення, щоб закріпити його»,
+# значок-шрифт «keep»): інакше вони потрапляли в чат звіту як частина повідомлення чи навіть як автор.
 READ_MEET_CHAT_JS = """() => {
   const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+  const SKIP = 'button,[role=button],[role=tooltip],[aria-hidden="true"],[role=img],i,svg';
+  const UI = /(наведіть курсор на повідомлення[^.!?]*|закріпити повідомлення|відкріпити повідомлення|hover over a message[^.!?]*|(un)?pin message|наведите курсор на сообщение[^.!?]*|(за|от)крепить сообщение)(\\s*(keep|push_pin))*/gi;
+  const textOf = (root) => {
+    const parts = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const skip = node.parentElement && node.parentElement.closest(SKIP);
+      if (skip && skip !== root && root.contains(skip)) continue;
+      parts.push(node.textContent);
+    }
+    return clean(clean(parts.join(' ')).replace(UI, ' ').replace(/^((keep|push_pin)\\s*)+|(\\s*(keep|push_pin))+$/g, ''));
+  };
   return [...document.querySelectorAll('[data-message-id]')].map((el) => {
     let author = '';
     let node = el;
@@ -277,11 +291,11 @@ READ_MEET_CHAT_JS = """() => {
       author = clean(node.getAttribute && node.getAttribute('data-sender-name'));
       for (let sib = node.previousElementSibling; sib && !author; sib = sib.previousElementSibling) {
         if (sib.hasAttribute('data-message-id') || sib.querySelector('[data-message-id]')) break;
-        const text = clean(sib.innerText);
+        const text = textOf(sib);
         if (text && text.length <= 80) author = text.replace(/\\s*\\d{1,2}:\\d{2}(\\s*[AP]M)?$/i, '');
       }
     }
-    return {id: el.getAttribute('data-message-id'), author, text: clean(el.innerText)};
+    return {id: el.getAttribute('data-message-id'), author, text: textOf(el)};
   });
 }"""
 

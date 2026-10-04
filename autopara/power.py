@@ -1,4 +1,4 @@
-"""Не дає комп'ютеру заснути від бездіяльності, поки сьогодні ще є пари.
+"""Не дає комп'ютеру заснути від бездіяльності, поки йде пара або до наступної менше доби.
 
 Linux — systemd-inhibit, macOS — caffeinate, Windows — SetThreadExecutionState.
 Закрита кришка ноута, як і раніше, присипляє його.
@@ -48,10 +48,10 @@ class SleepGuard:
             return
         if needed:
             if self._start():
-                log.info("Не даю комп'ютеру заснути, поки не скінчаться сьогоднішні пари")
+                log.info("Не даю комп'ютеру заснути: до пари менше доби (екран гасне як завжди)")
         else:
             self.release()
-            log.info("Пари на сьогодні скінчились — комп'ютер знову може засинати")
+            log.info("Найближчої доби пар немає — комп'ютер знову може засинати")
 
     def _start(self) -> bool:
         if self._backend == "windows":
@@ -70,7 +70,7 @@ class SleepGuard:
                 "systemd-inhibit",
                 "--what=sleep:idle",
                 "--who=autopara",
-                "--why=Сьогодні ще є пари",
+                "--why=Скоро пара — autopara зайде на неї сама",
                 "--mode=block",
                 "tail",
                 f"--pid={os.getpid()}",

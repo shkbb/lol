@@ -18,6 +18,8 @@ from .session import JoinError, Session
 
 log = logging.getLogger(__name__)
 
+SLEEP_GUARD_AHEAD = timedelta(hours=24)  # за скільки до пари вже не даємо комп'ютеру заснути
+
 # Якщо до кінця пари лишилось менше — вже не заходимо.
 TOO_LATE = timedelta(minutes=5)
 RETRY_JOIN_AFTER = timedelta(minutes=2)
@@ -144,7 +146,7 @@ class Runner:
             for action in self.assistant.take_actions():
                 self._act(action, now)
 
-        self.sleep_guard.hold(self._lessons_left_today(now))
+        self.sleep_guard.hold(self._lesson_soon(now))
 
     def finish_all(self) -> None:
         """Програму закривають посеред пари — запис пари однаково має зберегтися."""
@@ -207,11 +209,13 @@ class Runner:
             else:
                 self.notify("Не вдалося зробити скріншот")
 
-    def _lessons_left_today(self, now: datetime) -> bool:
+    def _lesson_soon(self, now: datetime) -> bool:
+        """Чи не можна зараз засинати: іде пара або наступна — менш ніж за добу. Тоді ноутбук, залишений на ніч,
+        уранці сам зайде на пару, а на вихідних (коли до пари більше доби) може спати."""
         if self.active:
             return True
         return any(
-            visit.join_at.date() == now.date() and visit.leave_at > now and visit.key not in self.finished
+            visit.leave_at > now and visit.join_at - now <= SLEEP_GUARD_AHEAD and visit.key not in self.finished
             for visit in self.plan.visits
         )
 

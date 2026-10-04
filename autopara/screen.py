@@ -238,7 +238,7 @@ class Viewer:
             cdp.on("Page.screencastFrame", lambda params, cdp=cdp: self._frame(cdp, params))
             width, height = self._size
             scale = self.screen.scale
-            cdp.send("Page.startScreencast", {"format": "jpeg", "quality": 80,
+            cdp.send("Page.startScreencast", {"format": "jpeg", "quality": 90,
                                               "maxWidth": int(width * scale), "maxHeight": int(height * scale)})
         except Exception as e:  # noqa: BLE001 — вкладка закрилась саме зараз; спробуємо ще раз на наступному колі
             log.debug("Не вдалося показати вкладку: %s", e)

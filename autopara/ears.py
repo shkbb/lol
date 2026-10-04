@@ -35,7 +35,12 @@ log = logging.getLogger(__name__)
 
 SINK = "autopara"
 RATE = 16_000  # Гц, моно, 16 біт — те, що їсть whisper
-CHUNK_SECONDS = 10
+CHUNK_SECONDS = 10  # звичайна довжина шматка; насправді ріжемо по паузах (див. Segmenter)
+# Whisper будь-який шматок рахує як 30 с, тож короткі шматки марнують процесор, а різ посеред слова
+# псує і це слово, і контекст. Ріжемо по паузі між фразами, щойно назбиралось хоч MIN, і не довше за MAX.
+SEGMENT_MIN_SECONDS = 6
+SEGMENT_MAX_SECONDS = 25
+FRAME_SECONDS = 0.25
 SILENCE_RMS = 150
 DEBUG_AUDIO = Path.home() / ".autopara" / "debug-ears.raw"  # лише в autopara -v: сирий звук 16 кГц моно s16le
 SOURCES = ("auto", "browser", "pulse")  # звук пар у браузері: зі сторінки пари чи весь звук браузера (Linux)
@@ -43,7 +48,7 @@ APP_STREAM_RE = re.compile(r"zoom", re.I)  # аудіопотоки Zoom-клі�
 TAP_SCRIPT = Path(__file__).with_name("ears_tap.js")
 # Якщо модель не встигає за мовою — на яку переходити (turbo зазвичай не повільніший за medium).
 LIGHTER_MODEL = {
-    "large-v3": "large-v3-turbo",
+    "large-v3": "large-v3-turbo",  # turbo для української помітно гірша, тож лише якщо large-v3 зовсім не встигає
     "large-v2": "large-v3-turbo",
     "large-v3-turbo": "small",
     "turbo": "small",
@@ -233,8 +238,100 @@ def is_silence(pcm: bytes) -> bool:
     return loudness(pcm) < SILENCE_RMS
 
 
+class Segmenter:
+    """Ріже безперервний звук на шматки по паузах між фразами — а не кожні 10 с посеред слова.
+
+    Шматок готовий, коли в ньому вже є мова, назбиралось ``SEGMENT_MIN_SECONDS`` і настала пауза (пів секунди
+    тихіше за мову), або коли дійшли до ``SEGMENT_MAX_SECONDS`` — тоді ріжемо в найтихішому місці останніх секунд.
+    Перекличка («Ляшко Денис?» — і викладач чекає) якраз закінчується паузою, тож іде в роботу одразу.
+    """
+
+    def __init__(self, rate: int = RATE):
+        self.frame_bytes = int(rate * FRAME_SECONDS) * 2
+        self.frames: list[bytes] = []
+        self.levels: list[int] = []
+        self._partial = b""
+        self.speech_level = 0.0  # типова гучність мови — від неї рахуємо, що таке «тихо»
+
+    def _quiet_level(self) -> float:
+        return max(SILENCE_RMS, self.speech_level * 0.12)
+
+    def feed(self, data: bytes) -> list[bytes]:
+        ready = []
+        data = self._partial + data
+        whole = len(data) - len(data) % self.frame_bytes
+        self._partial = data[whole:]
+        for start in range(0, whole, self.frame_bytes):
+            frame = data[start:start + self.frame_bytes]
+            level = loudness(frame)
+            if level >= SILENCE_RMS * 2:
+                self.speech_level = level if not self.speech_level else self.speech_level * 0.95 + level * 0.05
+            self.frames.append(frame)
+            self.levels.append(level)
+            segment = self._cut()
+            if segment:
+                ready.append(segment)
+        return ready
+
+    def _has_speech(self, levels: list[int]) -> bool:
+        return any(level >= SILENCE_RMS * 2 for level in levels)
+
+    def _cut(self) -> bytes:
+        count = len(self.levels)
+        if not self._has_speech(self.levels):
+            if count > 4:  # лише тиша — тримаємо секунду перед фразою, решту відкидаємо
+                del self.frames[:-4], self.levels[:-4]
+            return b""
+        seconds = count * FRAME_SECONDS
+        quiet = self._quiet_level()
+        if seconds >= SEGMENT_MIN_SECONDS and all(level < quiet for level in self.levels[-2:]):
+            return self._take(count)
+        if seconds >= SEGMENT_MAX_SECONDS:
+            # Паузи так і не було — ріжемо в найтихішому місці останніх 10 с (ближче до кінця — краще).
+            start = max(int(SEGMENT_MIN_SECONDS / FRAME_SECONDS), count - int(10 / FRAME_SECONDS))
+            best = min(range(start, count), key=lambda i: (self.levels[i], -i))
+            return self._take(best + 1)
+        return b""
+
+    def _take(self, count: int) -> bytes:
+        segment = b"".join(self.frames[:count])
+        del self.frames[:count], self.levels[:count]
+        return segment
+
+    def flush(self) -> bytes:
+        """Звук скінчився (пара закінчилась) — віддати те, що лишилось, якщо там є мова."""
+        frames, levels = self.frames, self.levels
+        self.frames, self.levels, self._partial = [], [], b""
+        return b"".join(frames) if self._has_speech(levels) else b""
+
+
+def collapse_loops(text: str, times: int = 4) -> str:
+    """Whisper інколи зациклюється: «Тестування, Тестування, Тестування, …». Слово чи фразу до трьох слів,
+    повторену поспіль ``times`` і більше разів, лишаємо один раз (звичайне «так, так, так» не чіпаємо)."""
+    words = text.split()
+    key = [re.sub(r"[^\w']+", "", word.casefold()) for word in words]
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        for size in (1, 2, 3):
+            phrase = key[i:i + size]
+            if len(phrase) < size or not all(phrase):
+                continue
+            count = 1
+            while key[i + count * size:i + (count + 1) * size] == phrase:
+                count += 1
+            if count >= times:
+                out += words[i:i + size]
+                i += count * size
+                break
+        else:
+            out.append(words[i])
+            i += 1
+    return " ".join(out)
+
+
 def clean_text(text: str) -> str:
-    text = " ".join(text.split())
+    text = collapse_loops(" ".join(text.split()))
     return "" if not text or HALLUCINATIONS.search(text) else text
 
 
@@ -273,14 +370,17 @@ def total_ram_gb() -> float:
 
 
 def resolve_model(model: str) -> str:
-    """"auto" → модель за потужністю: точна large-v3-turbo там, де вона встигатиме, інакше small.
+    """"auto" → модель за потужністю. Для української large-v3 помітно точніша за turbo (у turbo урізаний
+    декодер), а шматки по паузах роблять її посильною для потужного ноутбука. Слабшому — turbo чи small.
 
     Якщо все ж не встигатиме за мовою, вуха самі перейдуть на легшу (див. LIGHTER_MODEL).
     """
     if model != "auto":
         return model
-    strong = (os.cpu_count() or 1) >= 8 and total_ram_gb() >= 12
-    return "large-v3-turbo" if strong else "small"
+    cpus, ram = os.cpu_count() or 1, total_ram_gb()
+    if cpus >= 8 and ram >= 12:
+        return "large-v3"
+    return "large-v3-turbo" if cpus >= 4 and ram >= 8 else "small"
 
 
 class WhisperTranscriber:
@@ -607,7 +707,7 @@ class NoAppCapture:
 
 
 class Ears:
-    """Фоновий потік: звук → шматки по ~10 с → текст → on_text(текст, чи впевнено).
+    """Фоновий потік: звук → шматки по паузах між фразами (6–25 с) → текст → on_text(текст, чи впевнено).
 
     ``source`` — пристрій PulseAudio (рядок, наприклад "autopara.monitor") або готовий потік
     (AudioQueue).
@@ -662,10 +762,9 @@ class Ears:
             return
         if self.on_ready:
             self.on_ready()
-        chunk_bytes = RATE * 2 * CHUNK_SECONDS
         while not self._stop.is_set():
             self._stream = self._record()
-            buffer = b""
+            segmenter = Segmenter()
             quiet = 0
             while not self._stop.is_set():
                 data = self._stream.read(RATE)  # ~0,5 с
@@ -675,9 +774,8 @@ class Ears:
                     # Звук перестав надходити (пара скінчилась) — дорозпізнати хвіст, щоб він
                     # не злипся з початком наступної пари.
                     quiet += 1
-                    if quiet >= 3 and len(buffer) >= RATE * 2 * 2:
-                        self._hear(buffer)
-                        buffer = b""
+                    if quiet >= 3 and (tail := segmenter.flush()):
+                        self._hear(tail)
                     continue
                 if not is_silence(data):  # системний звук іде й тишею — «чую» лише справжній звук
                     if quiet >= 30 or not self._hearing:
@@ -686,10 +784,10 @@ class Ears:
                 quiet = 0
                 if self.on_audio:
                     self.on_audio(data)
-                buffer += data
-                if len(buffer) >= chunk_bytes:
-                    chunk, buffer = buffer[:chunk_bytes], buffer[chunk_bytes:]
-                    self._hear(chunk)
+                for segment in segmenter.feed(data):
+                    self._hear(segment)
+            if (tail := segmenter.flush()) and not self._stop.is_set():
+                self._hear(tail)  # потік обірвався — сказане перед тим не губимо
             if not self._stop.is_set():
                 log.warning("Запис звуку обірвався — перезапускаю за 5 с")
                 self._stop.wait(5)
@@ -708,16 +806,16 @@ class Ears:
         except Exception as e:  # noqa: BLE001 — одна невдала спроба не має вбивати вуха
             log.warning("Не вдалося розпізнати мову: %s", e)
             return
-        self._watch_speed(monotonic() - started)
+        self._watch_speed(monotonic() - started, len(chunk) / RATE / 2)
         for item in heard:
             if text := clean_text(item.text):
                 log.debug("👂 %s%s", "" if item.confident else "[?] ", text)
                 self.on_text(text, item.confident)
 
-    def _watch_speed(self, seconds: float) -> None:
+    def _watch_speed(self, seconds: float, audio_seconds: float = CHUNK_SECONDS) -> None:
         """Точність важливіша за швидкість: точна модель може трохи відставати й наздоганяти в паузах.
         На легшу переходимо, лише якщо комп'ютер аж утричі повільніший за мову — тоді відставання росло б без меж."""
-        self._slow = self._slow + 1 if seconds > CHUNK_SECONDS * 3 else 0
+        self._slow = self._slow + 1 if seconds > max(audio_seconds, CHUNK_SECONDS) * 3 else 0
         if self._slow < 3:
             return
         downgrade = getattr(self.transcribe, "downgrade", None)
@@ -725,10 +823,10 @@ class Ears:
             self._slow = 0
         elif self._slow == 3:
             log.warning(
-                "Розпізнавання не встигає за парою (%.0f с на %d с звуку) — постав меншу модель у [ears] model "
+                "Розпізнавання не встигає за парою (%.0f с на %.0f с звуку) — постав меншу модель у [ears] model "
                 "(порівняти: autopara listen-test)",
                 seconds,
-                CHUNK_SECONDS,
+                audio_seconds,
             )
 
 

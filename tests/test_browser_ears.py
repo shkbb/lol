@@ -98,3 +98,46 @@ def test_youtube_in_the_same_browser_is_not_heard(tmp_path):
 
 def test_other_meet_tab_is_not_heard_until_the_app_joins_there(tmp_path):
     assert listen(tmp_path, "https://meet.google.com/xyz-abcd-efg", MEET_LIKE, enable=False, seconds=3) == b""
+
+
+# Голос (440 Гц) і писк 12 кГц, якого whisper не чує: після перетворення в 16 кГц писк має зникнути,
+# а не «накластися» на мову десь біля 4 кГц.
+HIGH_PITCH = """<!doctype html><script>
+const ctx = new AudioContext();
+for (const [frequency, volume] of [[440, 0.3], [12000, 0.3]]) {
+  const tone = ctx.createOscillator();
+  tone.frequency.value = frequency;
+  const gain = ctx.createGain();
+  gain.gain.value = volume;
+  tone.connect(gain);
+  gain.connect(ctx.destination);
+  tone.start();
+}
+</script>"""
+
+
+def test_tab_sound_is_resampled_without_aliasing(tmp_path):
+    import numpy as np
+
+    stream = AudioQueue()
+    browser = Browser(tmp_path, mute_sound=True, audio_tap=stream.feed_base64)
+    try:
+        page = browser.new_page()
+        page.route("https://meet.google.com/**", lambda route: route.fulfill(body=HIGH_PITCH, content_type="text/html"))
+        page.goto("https://meet.google.com/abc-defg-hij")
+        page.evaluate("() => window.__autoparaTap.enable()")
+        cdp = page.context.new_cdp_session(page)
+        result = cdp.send("Runtime.evaluate", {"expression": "window.__autoparaTap.captureTab(true)",
+                                               "awaitPromise": True, "userGesture": True, "returnByValue": True})
+        assert result["result"]["value"] == "ок"
+        page.wait_for_timeout(4000)
+        pcm = stream.read(10**9)
+    finally:
+        browser.close()
+    samples = np.frombuffer(pcm[16_000 * 2:], dtype=np.int16).astype(np.float64)
+    assert len(samples) >= 16_000 * 2
+    spectrum = np.abs(np.fft.rfft(samples * np.hanning(len(samples))))
+    freqs = np.fft.rfftfreq(len(samples), 1 / 16_000)
+    voice = spectrum[(freqs > 400) & (freqs < 480)].max()
+    alias = spectrum[(freqs > 3800) & (freqs < 4200)].max()  # 16 − 12 = 4 кГц
+    assert voice > 1000 * alias

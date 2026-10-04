@@ -47,7 +47,10 @@ def test_ears_transcribe_loud_chunks_only(monkeypatch):
     monkeypatch.setattr(listener, "_record", lambda: FakeStream())
     monkeypatch.setattr(listener._stop, "wait", lambda seconds: done.set() or listener._stop.set())
     listener._run()
-    assert chunks == [ears.RATE * 2 * 10] * 2  # тихий шматок навіть не розпізнавали
+    # Різ — у паузі після першої фрази (10 с мови + пів секунди тиші), тиша сама по собі не розпізнається,
+    # а друга фраза — коли звук скінчився.
+    assert chunks[0] == ears.RATE * 2 * 10 + ears.RATE and len(chunks) == 2
+    assert 10 <= chunks[1] / ears.RATE / 2 <= 11  # з секундою тиші перед фразою, не більше
     assert heard == [("Ляшко, ви тут?", True), ("щось нерозбірливе", False)]  # галюцинацію відкинуто
 
 
@@ -104,6 +107,29 @@ def test_old_faster_whisper_without_hotwords(monkeypatch):
     transcriber = WhisperTranscriber("small", "uk", hints=lambda: "Ляшко Денис")
     assert transcriber(tone(1, 3000)) == [Heard("Добрий день", True)]
     assert "hotwords" not in calls[0]
+
+
+def test_segments_end_at_pauses_not_mid_word():
+    from autopara.ears import Segmenter
+
+    segmenter = Segmenter()
+    # Фраза 4 с, пауза 1 с, фраза 5 с, пауза — різ лише в паузі після 6 с, а не посеред фрази.
+    ready = segmenter.feed(tone(4, 3000) + tone(1, 0) + tone(5, 3000))
+    assert ready == []
+    ready = segmenter.feed(tone(1, 0))
+    assert [len(chunk) / 32000 for chunk in ready] == [10.5]
+    assert segmenter.feed(tone(10, 0)) == [] and segmenter.flush() == b""  # тиша нікуди не йде
+
+    # Говорять без пауз — ріжемо не пізніше ніж за 25 с, у найтихішому місці.
+    quieter = tone(1, 3000)[:16000] + tone(1, 400)[:16000]
+    ready = segmenter.feed(tone(20, 3000) + quieter + tone(10, 3000))
+    assert len(ready) == 1 and 20 <= len(ready[0]) / 32000 <= 25
+    assert len(segmenter.flush()) / 32000 > 5  # решта — у наступному шматку, нічого не загублено
+
+
+def test_whisper_loops_are_collapsed():
+    assert clean_text("Тестування, Тестування, Тестування, Тестування, Тестування далі") == "Тестування, далі"
+    assert clean_text("так, так, так") == "так, так, так"  # звичайне повторення лишається
 
 
 def test_warns_when_model_is_too_slow(caplog):
@@ -334,8 +360,10 @@ def test_missing_cable_is_reported_not_fatal(monkeypatch, caplog):
 def test_model_is_picked_by_computer_power(monkeypatch):
     monkeypatch.setattr(ears.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(ears, "total_ram_gb", lambda: 16)
-    assert ears.resolve_model("auto") == "large-v3-turbo"
+    assert ears.resolve_model("auto") == "large-v3"  # для української помітно точніша за turbo
     monkeypatch.setattr(ears, "total_ram_gb", lambda: 8)
+    assert ears.resolve_model("auto") == "large-v3-turbo"
+    monkeypatch.setattr(ears.os, "cpu_count", lambda: 2)
     assert ears.resolve_model("auto") == "small"
     assert ears.resolve_model("medium") == "medium"
     assert ears.total_ram_gb.__module__  # справжня функція теж працює на цій ОС

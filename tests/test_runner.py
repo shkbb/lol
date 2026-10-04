@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from autopara.assistant import Assistant, ChatMessage
@@ -218,9 +218,11 @@ def test_same_meeting_next_pair_restarts_the_decision():
     assert session.decider.end == at("12:30")
 
 
-def test_sleep_is_blocked_only_while_lessons_remain_today():
+def test_sleep_is_blocked_from_a_day_before_a_lesson_until_it_ends():
     runner, _, joiner = make_runner([make_lesson()])
-    runner.tick(at("07:00"))
+    runner.tick(at("07:00") - timedelta(days=1, hours=1))  # пара аж за добу з годиною — спати можна
+    assert not runner.sleep_guard.holding
+    runner.tick(at("07:00") - timedelta(hours=20))  # уже ввечері напередодні — ноутбук не засне вночі
     assert runner.sleep_guard.holding
     runner.tick(at("09:28"))
     runner.tick(at("10:50"))

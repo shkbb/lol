@@ -39,8 +39,12 @@
         const track = stream.getAudioTracks()[0];
         if (!track) return "без звукової доріжки";
         state.tab = track;
-        const source = context().createMediaStreamSource(new MediaStream([track]));
-        source.connect(processor(state.ctx, "tab"));
+        // Окремий контекст одразу на 16 кГц: Chrome сам якісно перетворює звук (з фільтром), і високі
+        // частоти не накладаються на мову, як від простого проріджування.
+        const ctx = new AudioContext({ sampleRate: RATE });
+        if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        state.tabCtx = ctx;
+        ctx.createMediaStreamSource(new MediaStream([track])).connect(processor(ctx, "tab"));
         return "ок";
       } catch (e) {
         return `не вийшло: ${e.name}`;
