@@ -87,9 +87,16 @@ def whisper_available() -> str | None:
 def pick_source(setting: str) -> str:
     """"pulse" чи "browser" для налаштування [ears] source.
 
-    За замовчуванням — зі сторінки пари: так вуха чують лише пару, а не все, що грає в браузері.
+    За замовчуванням на Linux — звук самого браузера програми через PipeWire/PulseAudio: так вуха чують
+    рівно те, що браузер грає, як би сторінка всередині не була влаштована (справжній Meet віддає збирачу
+    на сторінці тишу). У браузері програми відкрита лише пара, тож чужого туди не потрапляє.
+    Деінде (і якщо системного звуку немає) — зі сторінки пари.
     """
-    return "pulse" if setting == "pulse" else "browser"
+    if setting == "browser":
+        return "browser"
+    if setting == "pulse":
+        return "pulse"
+    return "pulse" if pulse_available() is None else "browser"
 
 
 class AudioStream(Protocol):

@@ -193,8 +193,11 @@ def test_ears_flush_the_tail_when_the_class_ends():
     assert chunks == [ears.RATE * 2 * 4]
 
 
-def test_audio_source_choice():
-    assert ears.pick_source("auto") == "browser"  # за замовчуванням — лише вкладка пари
+def test_audio_source_choice(monkeypatch):
+    monkeypatch.setattr(ears, "pulse_available", lambda: None)
+    assert ears.pick_source("auto") == "pulse"  # Linux: звук самого браузера програми — так чути справжній Meet
+    monkeypatch.setattr(ears, "pulse_available", lambda: "немає pactl")
+    assert ears.pick_source("auto") == "browser"  # без системного звуку (Windows, macOS) — зі сторінки пари
     assert ears.pick_source("browser") == "browser"
     assert ears.pick_source("pulse") == "pulse"
 

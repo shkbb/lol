@@ -123,8 +123,8 @@ class SettingsPage(QWidget):
         ], "Якщо комп'ютер не встигатиме, програма сама перейде на легшу.", default="auto"))
         if platform_is_linux():
             more.add(w.select_field(model, "ears.source", "Пари в браузері: звідки брати звук", [
-                ("auto", "зі вкладки пари (рекомендовано)"), ("pulse", "весь звук браузера програми (PipeWire/PulseAudio)"),
-            ], "Зі вкладки пари — вуха чують лише пару, навіть із вимкненим звуком.", default="auto"))
+                ("auto", "звук браузера програми (рекомендовано)"), ("browser", "зі сторінки пари (запасний спосіб)"),
+            ], "У браузері програми відкрита лише пара, тож вуха чують саме її.", default="auto"))
         else:
             more.add(self._zoom_cable())
         more.add(w.text_field(model, "brain.model", "Модель мозку", placeholder="gemma3:4b"))
