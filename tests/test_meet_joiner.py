@@ -268,7 +268,9 @@ def test_whole_chain_group_plus_is_mirrored(joiner):
     assistant = Assistant(MeSettings(name="Ляшко Денис"), lambda text, urgent=False: inbox.append(text))
     runner = Runner(Config(schedule=ScheduleSettings(group="ТЦР-32")), None, joiner, sleep_guard=NoGuard(), assistant=assistant)
     now = datetime.now(TZ)
-    meeting = Visit("https://meet.google.com/normal", "meet", [make_lesson()], now, now + timedelta(minutes=30))
+    # Пара — довкола «зараз», а не на фіксовану дату: інакше в сам цей день тест бачив пару, що вже скінчилась.
+    lesson = make_lesson(day=now.date(), start=f"{now - timedelta(minutes=5):%H:%M}", end=f"{now + timedelta(minutes=40):%H:%M}")
+    meeting = Visit("https://meet.google.com/normal", "meet", [lesson], now, now + timedelta(minutes=30))
     runner.plan = Plan(visits=[meeting])
     runner.next_refresh = meeting.leave_at
     runner.tick()
