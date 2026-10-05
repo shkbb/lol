@@ -180,7 +180,7 @@ class Runner:
 
         for key, session in list(self.active.items()):
             if not self.joiner.alive(session):
-                log.info("Вкладку «%s» закрито вручну", session.visit.title)
+                log.info("Вкладку «%s» закрито вручну", session.title)
                 self._forget(key)
                 continue
             seen = self._look(key, session, now)
@@ -231,11 +231,11 @@ class Runner:
 
     def _leave(self, key: str, reason: str) -> None:
         session = self.active[key]
-        log.info("Виходжу з «%s»: %s", session.visit.title, reason)
+        log.info("Виходжу з «%s»: %s", session.title, reason)
         self.joiner.leave(session)
         self._forget(key)
         self._save_visited()
-        self.notify(f"👋 Вийшов з «{session.visit.title}»: {reason}", routine=True)
+        self.notify(f"👋 Вийшов з «{session.title}»: {reason}", routine=True)
 
     def _forget(self, key: str) -> None:
         session = self.active.pop(key, None)
@@ -257,7 +257,7 @@ class Runner:
             self._leave(action.key, action.reason)
         elif action.kind == "screenshot":
             if shot := self.joiner.screenshot(session):
-                self.assistant.photo(shot, f"🖥 «{session.visit.title}», {now:%H:%M}")
+                self.assistant.photo(shot, f"🖥 «{session.title}», {now:%H:%M}")
             else:
                 self.notify("Не вдалося зробити скріншот")
 
@@ -316,6 +316,7 @@ class Runner:
         for session in self.active.values():
             if session.url == visit.url:
                 session.leave_at = max(session.leave_at, visit.leave_at)
+                session.current = visit.title  # скріншоти й «вийшов з…» — уже з назвою цієї пари
                 if session.decider is not None:
                     session.decider.next_lesson(*self._window(visit))
                 if self.assistant is not None:

@@ -405,3 +405,18 @@ def test_schedule_site_down_after_restart_uses_the_saved_schedule(tmp_path):
     client2.fail = True
     other.tick(at("09:28"))
     assert joiner2.joined == []
+
+
+def test_joined_by_link_then_the_scheduled_lesson_takes_over_the_title():
+    """Наживо: зайшли за посиланням («Тестовий вхід»), потім ожив розклад — скріншоти мали б назву пари."""
+    from autopara.planner import Visit
+    from autopara.rozklad import Lesson as RLesson
+
+    runner, _, joiner = make_runner([make_lesson()])
+    now = at("09:20")
+    test = Visit(MEET, "meet", [RLesson(now.date(), now.time(), at("10:20").time(), "Тестовий вхід")], now, at("10:20"))
+    runner.extra_visits.append(test)
+    runner.tick(now)
+    runner.tick(at("09:28"))  # пара з розкладу — та сама зустріч
+    [session] = runner.active.values()
+    assert session.title == "Бази даних" and joiner.joined == ["Тестовий вхід"]

@@ -442,7 +442,7 @@ class Controller:
             state["active"] = [
                 {
                     "key": key,
-                    "title": session.visit.title,
+                    "title": session.title,
                     "platform": session.visit.platform,
                     "url": session.visit.url,
                     "participants": getattr(runner.last_seen.get(key), "participants", None),

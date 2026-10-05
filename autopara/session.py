@@ -28,7 +28,12 @@ class Session:
     leave_at: datetime
     page: Any = None  # playwright Page; None — Zoom-клієнт, ним ми не керуємо
     decider: Any = None  # LeaveDecider, якщо виходимо разом з групою, а не за розкладом
+    current: str = ""  # пара, що йде зараз у цій зустрічі (наступна пара в тій самій зустрічі — інша назва)
 
     @property
     def url(self) -> str:
         return self.visit.url
+
+    @property
+    def title(self) -> str:
+        return self.current or self.visit.title

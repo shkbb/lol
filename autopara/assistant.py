@@ -114,10 +114,12 @@ RECAP_RE = re.compile(
     r"^\W*(викладач|лектор|на парі|зараз|пара)\b.{0,80}\b(обговорю|поясню|продовжу|розповіда|згаду|говорить|"
     r"розгляда|описує|читає|наводить|показує|підкреслю|демонстру)", re.I)
 URGENT_RE = re.compile(
-    r"тебе|тобі|студент[аові]? (ляшк|денис)|перекличк|відміт|присутн|плюс|камер|мікрофон|завдан|дедлайн|"
+    r"тебе|тобі|перекличк|відміт|присутн|плюс|камер|мікрофон|завдан|дедлайн|"
     r"контрольн|модульн|тест(ування)? (буде|зараз)|здати|здайте|до (понеділк|вівтор|серед|четвер|п.ятниц|суботи|неділ)|"
     r"оцінк|бал(и|ів)|питає|запиту|кличе|звертається|відповісти|залік|екзамен|іспит", re.I)
 BRAIN_NOTIFY_GAP = timedelta(minutes=10)  # не частіше для нетермінових мозкових сповіщень
+# «Студенту варто звернути увагу на…», «це може бути корисним» — порада від себе, а не подія на парі.
+GENERIC_ADVICE_RE = re.compile(r"звернути увагу|варто (звернути|врахувати|запам)|може бути корисн|рекоменду|зверни увагу", re.I)
 
 HELP = (
     "Я пишу, коли щось відбувається на парі. Що можна відповісти:\n"
@@ -861,7 +863,7 @@ class Assistant:
                 return
             if decision.action == "notify":
                 message = decision.message or why
-                if not self._worth_telling(meeting, message, now):
+                if not self._worth_telling(meeting, message, decision.reason, now):
                     log.info("Мозок: не турбую — це не стосується тебе особисто (буде у звіті)")
                     return
                 meeting.last_brain_notify = now
@@ -1012,12 +1014,15 @@ class Assistant:
         lines.append("\n↩️ Відповідай на це повідомлення — і я напишу твій текст у чат.")
         return "\n".join(lines)
 
-    def _worth_telling(self, meeting: Meeting, message: str, now: datetime) -> bool:
+    def _worth_telling(self, meeting: Meeting, message: str, quote: str, now: datetime) -> bool:
         """Чи варто будити студента мозковим сповіщенням: його назвали, перекличка, завдання, дедлайн, контрольна…
+
+        Судимо за цитатою з пари (``quote`` — що саме там сказали), а не за словами мозку: наживо маленька модель
+        дописувала до переказу лекції «Студенту Ляшко Денису варто звернути увагу» — і так проходила фільтр.
         Переказ лекції — ні; інше нетермінове — не частіше раз на BRAIN_NOTIFY_GAP."""
-        mentioned = any(pattern.search(message) for pattern, _ in self._patterns)
-        urgent = mentioned or bool(URGENT_RE.search(message))
-        if RECAP_RE.search(message) and not urgent:
+        evidence = quote or ""
+        urgent = any(pattern.search(evidence) for pattern, _ in self._patterns) or bool(URGENT_RE.search(evidence))
+        if not urgent and (RECAP_RE.search(message) or GENERIC_ADVICE_RE.search(message)):
             return False
         if urgent:
             return True
