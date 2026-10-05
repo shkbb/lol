@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Callable, Iterator
 
 from .assistant import Assistant
-from .brain import BrainConnector, BrainError, BrainWorker, OllamaBrain
+from .brain import BrainConnector, BrainError, BrainMemoryGuard, BrainWorker, OllamaBrain
 from .config import Config
 from .ears import (
     AudioQueue,
@@ -132,16 +132,10 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     assistant.on_finished = reporter.finish
     refine_name = resolve_refine_model(config.ears.refine_model, config.ears.model)
     if ears is not None and lesson_audio is not None and refine_name != "off":
-
-        def make_transcriber():
-            live = ears.transcribe if hasattr(ears.transcribe, "transcribe_long") else None
-            if live is None or live.name == refine_name:
-                return live  # та сама модель, що й наживо — не вантажимо другу копію
-            return WhisperTranscriber(refine_name, config.ears.language)
-
         refiner = Refiner(
             config.data_dir / "audio",
-            make_transcriber,
+            refine_name,
+            config.ears.language,
             lambda record: ", ".join(part for part in (config.me.name, record.teacher, record.title) if part),
             reporter.complete,
             reporter.fallback,
@@ -179,6 +173,10 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         connector = BrainConnector(brain, brain_ready)
         connector.start()
         stoppers.append(connector.stop)
+        guard = BrainMemoryGuard(brain, available_ram_gb)  # мало пам'яті — модель мозку геть, поки не знадобиться
+        guard.start()
+        stoppers.append(guard.stop)
+        reporter.after_report = lambda: stack.refine_allowed() and brain.unload()  # пар найближчим часом немає
 
     try:
         yield stack

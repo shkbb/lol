@@ -1,7 +1,9 @@
 """Друге розпізнавання після пари: звук пари пишеться у файл, після пари розпізнається вдруге точніше,
 і звіт робиться вже з цієї розшифровки (жива лишається для порівняння)."""
 
+import json
 import struct
+import sys
 import threading
 import time
 import types
@@ -86,19 +88,29 @@ def test_transcribe_long_uses_context_and_keeps_time(monkeypatch):
     assert calls[0]["initial_prompt"] == "Ляшко Денис, Бази даних"
 
 
-class FakeTranscriber:
-    def __init__(self, fail=False, silent=False):
-        self.fail, self.silent = fail, silent
-        self.calls = []
+# Замість справжнього процесу з моделлю — крихітний скрипт: так само окремий процес, лише без моделі.
+WORKER = """
+import json, sys, time
+from pathlib import Path
+job, mode = Path(sys.argv[1]), sys.argv[2]
+if mode == "slow":
+    time.sleep(30)
+if mode == "fail":
+    sys.exit(3)
+lines = [] if mode == "silent" else [[2.0, "Добрий день, сьогодні індекси"], [40.0, "Домашнє завдання: лаба 3 до п'ятниці"]]
+job.with_suffix(".result.json").write_text(json.dumps(lines, ensure_ascii=False), encoding="utf-8")
+"""
 
-    def transcribe_long(self, pcm, hint="", stop=None, beam_size=5, allowed=None):
-        self.calls.append((len(pcm), hint))
-        self.beams = getattr(self, "beams", []) + [beam_size]
-        if self.fail:
-            raise RuntimeError("модель зламалась")
-        if self.silent:
-            return []
-        return [(2.0, "Добрий день, сьогодні індекси"), (40.0, "Домашнє завдання: лаба 3 до п'ятниці")]
+
+class FakeWorker:
+    def __init__(self, mode="ok"):
+        self.mode = mode
+        self.calls, self.beams = [], []
+
+    def __call__(self, job, beam, hint):
+        self.calls.append((job.with_suffix(".raw").stat().st_size, hint))
+        self.beams.append(beam)
+        return [sys.executable, "-c", WORKER, str(job), self.mode]
 
 
 def wait_for(condition, timeout=10):
@@ -110,19 +122,20 @@ def wait_for(condition, timeout=10):
     raise AssertionError("не дочекався")
 
 
-def lesson_with_audio(tmp_path, transcriber, allowed=lambda: True, free_gb=lambda: 16.0):
+def lesson_with_audio(tmp_path, worker, allowed=lambda: True, free_gb=lambda: 16.0):
     inbox, brain = Inbox(), FakeBrain()
     reporter = Reporter(inbox, brain, InlineWorker(), tmp_path / "Пари")
     clock_now = [at("09:30")]
     audio = LessonAudio(tmp_path / "audio", lambda: clock_now[0])
-    refiner = Refiner(tmp_path / "audio", lambda: transcriber, lambda record: f"Ляшко Денис, {record.title}",
-                      reporter.complete, reporter.fallback, allowed=allowed, free_gb=free_gb, poll_seconds=0.05)
+    refiner = Refiner(tmp_path / "audio", "large-v3", "uk", lambda record: f"Ляшко Денис, {record.title}",
+                      reporter.complete, reporter.fallback, allowed=allowed, free_gb=free_gb, poll_seconds=0.05,
+                      worker=worker)
     reporter.audio, reporter.refiner = audio, refiner
     return inbox, brain, reporter, audio, refiner
 
 
 def test_report_comes_from_the_refined_transcript(tmp_path):
-    transcriber = FakeTranscriber()
+    transcriber = FakeWorker()
     inbox, brain, reporter, audio, refiner = lesson_with_audio(tmp_path, transcriber)
     refiner.start()
     try:
@@ -150,8 +163,8 @@ def test_report_comes_from_the_refined_transcript(tmp_path):
 import pytest  # noqa: E402
 
 
-@pytest.mark.parametrize("transcriber", [FakeTranscriber(fail=True), FakeTranscriber(silent=True)],
-                         ids=["model-broke", "heard-nothing"])
+@pytest.mark.parametrize("transcriber", [FakeWorker("fail"), FakeWorker("silent")],
+                         ids=["worker-broke-twice", "heard-nothing"])
 def test_refining_failure_still_sends_the_live_report(tmp_path, transcriber):
     inbox, _, reporter, audio, refiner = lesson_with_audio(tmp_path, transcriber)
     refiner.start()
@@ -170,7 +183,7 @@ def test_refining_failure_still_sends_the_live_report(tmp_path, transcriber):
 
 
 def test_refining_continues_after_restart(tmp_path):
-    inbox, _, reporter, audio, refiner = lesson_with_audio(tmp_path, None)  # модель ще не завантажилась…
+    inbox, _, reporter, audio, refiner = lesson_with_audio(tmp_path, FakeWorker(), allowed=lambda: False)  # пара…
     refiner.start()
     assistant = lesson_assistant(reporter)
     audio.start("pair#1")
@@ -180,7 +193,7 @@ def test_refining_continues_after_restart(tmp_path):
     refiner.stop()  # …і програму закрили
     assert len(list((tmp_path / "audio").glob("*.raw"))) == 1 and len(inbox) == 1
 
-    transcriber = FakeTranscriber()
+    transcriber = FakeWorker()
     inbox2, _, _, _, refiner2 = lesson_with_audio(tmp_path, transcriber)
     refiner2.start()
     try:
@@ -221,7 +234,7 @@ def test_refining_waits_for_free_time_and_memory(tmp_path):
 
     assert [beam_for(gb) for gb in (16, 7, 5, 3, None)] == [5, 3, 2, 0, 2]  # менше пам'яті — легший пошук
     state = {"lesson": True, "free": 2.0}
-    transcriber = FakeTranscriber()
+    transcriber = FakeWorker()
     inbox, _, reporter, audio, refiner = lesson_with_audio(
         tmp_path, transcriber, allowed=lambda: not state["lesson"], free_gb=lambda: state["free"])
     refiner.start()
@@ -270,3 +283,51 @@ def test_lesson_starting_pauses_refining(monkeypatch):
     with pytest.raises(Paused):
         transcriber.transcribe_long(tone(12, 3000), allowed=lambda: state["allowed"], beam_size=2)
     assert calls[0]["beam_size"] == 2 and calls[0]["best_of"] == 2
+
+
+def test_lesson_starting_stops_the_worker_process(tmp_path):
+    """Почалась пара — процес уточнення зупиняємо одразу (пам'ять і процесор — парі), запис чекає далі."""
+    state = {"lesson": False}
+    worker = FakeWorker("slow")
+    inbox, _, reporter, audio, refiner = lesson_with_audio(tmp_path, worker, allowed=lambda: not state["lesson"])
+    refiner.start()
+    try:
+        assistant = lesson_assistant(reporter)
+        audio.start("pair#1")
+        audio.feed(tone(60, 3000))
+        assistant.on_heard("Сьогодні нормалізація", at("09:40"))
+        assistant.detach("pair", at("10:52"))
+        wait_for(lambda: worker.calls)
+        time.sleep(0.5)
+        state["lesson"] = True
+        started = time.monotonic()
+        time.sleep(3)
+        assert len(list((tmp_path / "audio").glob("*.raw"))) == 1 and len(inbox) == 1  # нічого не загубили
+        worker.mode = "ok"
+        state["lesson"] = False
+        wait_for(lambda: len(inbox) == 3, timeout=15)
+    finally:
+        refiner.stop()
+    assert time.monotonic() - started < 15 and inbox[1].endswith("🎧 Розшифровку уточнено після пари.")
+
+
+def test_worker_writes_the_result_and_gets_out_of_the_way(tmp_path, monkeypatch):
+    from autopara import refine_worker
+
+    class WhisperModel:
+        def __init__(self, name, device, compute_type):
+            self.name = name
+
+        def transcribe(self, audio, **options):
+            return iter([Segment(1.0, "Добрий день")]), None
+
+    module = types.ModuleType("faster_whisper")
+    module.WhisperModel = WhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+    gentle = []
+    monkeypatch.setattr(refine_worker, "be_gentle", lambda: gentle.append(True))  # не чіпати пріоритет самих тестів
+    job = tmp_path / "pair.json"
+    job.write_text("{}")
+    job.with_suffix(".raw").write_bytes(tone(5, 3000))
+    assert refine_worker.main([str(job), "--model", "large-v3", "--beam", "2"]) == 0
+    assert gentle and json.loads(job.with_suffix(".result.json").read_text()) == [[1.0, "Добрий день"]]

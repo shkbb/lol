@@ -12,6 +12,7 @@ import threading
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 from . import notes
 from .assistant import CHUNK_CHARS, LessonRecord
@@ -53,6 +54,7 @@ class Reporter:
         self.send = send
         self.audio = None  # refine.LessonAudio — звук пари для уточнення після неї
         self.refiner = None  # refine.Refiner — друге, точніше розпізнавання після пари
+        self.after_report: Callable[[], object] | None = None  # звіт надіслано (вивантажити мозок, якщо пар не буде)
         self._notes: dict[str, list[str]] = {}
         self._lock = threading.Lock()
 
@@ -109,6 +111,7 @@ class Reporter:
             self.notifier(render(record, summary) + "\n\n🎧 Розшифровку уточнено після пари.")
             if path is not None:
                 self.notifier.document(path.read_bytes(), path.name, f"Розшифровка «{record.title}»")
+        self._reported()
 
     def _summarize_chunk(self, report_id: str, text: str) -> None:
         try:
@@ -131,6 +134,14 @@ class Reporter:
             self.notifier(render(record, summary))
             if path is not None:
                 self.notifier.document(path.read_bytes(), path.name, f"Розшифровка «{record.title}»")
+        self._reported()
+
+    def _reported(self) -> None:
+        if self.after_report is not None:
+            try:
+                self.after_report()
+            except Exception:  # noqa: BLE001 — це лише прибирання пам'яті
+                log.debug("Не вдалося прибрати після звіту", exc_info=True)
 
     def _compose(self, parts: list[str], record: LessonRecord) -> str:
         """Конспект частинами й чат → підсумок пари (або хоч би конспект частинами)."""

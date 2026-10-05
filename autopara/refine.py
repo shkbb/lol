@@ -13,10 +13,11 @@
 
 from __future__ import annotations
 
-import gc
 import json
 import logging
 import re
+import subprocess
+import sys
 import threading
 from collections import deque
 from dataclasses import asdict
@@ -110,6 +111,7 @@ def record_from_json(data: dict) -> LessonRecord:
 # Менше — чекаємо: зранку програму вбило саме те, що уточнення не зважало на пам'ять.
 MIN_FREE_GB = 4.0
 BEAM_BY_FREE_GB = ((8.0, 5), (6.0, 3), (MIN_FREE_GB, 2))
+MAX_FAILURES = 2  # стільки разів поспіль не вийшло (скажімо, процес убило через пам'ять) — звіт з живої
 
 
 def beam_for(free_gb: float | None) -> int:
@@ -123,32 +125,40 @@ class Refiner:
     """Фоновий потік: черга пар на уточнення. ``complete(record, path, lines)`` — уточнена розшифровка готова,
     ``fallback(record, path)`` — не вийшло (звіт із живої розшифровки).
 
-    Уточнює окремою, точнішою моделлю (``make_transcriber``), яку вантажить лише на час розпізнавання й одразу
-    вивантажує. І лише тоді, коли ``allowed()``: пари немає й найближчим часом не буде, — тож уточнення не
-    забирає в пари ні процесор, ні пам'ять. Почалась пара — зупиняється й продовжує потім спочатку.
+    Розшифровує окремий процес (refine_worker.py) з точнішою моделлю: після нього система отримує всю пам'ять
+    назад, а якщо її забракне — ядро вб'є саме його, не програму. І лише тоді, коли ``allowed()``: пари немає
+    й найближчим часом не буде. Почалась пара — процес зупиняємо, а запис чекає наступного вільного часу.
     """
 
-    def __init__(self, folder: Path, make_transcriber: Callable[[], object | None], hint: Callable[[LessonRecord], str],
+    def __init__(self, folder: Path, model: str, language: str, hint: Callable[[LessonRecord], str],
                  complete: Callable[[LessonRecord, Path | None, list[tuple[datetime, str]]], None],
                  fallback: Callable[[LessonRecord, Path | None], None],
                  allowed: Callable[[], bool] = lambda: True, free_gb: Callable[[], float | None] = lambda: None,
-                 poll_seconds: float = 30):
+                 poll_seconds: float = 30, worker: Callable[[Path, int, str], list[str]] | None = None):
         self.folder = folder
-        self.make_transcriber = make_transcriber  # → WhisperTranscriber (None — модель ще не готова)
+        self.model = model
+        self.language = language
         self.hint = hint
         self.complete = complete
         self.fallback = fallback
         self.allowed = allowed
         self.free_gb = free_gb
         self.poll_seconds = poll_seconds
+        self.worker = worker or self._worker_command
         self._jobs: deque[Path] = deque()
         self._cond = threading.Condition()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="refine", daemon=True)
         self._waiting_logged = ""
 
+    def _worker_command(self, job: Path, beam: int, hint: str) -> list[str]:
+        return [sys.executable, "-m", "autopara.refine_worker", str(job), "--model", self.model,
+                "--language", self.language, "--beam", str(beam), "--hint", hint]
+
     def start(self) -> None:
         for job in sorted(self.folder.glob("*.json")) if self.folder.is_dir() else []:
+            if job.name.endswith(".result.json"):
+                continue
             if job.with_suffix(".raw").exists():
                 log.info("Розшифровка пари чекає на уточнення (з минулого запуску)")
                 self._jobs.append(job)
@@ -213,32 +223,50 @@ class Refiner:
                 continue
             except InterruptedError:
                 return  # програма зупиняється — продовжимо після запуску (файли лишились)
-            except Exception:  # noqa: BLE001 — не вийшло уточнити: звіт однаково має прийти
-                log.exception("Не вдалося уточнити розшифровку")
-                self._give_up(job)
+            except Exception as e:  # noqa: BLE001 — не вийшло уточнити: звіт однаково має прийти
+                if self._failed_again(job):
+                    log.warning("Не вдалося уточнити розшифровку (%s) — звіт буде з живої розшифровки", e)
+                    self._give_up(job)
+                else:
+                    log.warning("Не вдалося уточнити розшифровку (%s) — спробую ще раз", e)
+                    continue
             self._done(job)
+
+    def _failed_again(self, job: Path) -> bool:
+        """Друга невдача поспіль (наприклад, процес двічі вбило ядро через пам'ять) — більше не пробуємо."""
+        data = json.loads(job.read_text(encoding="utf-8"))
+        data["failures"] = data.get("failures", 0) + 1
+        job.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return data["failures"] >= MAX_FAILURES
 
     def _refine(self, job: Path, beam: int) -> None:
         data = json.loads(job.read_text(encoding="utf-8"))
         record = record_from_json(data["record"])
         path = Path(data["path"]) if data["path"] else None
         started = datetime.fromisoformat(data["started"])
-        audio = job.with_suffix(".raw")
-        transcriber = self.make_transcriber()
-        if transcriber is None:  # модель ще вантажиться
-            if self._stop.wait(10):
-                raise InterruptedError
-            raise Paused
+        result = job.with_suffix(".result.json")
+        result.unlink(missing_ok=True)
+        minutes = job.with_suffix(".raw").stat().st_size / BYTES_PER_SECOND / 60
+        log.info("Уточнюю розшифровку «%s» (%.0f хв звуку, модель %s, beam %d) окремим процесом", record.title,
+                 minutes, self.model, beam)
+        process = subprocess.Popen(self.worker(job, beam, self.hint(record)), stdin=subprocess.DEVNULL)
         try:
-            pcm = audio.read_bytes()
-            minutes = len(pcm) / BYTES_PER_SECOND / 60
-            log.info("Уточнюю розшифровку «%s» (%.0f хв звуку, модель %s, beam %d)", record.title, minutes,
-                     getattr(transcriber, "name", "?"), beam)
-            lines = transcriber.transcribe_long(pcm, self.hint(record), stop=self._stop, beam_size=beam,
-                                                allowed=self.allowed)
+            while process.poll() is None:
+                if self._stop.wait(2):
+                    raise InterruptedError
+                if not self.allowed():
+                    raise Paused
         finally:
-            del transcriber  # модель — геть з пам'яті ще до того, як мозок візьметься за конспект
-            gc.collect()
+            if process.poll() is None:
+                process.terminate()  # пара починається або програма закривається — пам'ять і процесор їй
+                try:
+                    process.wait(10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+        if process.returncode != 0 or not result.exists():
+            raise RuntimeError(f"процес уточнення завершився з кодом {process.returncode}")
+        lines = json.loads(result.read_text(encoding="utf-8"))
+        result.unlink(missing_ok=True)
         refined = [(started + timedelta(seconds=offset), text) for offset, text in lines]
         log.info("Розшифровку «%s» уточнено: %d фраз (наживо було %d)", record.title, len(refined),
                  len(record.transcript))
@@ -246,7 +274,7 @@ class Refiner:
             self.complete(record, path, refined)
         else:
             self.fallback(record, path)  # уточнення нічого не почуло, а наживо щось було — краще жива
-        audio.unlink(missing_ok=True)
+        job.with_suffix(".raw").unlink(missing_ok=True)
         job.unlink(missing_ok=True)
 
     def _give_up(self, job: Path) -> None:
@@ -256,4 +284,5 @@ class Refiner:
         except Exception:  # noqa: BLE001
             log.exception("Не вдалося надіслати звіт")
         job.with_suffix(".raw").unlink(missing_ok=True)
+        job.with_suffix(".result.json").unlink(missing_ok=True)
         job.unlink(missing_ok=True)

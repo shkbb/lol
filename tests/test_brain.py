@@ -111,3 +111,45 @@ def test_choose_only_picks_from_the_list():
     for answer in ({"number": 0}, {"number": 3}, {"oops": 1}):  # «жодна», поза списком, не той формат
         assert OllamaBrain("http://x", "m", session=FakeOllama(json.dumps(answer))).choose("?", options) is None
     assert OllamaBrain("http://x", "m", session=FakeOllama("не json")).choose("?", options) is None
+
+
+def test_low_memory_unloads_the_brain_model():
+    """Наживо пам'ять Ollama з вбудованою відеокартою росла за день до 6+ ГБ — і ноутбук двічі вичерпав пам'ять."""
+    from autopara.brain import BrainMemoryGuard
+
+    class Session:
+        def __init__(self):
+            self.unloads = []
+            self.loaded = True
+
+        def get(self, url, timeout):
+            loaded = self.loaded
+
+            class Response:
+                def json(self):
+                    return {"models": [{"name": "gemma3:4b"}] if loaded else []}
+
+            return Response()
+
+        def post(self, url, json, timeout):
+            self.unloads.append(json)
+            self.loaded = False
+
+    session = Session()
+    brain = OllamaBrain("http://127.0.0.1:11434", "gemma3:4b", session=session)
+    free = {"gb": 6.0}
+    guard = BrainMemoryGuard(brain, lambda: free["gb"], period=0.05)
+    guard.start()
+    try:
+        import time
+
+        time.sleep(0.2)
+        assert session.unloads == []  # пам'яті вдосталь — модель не чіпаємо
+        free["gb"] = 1.2
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not session.unloads:
+            time.sleep(0.05)
+    finally:
+        guard.stop()
+    assert session.unloads == [{"model": "gemma3:4b", "keep_alive": 0}]
+    assert brain.unload() is False  # уже вивантажено — нічого не робимо

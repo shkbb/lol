@@ -24,6 +24,11 @@ from .assistant import Decision
 log = logging.getLogger(__name__)
 
 ACTIONS = ("none", "notify", "chat_plus", "chat_name", "leave")
+# Скільки Ollama тримає модель у пам'яті без діла. Наживо з вбудованою відеокартою Intel пам'ять процесу
+# Ollama росла протягом дня (зранку ~3 ГБ, по обіді 6+ ГБ і ще ~4 ГБ спільної) і разом з усім іншим
+# вичерпувала пам'ять ноутбука — тож тримаємо недовго й вивантажуємо, щойно пам'яті мало (BrainMemoryGuard).
+KEEP_ALIVE = "10m"
+LOW_MEMORY_GB = 2.0
 COOLDOWN_SECONDS = 45
 
 SYSTEM_PROMPT = """Ти — помічник студента на онлайн-парі. Студента зараз немає біля комп'ютера; \
@@ -97,7 +102,7 @@ class OllamaBrain:
             "model": self.model,
             "stream": False,
             "format": SCHEMA,
-            "keep_alive": "30m",
+            "keep_alive": KEEP_ALIVE,
             "options": {"temperature": 0},
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -112,12 +117,24 @@ class OllamaBrain:
             raise BrainError(f"Ollama недоступна ({self.url}): {e}") from e
         return parse_decision(content)
 
+    def unload(self) -> bool:
+        """Попросити Ollama вивантажити модель з пам'яті (якщо вона завантажена). True — було що вивантажувати."""
+        try:
+            loaded = self.session.get(f"{self.url}/api/ps", timeout=10).json().get("models") or []
+            if not any(item.get("name", "").split(":")[0] == self.model.split(":")[0] for item in loaded):
+                return False
+            self.session.post(f"{self.url}/api/generate", json={"model": self.model, "keep_alive": 0}, timeout=30)
+            return True
+        except (requests.RequestException, ValueError) as e:
+            log.debug("Не вдалося вивантажити модель мозку: %s", e)
+            return False
+
     def summarize(self, instruction: str, text: str) -> str:
         """Вільний текст (конспект, звіт) — без JSON і без дій."""
         payload = {
             "model": self.model,
             "stream": False,
-            "keep_alive": "30m",
+            "keep_alive": KEEP_ALIVE,
             "options": {"temperature": 0.2, "num_predict": 400},
             "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": text}],
         }
@@ -136,7 +153,7 @@ class OllamaBrain:
             "model": self.model,
             "stream": False,
             "format": {"type": "object", "properties": {"number": {"type": "integer"}}, "required": ["number"]},
-            "keep_alive": "30m",
+            "keep_alive": KEEP_ALIVE,
             "options": {"temperature": 0, "num_predict": 20},
             "messages": [
                 {"role": "system", "content": "Ти обираєш один варіант зі списку. Відповідай JSON {\"number\": N}, "
@@ -195,6 +212,30 @@ class OllamaBrain:
             log.warning("Мозок: не вдалося завантажити модель %s (%s) — працюю без нього", self.model, e)
             return False
         return self.check() is None
+
+
+class BrainMemoryGuard:
+    """Раз на хвилину: якщо вільної пам'яті менше LOW_MEMORY_GB — просимо Ollama вивантажити модель (з нею
+    й накопичене). Наступне питання до мозку завантажить її знову за кілька секунд."""
+
+    def __init__(self, brain: OllamaBrain, free_gb: Callable[[], float | None], period: float = 60):
+        self.brain = brain
+        self.free_gb = free_gb
+        self.period = period
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="brain-memory", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.period):
+            free = self.free_gb()
+            if free is not None and free < LOW_MEMORY_GB and self.brain.unload():
+                log.warning("Мало вільної пам'яті (%.1f ГБ) — вивантажив модель мозку, наступного разу завантажу знову", free)
 
 
 class BrainConnector:
