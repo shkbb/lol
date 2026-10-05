@@ -289,6 +289,7 @@ class Assistant:
         self._last_roll_call: datetime | None = None
         self._alerts: deque[str] = deque(maxlen=30)  # сповіщення, відповідь на які йде в чат пари
         self.dialog: deque[tuple[str, str]] = deque(maxlen=DIALOG_TURNS)  # остання розмова з ботом
+        self.schedule_note: Callable[[datetime], str] | None = None  # пари на сьогодні з часом — для розмови з мозком
 
     # --- Життєвий цикл зустрічі ------------------------------------------------
 
@@ -974,6 +975,12 @@ class Assistant:
     def _question_context(self, meeting: Meeting | None, now: datetime) -> str:
         """Що мозок знає про зараз: пара, учасники, остання розшифровка й чат (стисло — модель маленька)."""
         lines = [f"Зараз {now:%d.%m %H:%M}."]
+        if self.schedule_note is not None:
+            try:
+                if note := self.schedule_note(now):
+                    lines.append(note)
+            except Exception:  # noqa: BLE001 — розклад лише підказка
+                log.debug("Не вдалося описати розклад", exc_info=True)
         if meeting is None:
             lines.append("Студент зараз не на парі.")
             return "\n".join(lines)

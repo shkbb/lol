@@ -57,3 +57,17 @@ def test_gather_finds_summaries_and_mentions_within_budget(tmp_path):
     assert general.startswith("Останні пари — за датою, остання внизу:")
     assert len(notes.gather(tmp_path, "що було останні пари з баз даних?", budget=300)) < 600
     assert notes.gather(tmp_path / "немає", "будь-що") == ""
+
+
+def test_last_lesson_is_the_newest_record_not_a_guessed_subject(tmp_path):
+    """Наживо «що розкажеш про останню пару?» — мозок угадав предмет і розповів про ранкову пару."""
+    lesson(tmp_path, "Якість і тестування (Лк)", "2026-10-05T08:00", summary="Про що: тест-кейси.")
+    lesson(tmp_path, "Безпека розробки (Лк)", "2026-10-05T11:10", summary="Про що: вимоги безпеки, OWASP.")
+    lesson(tmp_path, "Тестовий вхід", "2026-10-05T12:05", lines=["[12:05:00] ар ар ар"])
+
+    def choose(question, options):
+        raise AssertionError("предмет не вгадуємо")
+
+    text = notes.gather(tmp_path, "що розкажеш про останню пару?", choose=choose)
+    assert text.startswith("Остання пара, на якій був студент:") and "Безпека" in text and "Якість" not in text
+    assert "Тестовий вхід" not in notes.gather(tmp_path, "що було на минулих парах?")

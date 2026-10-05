@@ -182,6 +182,7 @@ class Controller:
             app_audio=info.app_audio, visited_file=self.config.data_dir / "visited.json",
         )
         info.refine_allowed = lambda: runner.quiet(self.clock())  # уточнення — лише коли пари не скоро
+        info.assistant.schedule_note = runner.today_note  # мозок знає, яка пара була, яка йде, яка далі
         return runner, joiner
 
     def _tick_if_due(self) -> None:

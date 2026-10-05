@@ -19,6 +19,10 @@ CHAT_MARK = "--- Чат ---"
 LIVE_MARK = "--- Розшифровка наживо (для порівняння) ---"  # коли основна — уточнена після пари
 TITLE_RE = re.compile(r"^(.*?)\s*\(([^()]{1,12})\)\s*$")  # «Бази даних (Лк)» → «Бази даних», «Лк»
 NOW_RE = re.compile(r"зараз|сьогодні|ця пара|цій парі|цієї пари|на парі|викладач|сейчас|сегодня", re.I)
+# «Що було на останній / минулій / попередній парі?» без назви предмета — це найновіший запис, не вгадування предмета.
+# Однина — одна пара («останню пару», «минулій парі»); множина («минулих парах») — огляд кількох останніх.
+LAST_RE = re.compile(r"(останн|минул|попередн)(я|ю|ій|ьої|ої|а|у)\s+пар|щойно|(последн|прошл|предыдущ)\w{1,3}\s+пар", re.I)
+TEST_SUBJECT = "Тестовий вхід"  # пробні заходи — не пари, у відповіді мозку їм не місце
 
 
 def split_title(title: str) -> tuple[str, str]:
@@ -59,7 +63,12 @@ def add_summary(path: Path, summary: str) -> None:
 
 
 def subjects(root: Path) -> list[str]:
-    return sorted(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+    return sorted(p.name for p in root.iterdir() if p.is_dir() and p.name != TEST_SUBJECT) if root.is_dir() else []
+
+
+def all_records(root: Path) -> list[Path]:
+    """Записи всіх предметів від найстарішого до найновішого (за датою й часом у назві файла)."""
+    return sorted((path for subject in subjects(root) for path in records(root, subject)), key=lambda path: path.name)
 
 
 def records(root: Path, subject: str) -> list[Path]:
@@ -137,12 +146,17 @@ def gather(root: Path, question: str, current: str = "",
     known = subjects(root)
     if not known:
         return ""
-    subject = find_subject(question, known, split_title(current)[0] if current else "", choose)
+    named = find_subject(question, known)  # лише якщо предмет справді названо в питанні
+    if not named and not current and LAST_RE.search(question):
+        latest = all_records(root)[-1:]
+        parts = [f"Остання пара, на якій був студент:\n{summary_of(latest[0])}"] if latest else []
+        return "\n\n".join(parts)
+    subject = named or find_subject(question, known, split_title(current)[0] if current else "", choose)
     if subject in known:
         latest = records(root, subject)[-5:]
         title = f"Останні пари з предмета «{subject}» — за датою, остання внизу:"
     else:  # питання про пари загалом — останні з усіх предметів
-        latest = sorted(root.glob("*/*.txt"), key=lambda path: path.name)[-4:]
+        latest = all_records(root)[-4:]
         title = "Останні пари — за датою, остання внизу:"
     # Маленька модель плутається, коли новіше йде першим, — тож хронологічно, а найновішу позначаємо.
     # Якщо не влазить у бюджет — відкидаємо найстаріші.

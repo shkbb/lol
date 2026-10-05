@@ -216,6 +216,23 @@ class Runner:
             else:
                 self.notify("Не вдалося зробити скріншот")
 
+    def today_note(self, now: datetime) -> str:
+        """Пари на сьогодні з часом і станом — щоб мозок не плутав, яка пара остання, а яка далі."""
+        visits = sorted((v for v in list(self.plan.visits) if v.join_at.date() == now.date()), key=lambda v: v.join_at)
+        if not visits:
+            return "Сьогодні пар за розкладом більше немає."
+        lines = ["Пари сьогодні за розкладом:"]
+        for visit in visits:
+            start, end = self._window(visit)
+            if visit.key in self.active:
+                state = "іде зараз, програма на ній"
+            elif visit.key in self.finished or end <= now:
+                state = "уже була"
+            else:
+                state = "ще буде"
+            lines.append(f"- {start:%H:%M}–{end:%H:%M} «{visit.title}» — {state}")
+        return "\n".join(lines)
+
     def quiet(self, now: datetime, ahead: timedelta = timedelta(minutes=15)) -> bool:
         """Пари немає й найближчі ``ahead`` не буде — можна братися за важку фонову роботу (уточнення
         розшифровки). Викликається з іншого потоку, тож будь-яка несподіванка — «ні»."""

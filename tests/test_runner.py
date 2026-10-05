@@ -374,3 +374,12 @@ def test_restart_does_not_rejoin_a_lesson_we_already_left(tmp_path):
     runner4.finished = runner4._load_visited()
     runner4.tick(at("11:20"))
     assert joiner4.joined == ["Бази даних"]
+
+
+def test_today_note_tells_the_brain_what_was_and_what_is_next():
+    runner, _, joiner = make_runner([make_lesson(), make_lesson(start="11:10", end="12:30", subject="Мережі")])
+    runner.tick(at("09:28"))
+    note = runner.today_note(at("10:00"))
+    assert "09:30–10:50 «Бази даних» — іде зараз" in note and "11:10–12:30 «Мережі» — ще буде" in note
+    runner._leave(next(iter(runner.active)), "пара скінчилась")
+    assert "«Бази даних» — уже була" in runner.today_note(at("10:55"))
