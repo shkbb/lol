@@ -33,6 +33,7 @@ class Incoming:
     text: str
     is_reply: bool  # відповідь на якесь повідомлення бота
     callback_id: str = ""  # натиснута кнопка під повідомленням бота
+    replied: str = ""  # текст повідомлення бота, на яке відповіли
 
 
 Buttons = list[list[tuple[str, str]]]  # рядки кнопок: (підпис, що «написати» боту при натисканні)
@@ -44,6 +45,8 @@ class TelegramBot:
         self.chat_id = chat_id
         self.session = session or requests.Session()
         self._offset = 0
+        # Чи йде відповідь на це повідомлення бота в чат пари (решта відповідей — розмова з ботом).
+        self.reply_goes_to_chat: Callable[[str], bool] = lambda replied: True
 
     def _call(self, method: str, http_timeout: float = 20, files: dict | None = None, **params) -> object:
         url = API.format(token=self.token, method=method)
@@ -105,7 +108,10 @@ class TelegramBot:
             self._offset = max(self._offset, update["update_id"] + 1)
             message = update.get("message") or {}
             if "text" in message:
-                messages.append(Incoming(message["chat"]["id"], message["text"], "reply_to_message" in message))
+                original = message.get("reply_to_message") or {}
+                replied = original.get("text") or original.get("caption") or ""
+                messages.append(Incoming(message["chat"]["id"], message["text"], "reply_to_message" in message,
+                                         replied=replied))
             if callback := update.get("callback_query"):
                 chat_id = (callback.get("message") or {}).get("chat", {}).get("id", 0)
                 messages.append(Incoming(chat_id, callback.get("data", ""), False, callback["id"]))
@@ -121,8 +127,11 @@ class TelegramBot:
                         continue
                     if incoming.callback_id:  # прибрати «годинник» на кнопці
                         self._call("answerCallbackQuery", callback_query_id=incoming.callback_id)
+                    # Відповідь іде в чат пари лише на сповіщення, що чекає відповіді («тебе кличуть»); відповідь
+                    # на будь-що інше (скажімо, на відповідь мозку) — це просто продовження розмови з ботом.
+                    is_reply = incoming.is_reply and self.reply_goes_to_chat(incoming.replied)
                     try:
-                        reply = handle(incoming.text, incoming.is_reply)
+                        reply = handle(incoming.text, is_reply)
                     except Exception:  # noqa: BLE001 — одна зламана команда не має глушити бота
                         log.exception("Команда «%s» з Telegram не вдалася", incoming.text[:40])
                         reply = "⚠️ Не вийшло — подробиці в журналі програми."

@@ -82,6 +82,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         stack.choose = brain.choose  # запасний вихід для входу на пару: яка кнопка «увійти»
 
     if listening:
+        bot.reply_goes_to_chat = assistant.answers_alert  # ↩️ у чат пари — лише на «тебе кличуть» тощо
         stop = threading.Event()
         listener = threading.Thread(
             target=bot.listen,
@@ -160,9 +161,11 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             found = notes.gather(lessons_folder, question, current, brain.choose)
             material = "\n\n".join(part for part in (context, found) if part)
             try:
-                reply = brain.summarize(QUESTION_PROMPT, f"{material}\n\nПитання студента: {question}")
+                reply = brain.summarize(QUESTION_PROMPT, f"{material}\n\nСтудент пише: {question}")
             except BrainError as e:
                 reply = f"не вийшло відповісти: {e}"
+            else:
+                assistant.remember_reply(reply)
             notifier(f"🧠 {reply}")
 
         def brain_ready() -> None:

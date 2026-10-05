@@ -612,3 +612,39 @@ def test_question_without_a_lesson_is_about_past_ones():
     assistant.ask_brain = lambda question, context, current: asked.append(context)
     assistant.on_command("Що було на минулих парах?", at("12:00"))
     assert asked and "не на парі" in asked[0]
+
+
+def test_plain_words_are_actions_not_questions():
+    """«Кинь скрін, що ти на парі» — наживо пішло мозку, а той відповів «скріншотів немає». Тепер це скріншот."""
+    assistant, inbox = listening("off")
+    asked = []
+    assistant.ask_brain = lambda question, context, current: asked.append(question)
+    assert assistant.on_command("кинь скрін, що ти на парі", at("10:05")) == "Роблю скріншот..."
+    assert assistant.take_actions()[-1].kind == "screenshot"
+    assert assistant.on_command("що пишуть у чаті?", at("10:05")).startswith(("💬", "У чаті", "Чат"))
+    assert assistant.on_command("ти на парі?", at("10:05")).startswith("📚")
+    # Вийти чи написати в чат звичайними словами — ні: лише точною командою.
+    assert "надішли одне слово: вийди" in assistant.on_command("можеш вийти з пари", at("10:05"))
+    assert not [a for a in assistant.take_actions() if a.kind in ("leave", "chat")]
+    assert asked == []
+
+
+def test_bot_chats_about_anything_and_remembers_the_conversation():
+    assistant = Assistant(MeSettings(name="Ляшко Денис"), Inbox())
+    asked = []
+    assistant.ask_brain = lambda question, context, current: asked.append((question, context))
+    assistant.on_command("Привіт! Як справи?", at("12:00"))
+    assistant.remember_reply("Привіт! Усе добре, чекаю на наступну пару.")
+    assistant.on_command("А о котрій вона?", at("12:01"))
+    question, context = asked[-1]
+    assert question == "А о котрій вона?"
+    assert "Студент: Привіт! Як справи?" in context and "autopara: Привіт! Усе добре" in context
+
+
+def test_only_replies_to_alerts_go_to_the_meeting_chat():
+    assistant, inbox = listening("off")
+    say(assistant, "Ляшко Денис, ви тут?")
+    alert = inbox.messages[-1][0]
+    assert "Сам не пишу" in alert and assistant.answers_alert(alert)  # сповіщення, що чекає відповіді
+    assert not assistant.answers_alert("🧠 Сьогодні говорили про індекси.")  # відповідь мозку — це розмова
+    assert not assistant.answers_alert("")

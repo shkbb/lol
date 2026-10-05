@@ -117,11 +117,19 @@ HELP = (
     "так / ні — на моє питання «написати в чат?»\n"
     "+ — написати «+» у чат\n"
     "напиши <текст> — написати твій текст у чат\n"
-    "↩️ відповідь на будь-яке моє повідомлення — теж піде в чат пари\n"
     "вийди — вийти з пари\n"
-    "Будь-що інше — питання до мозку: «скільки людей на парі?», «про що зараз говорять?», "
-    "«що було на минулих парах?»"
+    "Можна й звичайними словами: «кинь скрін», «що пишуть у чаті?», «ти на парі?».\n"
+    "Будь-що інше — розмова з мозком: «скільки людей на парі?», «про що зараз говорять?», "
+    "«що було на минулих парах?» — або просто про що завгодно.\n"
+    "↩️ Відповідь на моє сповіщення «тебе кличуть» піде в чат пари; на решту повідомлень — це просто розмова."
 )
+# Прохання звичайними словами — одразу дія, без мозку (і без хвилини очікування).
+SCREEN_ASK_RE = re.compile(r"скр[іи]н|скр[іи]ншот|screenshot|екран|покажи.{0,30}(пар|зустріч|там)", re.I)
+STATUS_ASK_RE = re.compile(r"^\s*(ти\s+(зараз\s+)?(на\s+парі|в\s+зустрічі|де)|де\s+ти|що\s+з\s+тобою)\W*$", re.I)
+CHAT_ASK_RE = re.compile(r"(покажи|що\s+(пишуть|там)|кинь).{0,20}чат", re.I)
+LEAVE_ASK_RE = re.compile(r"(^|\s)(вийди|вийти|виходь|покинь|покинути)(\s|$|\W)", re.I)
+DIALOG_TURNS = 6  # скільки останніх реплік розмови з ботом пам'ятає мозок
+
 COMMANDS = {
     "/start", "/help", "help", "допомога", "?", "/status", "статус", "так", "yes", "ок", "ok", "давай", "+",
     "ні", "no", "не треба", "не пиши", "вийди", "/leave", "чат", "/chat", "екран", "скрін", "скріншот", "/screen",
@@ -268,6 +276,8 @@ class Assistant:
         self.alert_mentions = True  # сповіщати, коли тебе кличуть
         self._last_mention: datetime | None = None
         self._last_roll_call: datetime | None = None
+        self._alerts: deque[str] = deque(maxlen=30)  # сповіщення, відповідь на які йде в чат пари
+        self.dialog: deque[tuple[str, str]] = deque(maxlen=DIALOG_TURNS)  # остання розмова з ботом
 
     # --- Життєвий цикл зустрічі ------------------------------------------------
 
@@ -867,9 +877,16 @@ class Assistant:
                 return HELP
             if low in ("/status", "статус"):
                 return self._status(meeting, now)
+            if not is_reply and low not in COMMANDS:
+                if asked := self._plain_words(low, meeting, now):
+                    return asked
             if self.ask_brain is not None and self._is_question(low, is_reply):
-                # Не команда — питання до мозку: «скільки людей?», «про що зараз говорять?», «що було минулі пари?»
-                self.ask_brain(command[:500], self._question_context(meeting, now), meeting.title if meeting else "")
+                # Не команда — розмова з мозком: «скільки людей?», «про що зараз говорять?», або просто про що завгодно.
+                context = self._question_context(meeting, now)
+                if self.dialog:
+                    context += "\n\nРозмова перед цим:\n" + "\n".join(f"{who}: {said}" for who, said in self.dialog)
+                self.dialog.append(("Студент", command[:500]))
+                self.ask_brain(command[:500], context, meeting.title if meeting else "")
                 return "🧠 Думаю… відповім за хвилину."
             if meeting is None:
                 return "Зараз я не на парі."
@@ -916,6 +933,22 @@ class Assistant:
                 return "Виходжу."
             return "Не зрозумів.\n\n" + HELP
 
+    def _plain_words(self, low: str, meeting: Meeting | None, now: datetime) -> str:
+        """«Кинь скрін», «що пишуть у чаті?», «ти на парі?» — це прохання, а не питання до мозку. Писати в чат
+        чи виходити з пари звичайними словами не можна: надто дорого помилитися — лише точною командою."""
+        if STATUS_ASK_RE.search(low):
+            return self._status(meeting, now)
+        if CHAT_ASK_RE.search(low):
+            return self._chat_view(meeting) if meeting is not None else "Зараз я не на парі."
+        if SCREEN_ASK_RE.search(low):
+            if meeting is None:
+                return "Зараз я не на парі — показати нічого."
+            self._actions.append(Action("screenshot", meeting.key))
+            return "Роблю скріншот..."
+        if LEAVE_ASK_RE.search(low) and meeting is not None and len(low) < 60:
+            return f"Щоб вийти з «{meeting.title}», надішли одне слово: вийди"
+        return ""
+
     @staticmethod
     def _is_question(low: str, is_reply: bool) -> bool:
         """Усе, що не команда й не відповідь на повідомлення бота (та йде в чат пари), — питання до мозку."""
@@ -956,8 +989,19 @@ class Assistant:
         lines.append("\n↩️ Відповідай на це повідомлення — і я напишу твій текст у чат.")
         return "\n".join(lines)
 
+    def answers_alert(self, replied: str) -> bool:
+        """Чи це відповідь на сповіщення, що чекає відповіді в чат пари («тебе кличуть», «написати в чат?»)."""
+        head = replied.strip()[:80]
+        return bool(head) and any(text.strip()[:80] == head for text in list(self._alerts))
+
+    def remember_reply(self, text: str) -> None:
+        """Відповідь мозку на питання з Telegram — щоб наступне питання могло на неї спиратися."""
+        with self._lock:
+            self.dialog.append(("autopara", text[:600]))
+
     def _alert(self, text: str, buttons: list | None = None) -> None:
         """Термінове сповіщення; з кнопками, якщо їх уміє показати Telegram і бот приймає відповіді."""
+        self._alerts.append(text)
         if buttons and self.can_ask and self.media is not None and hasattr(self.media, "ask"):
             self.media.ask(text, buttons)
         else:

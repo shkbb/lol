@@ -146,3 +146,24 @@ def test_desktop_notifications_per_platform(monkeypatch):
 
     monkeypatch.setattr(telegram.shutil, "which", lambda name: None)
     assert telegram.desktop_notifier() is None
+
+
+def test_reply_goes_to_the_meeting_only_when_it_answers_an_alert():
+    """Відповідь на сповіщення «тебе кличуть» — у чат пари; на відповідь мозку — це вже розмова з ботом."""
+    alert = update(1, 42, "Так, я тут", reply=True)
+    alert["message"]["reply_to_message"]["text"] = "🚨 Тебе кличуть на парі"
+    talk = update(2, 42, "а що ще?", reply=True)
+    talk["message"]["reply_to_message"]["text"] = "🧠 Сьогодні говорили про індекси."
+    api = FakeApi([alert, talk])
+    bot = TelegramBot("123:abc", chat_id=42, session=api)
+    bot.reply_goes_to_chat = lambda replied: replied.startswith("🚨")
+    stop = threading.Event()
+    heard = []
+
+    def handle(text, is_reply):
+        heard.append((text, is_reply))
+        if len(heard) == 2:
+            stop.set()
+
+    bot.listen(handle, stop)
+    assert heard == [("Так, я тут", True), ("а що ще?", False)]
