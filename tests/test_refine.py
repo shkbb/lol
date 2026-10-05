@@ -91,8 +91,9 @@ class FakeTranscriber:
         self.fail, self.silent = fail, silent
         self.calls = []
 
-    def transcribe_long(self, pcm, hint="", stop=None):
+    def transcribe_long(self, pcm, hint="", stop=None, beam_size=5, allowed=None):
         self.calls.append((len(pcm), hint))
+        self.beams = getattr(self, "beams", []) + [beam_size]
         if self.fail:
             raise RuntimeError("модель зламалась")
         if self.silent:
@@ -109,13 +110,13 @@ def wait_for(condition, timeout=10):
     raise AssertionError("не дочекався")
 
 
-def lesson_with_audio(tmp_path, transcriber):
+def lesson_with_audio(tmp_path, transcriber, allowed=lambda: True, free_gb=lambda: 16.0):
     inbox, brain = Inbox(), FakeBrain()
     reporter = Reporter(inbox, brain, InlineWorker(), tmp_path / "Пари")
     clock_now = [at("09:30")]
     audio = LessonAudio(tmp_path / "audio", lambda: clock_now[0])
     refiner = Refiner(tmp_path / "audio", lambda: transcriber, lambda record: f"Ляшко Денис, {record.title}",
-                      reporter.complete, reporter.fallback)
+                      reporter.complete, reporter.fallback, allowed=allowed, free_gb=free_gb, poll_seconds=0.05)
     reporter.audio, reporter.refiner = audio, refiner
     return inbox, brain, reporter, audio, refiner
 
@@ -213,3 +214,59 @@ def test_lesson_record_survives_json():
     [record] = records
     assert record_from_json(record_to_json(record)) == record
     assert record.start.tzinfo == TZ
+
+
+def test_refining_waits_for_free_time_and_memory(tmp_path):
+    from autopara.refine import beam_for
+
+    assert [beam_for(gb) for gb in (16, 7, 5, 3, None)] == [5, 3, 2, 0, 2]  # менше пам'яті — легший пошук
+    state = {"lesson": True, "free": 2.0}
+    transcriber = FakeTranscriber()
+    inbox, _, reporter, audio, refiner = lesson_with_audio(
+        tmp_path, transcriber, allowed=lambda: not state["lesson"], free_gb=lambda: state["free"])
+    refiner.start()
+    try:
+        assistant = lesson_assistant(reporter)
+        audio.start("pair#1")
+        audio.feed(tone(60, 3000))
+        assistant.on_heard("Сьогодні нормалізація", at("09:40"))
+        assistant.detach("pair", at("10:52"))
+        time.sleep(0.3)
+        assert transcriber.calls == []  # наступна пара скоро — не чіпаємо процесор і пам'ять
+        state["lesson"] = False
+        time.sleep(0.3)
+        assert transcriber.calls == []  # пари немає, але вільної пам'яті замало — чекаємо
+        state["free"] = 7.0
+        wait_for(lambda: len(inbox) == 3)
+    finally:
+        refiner.stop()
+    assert transcriber.beams == [3]
+
+
+def test_lesson_starting_pauses_refining(monkeypatch):
+    calls = []
+    state = {"allowed": True}
+
+    class WhisperModel:
+        def __init__(self, name, device, compute_type):
+            pass
+
+        def transcribe(self, audio, **options):
+            calls.append(options)
+
+            def segments():
+                yield Segment(1.0, "Добрий день")
+                state["allowed"] = False  # тим часом почалась пара
+                yield Segment(5.0, "далі")
+
+            return segments(), None
+
+    module = types.ModuleType("faster_whisper")
+    module.WhisperModel = WhisperModel
+    monkeypatch.setitem(__import__("sys").modules, "faster_whisper", module)
+    transcriber = WhisperTranscriber("large-v3", "uk")
+    from autopara.ears import Paused
+
+    with pytest.raises(Paused):
+        transcriber.transcribe_long(tone(12, 3000), allowed=lambda: state["allowed"], beam_size=2)
+    assert calls[0]["beam_size"] == 2 and calls[0]["best_of"] == 2

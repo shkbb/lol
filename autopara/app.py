@@ -181,6 +181,7 @@ class Controller:
             self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant,
             app_audio=info.app_audio,
         )
+        info.refine_allowed = lambda: runner.quiet(self.clock())  # уточнення — лише коли пари не скоро
         return runner, joiner
 
     def _tick_if_due(self) -> None:
@@ -310,6 +311,14 @@ class Controller:
         if self.runner is None:
             self._do_start()
         now = self.clock()
+        for visit in self.runner.plan.visits:
+            # «Зайти зараз» на пару з розкладу (почалась раніше) — заходимо на неї саму, з її назвою й звітом,
+            # а не «тестовим входом», що розірвав би пару на два записи.
+            if (visit.url == url and visit.key not in self.runner.finished and visit.key not in self.runner.active
+                    and visit.join_at - timedelta(hours=1) <= now < visit.leave_at):
+                self.runner.retry_at[visit.key] = now
+                self._next_tick = None
+                return "joining"
         leave_at = now + timedelta(minutes=minutes)
         lesson = Lesson(now.date(), now.time(), leave_at.time(), "Тестовий вхід")
         self.runner.extra_visits.append(Visit(url, platform_of(url), [lesson], now, leave_at))

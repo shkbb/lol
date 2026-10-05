@@ -209,6 +209,19 @@ class Runner:
             else:
                 self.notify("Не вдалося зробити скріншот")
 
+    def quiet(self, now: datetime, ahead: timedelta = timedelta(minutes=15)) -> bool:
+        """Пари немає й найближчі ``ahead`` не буде — можна братися за важку фонову роботу (уточнення
+        розшифровки). Викликається з іншого потоку, тож будь-яка несподіванка — «ні»."""
+        try:
+            if self.active:
+                return False
+            return not any(
+                visit.join_at - ahead <= now < visit.leave_at and visit.key not in self.finished
+                for visit in list(self.plan.visits)
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
     def _lesson_soon(self, now: datetime) -> bool:
         """Чи не можна зараз засинати: іде пара або наступна — менш ніж за добу. Тоді ноутбук, залишений на ніч,
         уранці сам зайде на пару, а на вихідних (коли до пари більше доби) може спати."""

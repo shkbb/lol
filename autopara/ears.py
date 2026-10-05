@@ -49,7 +49,7 @@ APP_STREAM_RE = re.compile(r"zoom", re.I)  # аудіопотоки Zoom-клі�
 TAP_SCRIPT = Path(__file__).with_name("ears_tap.js")
 # Якщо модель не встигає за мовою — на яку переходити (turbo зазвичай не повільніший за medium).
 LIGHTER_MODEL = {
-    "large-v3": "large-v3-turbo",  # turbo для української помітно гірша, тож лише якщо large-v3 зовсім не встигає
+    "large-v3": "large-v3-turbo",
     "large-v2": "large-v3-turbo",
     "large-v3-turbo": "small",
     "turbo": "small",
@@ -392,17 +392,57 @@ def total_ram_gb() -> float:
         return 0.0
 
 
-def resolve_model(model: str) -> str:
-    """"auto" → модель за потужністю. Для української large-v3 помітно точніша за turbo (у turbo урізаний
-    декодер), а шматки по паузах роблять її посильною для потужного ноутбука. Слабшому — turbo чи small.
+def available_ram_gb() -> float | None:
+    """Скільки пам'яті зараз вільно (разом із вільним свопом на Linux). None — не вдалося дізнатися."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
 
-    Якщо все ж не встигатиме за мовою, вуха самі перейдуть на легшу (див. LIGHTER_MODEL).
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                    (name, ctypes.c_ulonglong)
+                    for name in ("total", "available", "total_page", "available_page", "total_virtual", "available_virtual", "extended")
+                ]
+
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(MemoryStatus)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))  # type: ignore[attr-defined]
+            return status.available / 2**30
+        if sys.platform == "darwin":
+            return None
+        values = {}
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for line in f:
+                name, _, rest = line.partition(":")
+                values[name] = int(rest.split()[0])
+        return values["MemAvailable"] / 2**20
+    except (OSError, ValueError, KeyError, AttributeError):
+        return None
+
+
+def resolve_refine_model(refine: str, live: str) -> str:
+    """Модель для уточнення після пари: "auto" — large-v3 на потужному комп'ютері (вона точніша, а поспішати
+    після пари нікуди), інакше та сама, що наживо; "off" — не уточнювати."""
+    if refine != "auto":
+        return refine
+    cpus, ram = os.cpu_count() or 1, total_ram_gb()
+    return "large-v3" if cpus >= 8 and ram >= 12 else resolve_model(live)
+
+
+class Paused(Exception):
+    """Уточнення треба відкласти: скоро пара (або вона вже йде) — процесор і пам'ять потрібні їй."""
+
+
+def resolve_model(model: str) -> str:
+    """"auto" → модель для вух наживо за потужністю комп'ютера: large-v3-turbo там, де встигатиме, інакше small.
+
+    Наживо головне — встигати (помітити, що тебе кличуть): на живій парі навіть потужний ноутбук з large-v3
+    відставав на 10+ хв і мусив пропускати звук. Точність для звіту дає уточнення після пари (refine.py) — уже
+    large-v3. Якщо модель наживо не встигатиме, вуха самі перейдуть на легшу (див. LIGHTER_MODEL).
     """
     if model != "auto":
         return model
     cpus, ram = os.cpu_count() or 1, total_ram_gb()
-    if cpus >= 8 and ram >= 12:
-        return "large-v3"
     return "large-v3-turbo" if cpus >= 4 and ram >= 8 else "small"
 
 
@@ -506,12 +546,15 @@ class WhisperTranscriber:
         ]
 
     def transcribe_long(self, pcm: bytes, hint: str = "", stop: threading.Event | None = None,
-                        piece_seconds: int = 600) -> list[tuple[float, str]]:
+                        piece_seconds: int = 600, beam_size: int = 5,
+                        allowed: Callable[[], bool] | None = None) -> list[tuple[float, str]]:
         """Уточнення після пари — як сервіси субтитрів: увесь запис, точніший пошук (beam 5), контекст
         попереднього тексту й запасні «температури». Повертає (секунда від початку запису, текст).
 
         Запис ділимо на шматки по ~10 хв (у тихому місці), щоб не тримати в пам'яті всю пару, а контекст
-        переносимо з шматка в шматок. Модель беремо лише тоді, коли вуха наживо вільні (див. ModelGate).
+        переносимо з шматка в шматок. Модель беремо лише тоді, коли вуха наживо вільні (див. ModelGate),
+        а якщо ``allowed()`` каже «ні» (скоро пара) — зупиняємось (Paused), щоб звільнити процесор і пам'ять.
+        ``beam_size`` — скільки варіантів зважувати: точніше, але кожен варіант великої моделі — ще ~0,5 ГБ.
         """
         import numpy as np
 
@@ -520,13 +563,15 @@ class WhisperTranscriber:
         for offset, piece in split_quietly(pcm, piece_seconds):
             audio = np.frombuffer(piece, dtype=np.int16).astype(np.float32) / 32768.0
             prompt = " ".join(part for part in (hint, previous[-200:]) if part)
-            options = dict(language=self.language, vad_filter=True, beam_size=5, condition_on_previous_text=True,
-                           temperature=[0.0, 0.2, 0.4], initial_prompt=prompt or None)
+            options = dict(language=self.language, vad_filter=True, beam_size=beam_size, best_of=beam_size,
+                           condition_on_previous_text=True, temperature=[0.0, 0.2, 0.4], initial_prompt=prompt or None)
             if hint and self._hotwords:
                 options["hotwords"] = hint
             with self.gate.background(stop):
                 segments = iter(self.model.transcribe(audio, **options)[0])
             while True:
+                if allowed is not None and not allowed():
+                    raise Paused
                 with self.gate.background(stop):  # кожне вікно в 30 с — окремо: між ними можуть пройти вуха
                     segment = next(segments, None)
                 if segment is None:

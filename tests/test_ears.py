@@ -360,9 +360,11 @@ def test_missing_cable_is_reported_not_fatal(monkeypatch, caplog):
 def test_model_is_picked_by_computer_power(monkeypatch):
     monkeypatch.setattr(ears.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(ears, "total_ram_gb", lambda: 16)
-    assert ears.resolve_model("auto") == "large-v3"  # для української помітно точніша за turbo
+    assert ears.resolve_model("auto") == "large-v3-turbo"  # наживо головне — встигати
+    assert ears.resolve_refine_model("auto", "auto") == "large-v3"  # після пари — точніша
+    assert ears.resolve_refine_model("off", "auto") == "off"
     monkeypatch.setattr(ears, "total_ram_gb", lambda: 8)
-    assert ears.resolve_model("auto") == "large-v3-turbo"
+    assert ears.resolve_refine_model("auto", "auto") == "large-v3-turbo"  # слабшому — та сама, що наживо
     monkeypatch.setattr(ears.os, "cpu_count", lambda: 2)
     assert ears.resolve_model("auto") == "small"
     assert ears.resolve_model("medium") == "medium"

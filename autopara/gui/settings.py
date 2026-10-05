@@ -117,10 +117,15 @@ class SettingsPage(QWidget):
         more.add(w.switch_row(model, "me.answer_here", "Відповідати, коли викладач питає саме тебе", "«Ляшко, ви тут?» → «Так, я тут»."))
         more.add(w.switch_row(model, "me.polite", "Дублювати за групою «Дякую», «Добрий день»"))
         more.add(w.label("На запис, голосування, «хто здав» чи «зрозуміло?» помічник сам не відповідає ніколи — це вирішуєш ти.", "hint"))
-        more.add(w.select_field(model, "ears.model", "Модель розпізнавання", [
+        more.add(w.select_field(model, "ears.model", "Розпізнавання наживо", [
             ("auto", "автоматично за потужністю комп'ютера"), ("small", "small — швидка"), ("medium", "medium"),
             ("large-v3-turbo", "large-v3-turbo — точна"),
-        ], "Точна модель може відставати від пари на хвилину-дві — зате розпізнає значно краще.", default="auto"))
+        ], "Наживо головне — встигати за парою, щоб помітити, що тебе кличуть.", default="auto"))
+        more.add(w.select_field(model, "ears.refine_model", "Уточнення після пари (для звіту)", [
+            ("auto", "автоматично (large-v3 на потужному комп'ютері)"), ("large-v3", "large-v3 — найточніша"),
+            ("large-v3-turbo", "large-v3-turbo"), ("off", "не уточнювати — звіт одразу"),
+        ], "Після пар програма ще раз уважно розшифровує весь запис — звіт приходить пізніше, зате точніший.",
+            default="auto"))
         if platform_is_linux():
             more.add(w.select_field(model, "ears.source", "Пари в браузері: звідки брати звук", [
                 ("auto", "звук браузера програми (рекомендовано)"), ("browser", "зі сторінки пари (запасний спосіб)"),

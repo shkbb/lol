@@ -22,9 +22,11 @@ from .ears import (
     PulseAppCapture,
     PulseRecorder,
     WhisperTranscriber,
+    available_ram_gb,
     find_cable,
     pick_source,
     pulse_available,
+    resolve_refine_model,
     whisper_available,
 )
 from .media import AudioBuffer, Clipper, FrameBuffer
@@ -45,6 +47,9 @@ class Stack:
     zoom_app_heard: bool = True  # чи чують вуха Zoom-клієнт (інакше в режимі auto Zoom відкривається в браузері)
     frames: FrameBuffer | None = None  # кадри сторінки для відеовирізок, або None
     choose: Callable[[str, list[str]], int | None] | None = None  # мозок обирає зі списку (кнопку входу тощо)
+    # Чи можна зараз уточнювати розшифровку (важка робота): за замовчуванням — коли немає пари; програма
+    # (app.py) уточнює це розкладом — ще й коли найближча пара не скоро.
+    refine_allowed: Callable[[], bool] = lambda: True
 
 
 @contextmanager
@@ -72,6 +77,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         worker.assistant = assistant
         worker.start()
     stack = Stack(assistant)
+    stack.refine_allowed = lambda: not assistant.meetings
     if brain is not None:
         stack.choose = brain.choose  # запасний вихід для входу на пару: яка кнопка «увійти»
 
@@ -123,13 +129,23 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     reporter = Reporter(notifier, None, None, lessons_folder, send=config.telegram.reports)
     assistant.on_chunk = reporter.chunk
     assistant.on_finished = reporter.finish
-    if ears is not None and lesson_audio is not None:
+    refine_name = resolve_refine_model(config.ears.refine_model, config.ears.model)
+    if ears is not None and lesson_audio is not None and refine_name != "off":
+
+        def make_transcriber():
+            live = ears.transcribe if hasattr(ears.transcribe, "transcribe_long") else None
+            if live is None or live.name == refine_name:
+                return live  # та сама модель, що й наживо — не вантажимо другу копію
+            return WhisperTranscriber(refine_name, config.ears.language)
+
         refiner = Refiner(
             config.data_dir / "audio",
-            lambda: ears.transcribe if hasattr(ears.transcribe, "transcribe_long") else None,
+            make_transcriber,
             lambda record: ", ".join(part for part in (config.me.name, record.teacher, record.title) if part),
             reporter.complete,
             reporter.fallback,
+            allowed=lambda: stack.refine_allowed(),
+            free_gb=available_ram_gb,
         )
         reporter.audio, reporter.refiner = lesson_audio, refiner
         assistant.on_started = lesson_audio.start

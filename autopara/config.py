@@ -96,7 +96,10 @@ class TelegramSettings:
 @dataclass
 class EarsSettings:
     enabled: bool = True
-    model: str = "auto"  # "auto" — за потужністю комп'ютера: large-v3 на потужному, слабшому turbo чи small
+    model: str = "auto"  # наживо: "auto" — large-v3-turbo на потужному комп'ютері, інакше small
+    # Друге, точніше розпізнавання після пари — для звіту й запису: "auto" — large-v3 на потужному
+    # комп'ютері (інакше та сама модель, що наживо); "off" — не уточнювати, звіт одразу з живої розшифровки.
+    refine_model: str = "auto"
     language: str = "uk"
     # Пари в браузері: "auto"/"browser" — звук лише з вкладки пари (будь-яка ОС); "pulse" — увесь звук
     # браузера програми через PipeWire/PulseAudio (Linux, запасний шлях).

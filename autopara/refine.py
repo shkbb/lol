@@ -5,24 +5,27 @@
 а після пари розпізнаємо весь запис ще раз: з контекстом, beam 5, запасними «температурами». Звіт
 і запис пари робляться вже з цієї розшифровки; жива лишається в кінці файла для порівняння.
 
-Модель та сама, що й у вух: вони завжди першими (див. ears.ModelGate), тож уточнення йде в перервах
-і після пар — звіт приходить пізніше. Звук видаляється, щойно розшифровано. Якщо програму закрили
-посеред уточнення — продовжимо після запуску.
+Модель — окрема й точніша (large-v3), а наживо — швидка (turbo): наживо головне встигати. Уточнення йде,
+лише коли пари немає й найближчим часом не буде, а модель вантажиться тільки на цей час і з таким
+пошуком, на який вистачає вільної пам'яті, — тож звіт приходить пізніше, зате пару нічим не гальмує.
+Звук видаляється, щойно розшифровано. Якщо програму закрили посеред уточнення — продовжимо після запуску.
 """
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
-import queue
 import re
 import threading
+from collections import deque
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 from .assistant import ChatMessage, LessonRecord
+from .ears import Paused
 
 log = logging.getLogger(__name__)
 
@@ -103,27 +106,52 @@ def record_from_json(data: dict) -> LessonRecord:
     return LessonRecord(**data)
 
 
+# Скільки вільної пам'яті треба для уточнення large-v3 (сама модель ~2 ГБ, кожен варіант пошуку — ще ~0,5 ГБ).
+# Менше — чекаємо: зранку програму вбило саме те, що уточнення не зважало на пам'ять.
+MIN_FREE_GB = 4.0
+BEAM_BY_FREE_GB = ((8.0, 5), (6.0, 3), (MIN_FREE_GB, 2))
+
+
+def beam_for(free_gb: float | None) -> int:
+    """Скільки варіантів зважувати при такій вільній пам'яті (0 — замало пам'яті, почекати)."""
+    if free_gb is None:  # не знаємо (macOS) — обережно
+        return 2
+    return next((beam for need, beam in BEAM_BY_FREE_GB if free_gb >= need), 0)
+
+
 class Refiner:
     """Фоновий потік: черга пар на уточнення. ``complete(record, path, lines)`` — уточнена розшифровка готова,
-    ``fallback(record, path)`` — не вийшло (звіт із живої розшифровки)."""
+    ``fallback(record, path)`` — не вийшло (звіт із живої розшифровки).
 
-    def __init__(self, folder: Path, transcriber: Callable[[], object | None], hint: Callable[[LessonRecord], str],
+    Уточнює окремою, точнішою моделлю (``make_transcriber``), яку вантажить лише на час розпізнавання й одразу
+    вивантажує. І лише тоді, коли ``allowed()``: пари немає й найближчим часом не буде, — тож уточнення не
+    забирає в пари ні процесор, ні пам'ять. Почалась пара — зупиняється й продовжує потім спочатку.
+    """
+
+    def __init__(self, folder: Path, make_transcriber: Callable[[], object | None], hint: Callable[[LessonRecord], str],
                  complete: Callable[[LessonRecord, Path | None, list[tuple[datetime, str]]], None],
-                 fallback: Callable[[LessonRecord, Path | None], None]):
+                 fallback: Callable[[LessonRecord, Path | None], None],
+                 allowed: Callable[[], bool] = lambda: True, free_gb: Callable[[], float | None] = lambda: None,
+                 poll_seconds: float = 30):
         self.folder = folder
-        self.transcriber = transcriber  # WhisperTranscriber вух (None, поки модель вантажиться)
+        self.make_transcriber = make_transcriber  # → WhisperTranscriber (None — модель ще не готова)
         self.hint = hint
         self.complete = complete
         self.fallback = fallback
-        self._jobs: queue.Queue = queue.Queue()
+        self.allowed = allowed
+        self.free_gb = free_gb
+        self.poll_seconds = poll_seconds
+        self._jobs: deque[Path] = deque()
+        self._cond = threading.Condition()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="refine", daemon=True)
+        self._waiting_logged = ""
 
     def start(self) -> None:
         for job in sorted(self.folder.glob("*.json")) if self.folder.is_dir() else []:
             if job.with_suffix(".raw").exists():
-                log.info("Продовжую уточнювати розшифровку пари, почату до перезапуску")
-                self._jobs.put(job)
+                log.info("Розшифровка пари чекає на уточнення (з минулого запуску)")
+                self._jobs.append(job)
             else:
                 job.unlink(missing_ok=True)
         for audio in self.folder.glob("*.raw") if self.folder.is_dir() else []:
@@ -133,43 +161,84 @@ class Refiner:
 
     def stop(self) -> None:
         self._stop.set()
-        self._jobs.put(None)
+        with self._cond:
+            self._cond.notify_all()
 
     def submit(self, record: LessonRecord, path: Path | None, audio: Path, started: datetime) -> None:
         job = audio.with_suffix(".json")
         data = {"record": record_to_json(record), "path": str(path) if path else "", "started": started.isoformat()}
         job.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        self._jobs.put(job)
+        with self._cond:
+            self._jobs.append(job)
+            self._cond.notify_all()
 
     def pending(self) -> int:
-        return self._jobs.qsize()
+        with self._cond:
+            return len(self._jobs)
+
+    def _next(self) -> Path | None:
+        with self._cond:
+            while not self._jobs and not self._stop.is_set():
+                self._cond.wait(5)
+            return self._jobs[0] if self._jobs and not self._stop.is_set() else None
+
+    def _done(self, job: Path) -> None:
+        with self._cond:
+            if self._jobs and self._jobs[0] == job:
+                self._jobs.popleft()
+
+    def _wait(self, why: str) -> None:
+        if why != self._waiting_logged:
+            self._waiting_logged = why
+            log.info("Уточнення розшифровки чекає: %s", why)
+        self._stop.wait(self.poll_seconds)
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            job = self._jobs.get()
+            job = self._next()
             if job is None:
                 return
+            if not self.allowed():
+                self._wait("іде пара або скоро почнеться")
+                continue
+            beam = beam_for(self.free_gb())
+            if not beam:
+                self._wait(f"замало вільної пам'яті (треба {MIN_FREE_GB:.0f} ГБ)")
+                continue
+            self._waiting_logged = ""
             try:
-                self._refine(job)
+                self._refine(job, beam)
+            except Paused:
+                log.info("Почалась пара — уточнення відкладаю, продовжу після неї")
+                continue
             except InterruptedError:
                 return  # програма зупиняється — продовжимо після запуску (файли лишились)
             except Exception:  # noqa: BLE001 — не вийшло уточнити: звіт однаково має прийти
                 log.exception("Не вдалося уточнити розшифровку")
                 self._give_up(job)
+            self._done(job)
 
-    def _refine(self, job: Path) -> None:
+    def _refine(self, job: Path, beam: int) -> None:
         data = json.loads(job.read_text(encoding="utf-8"))
         record = record_from_json(data["record"])
         path = Path(data["path"]) if data["path"] else None
         started = datetime.fromisoformat(data["started"])
         audio = job.with_suffix(".raw")
-        while (transcriber := self.transcriber()) is None:  # вуха ще вантажать модель
+        transcriber = self.make_transcriber()
+        if transcriber is None:  # модель ще вантажиться
             if self._stop.wait(10):
                 raise InterruptedError
-        pcm = audio.read_bytes()
-        minutes = len(pcm) / BYTES_PER_SECOND / 60
-        log.info("Уточнюю розшифровку «%s» (%.0f хв звуку) — у перервах між живим розпізнаванням", record.title, minutes)
-        lines = transcriber.transcribe_long(pcm, self.hint(record), stop=self._stop)
+            raise Paused
+        try:
+            pcm = audio.read_bytes()
+            minutes = len(pcm) / BYTES_PER_SECOND / 60
+            log.info("Уточнюю розшифровку «%s» (%.0f хв звуку, модель %s, beam %d)", record.title, minutes,
+                     getattr(transcriber, "name", "?"), beam)
+            lines = transcriber.transcribe_long(pcm, self.hint(record), stop=self._stop, beam_size=beam,
+                                                allowed=self.allowed)
+        finally:
+            del transcriber  # модель — геть з пам'яті ще до того, як мозок візьметься за конспект
+            gc.collect()
         refined = [(started + timedelta(seconds=offset), text) for offset, text in lines]
         log.info("Розшифровку «%s» уточнено: %d фраз (наживо було %d)", record.title, len(refined),
                  len(record.transcript))

@@ -235,3 +235,27 @@ class FakeTelegramHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+def test_join_now_on_a_scheduled_lesson_is_that_lesson_not_a_test(tmp_path):
+    """«Зайти зараз» на пару з розкладу, що почалась раніше: заходимо саме на неї (з її назвою й звітом)."""
+    clock = lambda: datetime.fromisoformat("2026-10-05T09:05").replace(tzinfo=TZ)  # noqa: E731
+    config = Config(schedule=ScheduleSettings(group="ТЦР-32"), links=[LinkRule(subject="Бази", url="https://meet.google.com/aaa-bbbb-ccc")])
+    joiner = IdleJoiner()
+    controller = Controller(
+        config, tmp_path / "config.toml", clock=clock,
+        runner_parts=lambda stack: (Runner(config, FakeClient([make_lesson()]), joiner, clock=clock, sleep_guard=FakeGuard()), joiner),
+    )
+    controller.start()
+    try:
+        controller.call("start")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not controller.runner.plan.visits:
+            time.sleep(0.05)
+        assert controller.call("test_join", "https://meet.google.com/aaa-bbbb-ccc", 60) == "joining"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not joiner.joined:
+            time.sleep(0.05)
+        assert joiner.joined == ["Бази даних"] and not controller.runner.extra_visits
+    finally:
+        controller.shutdown()
