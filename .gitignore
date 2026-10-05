@@ -10,3 +10,6 @@ venv/
 .pytest_cache/
 build/
 dist/
+
+# Особисті профілі (посилання на пари, пошти) — лише локально, не в git
+profiles/*.toml

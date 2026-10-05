@@ -144,7 +144,10 @@ def test_saving_respects_the_off_switch(running_app):
     assert controller.snapshot()["running"] is False
 
 
-def test_import_profile_profile(running_app):
+def test_import_group_profile(running_app, monkeypatch):
+    from autopara import app as app_module
+
+    monkeypatch.setattr(app_module, "PROFILES", PROFILE.parent)  # профілі з теки програми (тут — тестовий)
     server, controller, _ = running_app
     status, data = call(server, "GET", "/api/config")
     assert "profile" in data["profiles"]

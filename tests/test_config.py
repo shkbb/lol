@@ -40,10 +40,11 @@ def test_links_are_normalized():
     assert config.links[0].url == "https://meet.google.com/aaa-bbbb-ccc"
 
 
-PROFILE = EXAMPLE.parent / "profiles" / "group.toml"
+# Приклад профілю групи (вигадані посилання й пошти): справжні профілі лежать лише локально, не в git.
+PROFILE = Path(__file__).with_name("data") / "profile.toml"
 
 
-def test_profile_profile_is_valid():
+def test_group_profile_is_valid():
     from datetime import date, time
 
     from autopara.links import resolve

@@ -383,7 +383,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="працювати у фоні без вікна (для автозапуску)")
     run.set_defaults(func=cmd_run, needs_config=False)
 
-    importing = sub.add_parser("import-config", help="взяти налаштування з файла, наприклад profiles/group.toml")
+    importing = sub.add_parser("import-config", help="взяти налаштування з файла, наприклад профілю групи від одногрупника")
     importing.add_argument("file")
     importing.set_defaults(func=cmd_import_config, needs_config=False)
 

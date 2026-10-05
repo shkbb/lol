@@ -1,0 +1,89 @@
+# Приклад профілю студента, ТЦР-32 (ДУІКТ). Усі посилання — вигадані, лише для тестів.
+# Підключити: `autopara import-config profiles/group.toml` або кнопка «Імпорт профілю» у вікні програми.
+# Токен Telegram-бота сюди не пиши — його вводять у вікні програми, і він зберігається лише на ноуті.
+
+[schedule]
+university = "duikt"
+group = "ТЦР-32"
+student = "Ляшко Денис"   # власний розклад з урахуванням підгруп
+days_ahead = 7
+refresh_minutes = 60
+use_schedule_links = true
+
+[join]
+minutes_before = 2
+mute_microphone = true
+camera_off = true
+mute_sound = false         # пару чуєш і ти (якщо ввімкнені вуха — звук іде і їм, і в динаміки)
+auto_leave = true
+smart_leave = true
+max_overtime_minutes = 20
+leave_after_minutes = 0
+zoom_mode = "app"          # Zoom-клієнт, у який ти входиш через Google
+display_name = "Денис Ляшко ТЦР-32"
+# Більшість зустрічей пускає лише з корпоративної пошти — вона основна.
+meet_account = "st1234567@stud.duikt.edu.ua"
+accounts = ["denys.personal@gmail.com"]  # особиста пошта — для зустрічей, які не пускають з корпоративної
+
+[me]
+name = "Ляшко Денис"
+chat_reply = "auto"        # "auto" — писати «+» самому, "ask" — спершу спитати в Telegram, "off" — не писати
+present = "Присутній"      # що писати, коли група відмічається словами «присутній», «тут»
+here = "Так, я тут"        # відповідь на «Ляшко, ви тут?»
+quick_replies = ["Присутній", "Так, я тут"]  # кнопки-відповіді в Telegram, коли тебе кличуть
+
+[telegram]
+# token і chat_id — у config.local.toml (див. README → «Telegram»)
+clips = true               # відеовирізка моменту, коли тебе згадали
+
+[ears]
+enabled = true             # слухати пару (див. README → «Вуха»)
+model = "large-v3-turbo"   # точна для української; якщо ноут не встигатиме — сам перейде на small
+language = "uk"
+
+[brain]
+enabled = true             # локальна мовна модель через Ollama (працює, щойно Ollama встановлена)
+model = "gemma3:4b"
+url = "http://127.0.0.1:11434"
+
+# --- Посилання ----------------------------------------------------------------
+# Варіанти через «|» — бо на сайті розкладу назва може бути повна або скорочена.
+# Перевір, що всі пари підхопились: `autopara schedule`.
+
+[[links]]
+subject = "Архітектур"                      # Архітектура ПЗ
+url = "https://meet.google.com/aaa-aaaa-aaa"
+
+[[links]]
+subject = "Конструювання"                   # Конструювання програмного забезпечення (JAVA)
+url = "https://meet.google.com/bbb-bbbb-bbb"
+
+[[links]]
+subject = "баз даних|сховищ"                # Технології проектування та адміністрування БД і сховищ даних
+url = "https://meet.google.com/ccc-cccc-ccc"
+
+[[links]]
+subject = "Цифрові технології"
+url = "https://us02web.zoom.us/j/12345678901?pwd=test"
+
+[[links]]
+subject = "ЯТПЗ|Якість|тестування"          # ЯТПЗ, лекції — НЕ з корпоративної пошти
+type = "Лк"
+account = "denys.personal@gmail.com"
+url = "https://meet.google.com/ddd-dddd-ddd"
+
+[[links]]
+subject = "ЯТПЗ|Якість|тестування"          # ЯТПЗ, практики й лаби
+url = "https://meet.google.com/eee-eeee-eee"
+
+[[links]]
+subject = "Безпека розробки"
+url = "https://meet.google.com/fff-ffff-fff"
+
+[[links]]
+subject = "Інтернет|IoT"                    # Технології Інтернету речей; Tinkercad: https://www.tinkercad.com/joinclass/LSI9XYAGD
+url = "https://meet.google.com/ggg-gggg-ggg"
+
+[[links]]
+subject = "мобільн"                         # Програмування мобільних пристроїв
+url = "https://meet.google.com/hhh-hhhh-hhh"
