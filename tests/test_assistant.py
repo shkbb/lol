@@ -168,7 +168,8 @@ def test_brain_alone_never_acts_in_the_meeting():
     assert assistant.take_actions() == []  # група не підтвердила — нічого не пишемо
     assistant.apply_decision(KEY, Decision("leave", reason="почулось «на сьогодні все»"), at("10:40"))
     assert assistant.take_actions() == [] and "Напиши «вийди»" in inbox.text()
-    assistant.apply_decision(KEY, Decision("notify", message="Викладач просить увімкнути камери"), at("10:41"))
+    assistant.apply_decision(KEY, Decision("notify", message="Викладач просить увімкнути камери",
+                                           reason="увімкніть камери"), at("10:41"))
     assert "увімкнути камери" in inbox.text()
 
 
@@ -665,10 +666,23 @@ def test_brain_does_not_retell_the_lecture():
                                            reason="у понеділок буде контрольна"), at("10:21"))
     assistant.apply_decision(KEY, Decision("notify", message="Тебе кличуть.", reason="Ляшко, ви тут?"), at("10:22"))
     assert len(inbox.messages) == 2 and "контрольну" in inbox.messages[0][0] and "кличуть" in inbox.messages[1][0]
-    # Інше нетермінове — не частіше раз на 10 хв.
-    assistant.apply_decision(KEY, Decision("notify", message="Почалась демонстрація екрана."), at("10:25"))
-    assistant.apply_decision(KEY, Decision("notify", message="Почалась демонстрація екрана."), at("10:40"))
-    assert len(inbox.messages) == 3
+    # Без доказу з пари — ніколи: «Чим займаюся я?» гостя-лектора мозок прочитав як питання до тебе.
+    assistant.apply_decision(KEY, Decision("notify", message="Тебе кличуть, щоб уточнив, чим займаєшся.",
+                                           reason="Петро Іванов: Зараз актуальніше Java чи Kotlin?"), at("10:40"))
+    assistant.apply_decision(KEY, Decision("notify", message="Почалась демонстрація екрана."), at("10:45"))
+    assert len(inbox.messages) == 2
+
+
+def test_brain_alert_comes_with_a_video_moment():
+    """Наживо всіх просили ввімкнути камери — мозок сповістив, але без відео (вирізки були лише на ім'я)."""
+    assistant, inbox, _ = make(brain=True)
+    moments = []
+    assistant.on_moment = lambda key, title, when: moments.append(when)
+    assistant.apply_decision(KEY, Decision("notify", message="Просять увімкнути камери для скріншоту.",
+                                           reason="увімкніть, будь ласка, камери для скріншоту"), at("10:18"))
+    assistant.apply_decision(KEY, Decision("notify", message="Ще раз просять камери.",
+                                           reason="камери, будь ласка"), at("10:18:30"))
+    assert len(inbox.messages) == 2 and moments == [at("10:18")]  # вирізка — не частіше, ніж на «тебе кличуть»
 
 
 def test_brain_knows_why_the_app_left():

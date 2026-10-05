@@ -108,18 +108,12 @@ ATTENTION_RE = re.compile(
     re.I,
 )
 ME_AUTHOR_RE = re.compile(r"^(you|ви|вы)$", re.I)
-# Мозкове «повідомити» — лише коли від студента щось треба. Переказ лекції («викладач обговорює…») — не привід:
-# це буде у звіті після пари. Наживо маленька модель усе одно так робила — тож ще й фільтр у коді.
-RECAP_RE = re.compile(
-    r"^\W*(викладач|лектор|на парі|зараз|пара)\b.{0,80}\b(обговорю|поясню|продовжу|розповіда|згаду|говорить|"
-    r"розгляда|описує|читає|наводить|показує|підкреслю|демонстру)", re.I)
+# Мозкове «повідомити» — лише коли від студента щось треба, і судимо за цитатою з пари: переказ лекції
+# («викладач обговорює…») чи порада від себе — не привід, це буде у звіті після пари.
 URGENT_RE = re.compile(
     r"тебе|тобі|перекличк|відміт|присутн|плюс|камер|мікрофон|завдан|дедлайн|"
     r"контрольн|модульн|тест(ування)? (буде|зараз)|здати|здайте|до (понеділк|вівтор|серед|четвер|п.ятниц|суботи|неділ)|"
     r"оцінк|бал(и|ів)|питає|запиту|кличе|звертається|відповісти|залік|екзамен|іспит", re.I)
-BRAIN_NOTIFY_GAP = timedelta(minutes=10)  # не частіше для нетермінових мозкових сповіщень
-# «Студенту варто звернути увагу на…», «це може бути корисним» — порада від себе, а не подія на парі.
-GENERIC_ADVICE_RE = re.compile(r"звернути увагу|варто (звернути|врахувати|запам)|може бути корисн|рекоменду|зверни увагу", re.I)
 
 HELP = (
     "Я пишу, коли щось відбувається на парі. Що можна відповісти:\n"
@@ -216,7 +210,6 @@ class Meeting:
     pending: Pending | None = None  # чекаємо на твоє «так»/«ні»
     awaiting: Awaiting | None = None  # хвиля «+», щодо якої питаємо мозок
     expect_roll_call: datetime | None = None  # мозок чув перекличку — чекаємо, чи відмічатимуться інші
-    last_brain_notify: datetime | None = None  # коли мозок востаннє щось повідомляв (не частіше BRAIN_NOTIFY_GAP)
     can_chat: bool = True  # чи вміємо писати в чат цієї пари (лише Meet у браузері)
 
 
@@ -288,6 +281,7 @@ class Assistant:
         self.can_ask = True  # чи можна спитати тебе: бот приймає відповіді й кнопки
         self.alert_mentions = True  # сповіщати, коли тебе кличуть
         self._last_mention: datetime | None = None
+        self._last_brain_clip: datetime | None = None
         self._last_roll_call: datetime | None = None
         self._alerts: deque[str] = deque(maxlen=30)  # сповіщення, відповідь на які йде в чат пари
         self.dialog: deque[tuple[str, str]] = deque(maxlen=DIALOG_TURNS)  # остання розмова з ботом
@@ -864,11 +858,14 @@ class Assistant:
                 return
             if decision.action == "notify":
                 message = decision.message or why
-                if not self._worth_telling(meeting, message, decision.reason, now):
+                if not self._worth_telling(decision.reason):
                     log.info("Мозок: не турбую — це не стосується тебе особисто (буде у звіті)")
                     return
-                meeting.last_brain_notify = now
                 self.notify(f"🧠 {message} («{meeting.title}»)", urgent=True)
+                if self.on_moment and self._cooled(self._last_brain_clip, now, MENTION_COOLDOWN):
+                    # Як і з «тебе кличуть» — відео моменту, щоб було видно й чутно, що там сталося.
+                    self._last_brain_clip = now
+                    self.on_moment(meeting.key, f"🎬 Момент з «{meeting.title}», {now:%H:%M}", now)
             elif decision.action in ("chat_plus", "chat_name") and self.me.chat_reply == "off":
                 if meeting.expect_roll_call is None or now - meeting.expect_roll_call > EXPECT_WINDOW:
                     meeting.expect_roll_call = now
@@ -1018,19 +1015,13 @@ class Assistant:
         lines.append("\n↩️ Відповідай на це повідомлення — і я напишу твій текст у чат.")
         return "\n".join(lines)
 
-    def _worth_telling(self, meeting: Meeting, message: str, quote: str, now: datetime) -> bool:
-        """Чи варто будити студента мозковим сповіщенням: його назвали, перекличка, завдання, дедлайн, контрольна…
-
-        Судимо за цитатою з пари (``quote`` — що саме там сказали), а не за словами мозку: наживо маленька модель
-        дописувала до переказу лекції «Студенту Ляшко Денису варто звернути увагу» — і так проходила фільтр.
-        Переказ лекції — ні; інше нетермінове — не частіше раз на BRAIN_NOTIFY_GAP."""
+    def _worth_telling(self, quote: str) -> bool:
+        """Чи варто будити студента мозковим сповіщенням: судимо лише за цитатою з пари (``quote`` — що там справді
+        сказали), а не за словами мозку. Наживо маленька модель дописувала до переказу лекції «Студенту … варто
+        звернути увагу» і читала «Чим займаюся я?» гостя-лектора як «тебе питають, чим ти займаєшся». Тож лише
+        твоє ім'я, камера, перекличка, завдання, дедлайн, контрольна… — інакше мозок не будить."""
         evidence = quote or ""
-        urgent = any(pattern.search(evidence) for pattern, _ in self._patterns) or bool(URGENT_RE.search(evidence))
-        if not urgent and (RECAP_RE.search(message) or GENERIC_ADVICE_RE.search(message)):
-            return False
-        if urgent:
-            return True
-        return meeting.last_brain_notify is None or now - meeting.last_brain_notify >= BRAIN_NOTIFY_GAP
+        return any(pattern.search(evidence) for pattern, _ in self._patterns) or bool(URGENT_RE.search(evidence))
 
     def note_event(self, when: datetime, text: str) -> None:
         """Дія програми («Зайшов на…», «Вийшов з…: зустріч завершилась») — щоб на «чому вийшов?» мозок знав відповідь."""
