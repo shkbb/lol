@@ -29,6 +29,10 @@ ACTIONS = ("none", "notify", "chat_plus", "chat_name", "leave")
 # вичерпувала пам'ять ноутбука — тож тримаємо недовго й вивантажуємо, щойно пам'яті мало (BrainMemoryGuard).
 KEEP_ALIVE = "10m"
 LOW_MEMORY_GB = 2.0
+# Ollama 0.35 з вбудованою відеокартою Intel (Vulkan) не віддає пам'ять: наживо кожен запит додавав ~270 МБ,
+# і за пів години конспектів процес мозку виріс з 0,3 до 7,4 ГБ, поки ядро його не вбило. Тож після кожних
+# кількох запитів вивантажуємо модель — з нею йде й накопичене; наступний запит завантажить її за секунди.
+REQUESTS_PER_LOAD = 5
 COOLDOWN_SECONDS = 45
 
 SYSTEM_PROMPT = """Ти — помічник студента на онлайн-парі. Студента зараз немає біля комп'ютера; \
@@ -96,6 +100,21 @@ class OllamaBrain:
         self.model = model
         self.session = session or requests.Session()
         self.timeout = timeout
+        self._requests = 0
+        self._count_lock = threading.Lock()
+
+    def _ask(self, payload: dict, timeout: float) -> dict:
+        """Запит до Ollama; після кожних REQUESTS_PER_LOAD — вивантажити модель (див. REQUESTS_PER_LOAD)."""
+        try:
+            response = self.session.post(f"{self.url}/api/chat", json=payload, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        finally:
+            with self._count_lock:
+                self._requests += 1
+                due = self._requests % REQUESTS_PER_LOAD == 0
+            if due:
+                self.unload()
 
     def decide(self, situation: str) -> Decision:
         payload = {
@@ -110,9 +129,7 @@ class OllamaBrain:
             ],
         }
         try:
-            response = self.session.post(f"{self.url}/api/chat", json=payload, timeout=self.timeout)
-            response.raise_for_status()
-            content = response.json()["message"]["content"]
+            content = self._ask(payload, self.timeout)["message"]["content"]
         except (requests.RequestException, KeyError, ValueError) as e:
             raise BrainError(f"Ollama недоступна ({self.url}): {e}") from e
         return parse_decision(content)
@@ -139,9 +156,7 @@ class OllamaBrain:
             "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": text}],
         }
         try:
-            response = self.session.post(f"{self.url}/api/chat", json=payload, timeout=self.timeout * 2)
-            response.raise_for_status()
-            return response.json()["message"]["content"].strip()
+            return self._ask(payload, self.timeout * 2)["message"]["content"].strip()
         except (requests.RequestException, KeyError, ValueError) as e:
             raise BrainError(f"Ollama недоступна ({self.url}): {e}") from e
 
@@ -162,9 +177,7 @@ class OllamaBrain:
             ],
         }
         try:
-            response = self.session.post(f"{self.url}/api/chat", json=payload, timeout=self.timeout)
-            response.raise_for_status()
-            number = int(json.loads(response.json()["message"]["content"])["number"])
+            number = int(json.loads(self._ask(payload, self.timeout)["message"]["content"])["number"])
         except (requests.RequestException, KeyError, ValueError, TypeError) as e:
             log.warning("Мозок не зміг обрати: %s", e)
             return None

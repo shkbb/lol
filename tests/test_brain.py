@@ -153,3 +153,40 @@ def test_low_memory_unloads_the_brain_model():
         guard.stop()
     assert session.unloads == [{"model": "gemma3:4b", "keep_alive": 0}]
     assert brain.unload() is False  # уже вивантажено — нічого не робимо
+
+
+def test_model_is_reloaded_every_few_requests_so_ollama_leak_does_not_pile_up():
+    """Наживо кожен запит до Ollama з відеокартою Intel додавав ~270 МБ, які вона не віддавала."""
+    from autopara.brain import REQUESTS_PER_LOAD
+
+    class Session:
+        def __init__(self):
+            self.chats, self.unloads = 0, 0
+
+        def post(self, url, json, timeout):
+            if url.endswith("/api/generate"):
+                self.unloads += 1
+                return None
+            self.chats += 1
+
+            class Response:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"message": {"content": "конспект"}}
+
+            return Response()
+
+        def get(self, url, timeout):
+            class Response:
+                def json(self):
+                    return {"models": [{"name": "gemma3:4b"}]}
+
+            return Response()
+
+    session = Session()
+    brain = OllamaBrain("http://127.0.0.1:11434", "gemma3:4b", session=session)
+    for _ in range(REQUESTS_PER_LOAD * 2 + 1):
+        assert brain.summarize("конспектуй", "текст") == "конспект"
+    assert session.chats == REQUESTS_PER_LOAD * 2 + 1 and session.unloads == 2
