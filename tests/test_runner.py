@@ -383,3 +383,25 @@ def test_today_note_tells_the_brain_what_was_and_what_is_next():
     assert "09:30–10:50 «Бази даних» — іде зараз" in note and "11:10–12:30 «Мережі» — ще буде" in note
     runner._leave(next(iter(runner.active)), "пара скінчилась")
     assert "«Бази даних» — уже була" in runner.today_note(at("10:55"))
+
+
+def test_schedule_site_down_after_restart_uses_the_saved_schedule(tmp_path):
+    """Наживо: після перезапуску сайт розкладу не відповідав (DNS) — і програма не знала, куди заходити."""
+    cache = tmp_path / "schedule-cache.json"
+    runner, _, _ = make_runner([make_lesson()])
+    runner.schedule_cache = cache
+    runner.tick(at("08:00"))
+    assert cache.exists()
+
+    again, client, joiner = make_runner([make_lesson()])
+    again.schedule_cache = cache
+    client.fail = True  # сайт лежить
+    again.tick(at("09:28"))
+    assert joiner.joined == ["Бази даних"] and again.last_error
+
+    other, client2, joiner2 = make_runner([make_lesson()])
+    other.config.schedule.group = "ІП-31"  # розклад іншої групи не беремо
+    other.schedule_cache = cache
+    client2.fail = True
+    other.tick(at("09:28"))
+    assert joiner2.joined == []

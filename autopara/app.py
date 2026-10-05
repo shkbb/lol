@@ -180,6 +180,7 @@ class Controller:
         runner = Runner(
             self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant,
             app_audio=info.app_audio, visited_file=self.config.data_dir / "visited.json",
+            schedule_cache=self.config.data_dir / "schedule-cache.json",
         )
         info.refine_allowed = lambda: runner.quiet(self.clock())  # уточнення — лише коли пари не скоро
         info.assistant.schedule_note = runner.today_note  # мозок знає, яка пара була, яка йде, яка далі

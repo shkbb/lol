@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from dataclasses import asdict
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -14,7 +15,7 @@ from .config import Config
 from .leaving import LeaveDecider, Observation
 from .planner import Plan, Visit, build_plan
 from .power import SleepGuard
-from .rozklad import RozkladClient, RozkladError, Target
+from .rozklad import Lesson, RozkladClient, RozkladError, Target
 from .sources import resolve_target
 from .session import JoinError, Session
 
@@ -40,6 +41,7 @@ class Runner:
         app_audio=None,
         assistant: Assistant | None = None,
         visited_file: Path | None = None,
+        schedule_cache: Path | None = None,
     ):
         self.config = config
         self.assistant = assistant
@@ -53,6 +55,9 @@ class Runner:
         # Пари, на які вже ходили (чи на які зайти не вдалося). Зберігаються у файл, щоб після перезапуску програма
         # не зайшла вдруге на пару, з якої вже вийшла (наприклад, «зустріч завершилась» раніше за розклад).
         self.visited_file = visited_file
+        # Останній розклад із сайту — на диску: якщо сайт розкладу ляже (наживо: не відповідав DNS), а програму
+        # саме перезапустили, вона однаково зайде на пари за збереженим розкладом.
+        self.schedule_cache = schedule_cache
         self.finished: set[str] = self._load_visited()
         self.attempts: dict[str, int] = {}
         self.retry_at: dict[str, datetime] = {}
@@ -83,6 +88,10 @@ class Runner:
             self._load_classmates()
         today = now.date()
         lessons = self.client.schedule(self.target, today, today + timedelta(days=self.config.schedule.days_ahead))
+        self._save_schedule(lessons)
+        self._use(lessons, now)
+
+    def _use(self, lessons: list[Lesson], now: datetime) -> None:
         self.plan = build_plan(
             lessons, self.config.links, self.config.join, self.tz, now, self.config.schedule.use_schedule_links
         )
@@ -100,6 +109,39 @@ class Runner:
             log.info("Розклад оновлено. Найближча пара: %s — зайду %s", v.title, v.join_at.strftime("%d.%m о %H:%M"))
         else:
             log.info("Розклад оновлено. Найближчими %d днями пар з посиланнями немає", self.config.schedule.days_ahead)
+
+    def _schedule_owner(self) -> str:
+        return f"{self.config.schedule.university}|{self.config.schedule.group}|{self.config.schedule.student}"
+
+    def _save_schedule(self, lessons: list[Lesson]) -> None:
+        if self.schedule_cache is None:
+            return
+        rows = []
+        for lesson in lessons:
+            row = asdict(lesson)
+            row.update(day=lesson.day.isoformat(), start=lesson.start.isoformat(), end=lesson.end.isoformat())
+            rows.append(row)
+        try:
+            self.schedule_cache.parent.mkdir(parents=True, exist_ok=True)
+            self.schedule_cache.write_text(json.dumps({"owner": self._schedule_owner(), "lessons": rows},
+                                                      ensure_ascii=False), encoding="utf-8")
+        except OSError as e:
+            log.debug("Не вдалося зберегти розклад: %s", e)
+
+    def _cached_lessons(self) -> list[Lesson]:
+        if self.schedule_cache is None:
+            return []
+        try:
+            data = json.loads(self.schedule_cache.read_text(encoding="utf-8"))
+            if data.get("owner") != self._schedule_owner():
+                return []  # розклад іншої групи (налаштування змінили)
+            return [
+                Lesson(**{**row, "day": date.fromisoformat(row["day"]), "start": time.fromisoformat(row["start"]),
+                          "end": time.fromisoformat(row["end"])})
+                for row in data.get("lessons", [])
+            ]
+        except (OSError, ValueError, TypeError, KeyError):
+            return []
 
     def _load_classmates(self) -> None:
         """Список групи з сайту розкладу — щоб помічник упізнавав перекличку голосом."""
@@ -132,6 +174,9 @@ class Runner:
                 log.error("Не вдалося оновити розклад: %s. Спробую ще раз за 5 хв", e)
                 self.last_error = str(e)
                 self.next_refresh = now + RETRY_REFRESH_AFTER
+                if not self.plan.visits and (cached := self._cached_lessons()):
+                    log.warning("Сайт розкладу недоступний — заходжу на пари за збереженим розкладом")
+                    self._use(cached, now)
 
         for key, session in list(self.active.items()):
             if not self.joiner.alive(session):
