@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -37,6 +39,7 @@ class Runner:
         sleep_guard: SleepGuard | None = None,
         app_audio=None,
         assistant: Assistant | None = None,
+        visited_file: Path | None = None,
     ):
         self.config = config
         self.assistant = assistant
@@ -47,7 +50,10 @@ class Runner:
         self.plan = Plan()
         self.target: Target | None = None
         self.active: dict[str, Session] = {}  # visit.key -> Session
-        self.finished: set[str] = set()
+        # Пари, на які вже ходили (чи на які зайти не вдалося). Зберігаються у файл, щоб після перезапуску програма
+        # не зайшла вдруге на пару, з якої вже вийшла (наприклад, «зустріч завершилась» раніше за розклад).
+        self.visited_file = visited_file
+        self.finished: set[str] = self._load_visited()
         self.attempts: dict[str, int] = {}
         self.retry_at: dict[str, datetime] = {}
         self.next_refresh: datetime | None = None
@@ -183,6 +189,7 @@ class Runner:
         log.info("Виходжу з «%s»: %s", session.visit.title, reason)
         self.joiner.leave(session)
         self._forget(key)
+        self._save_visited()
         self.notify(f"👋 Вийшов з «{session.visit.title}»: {reason}", routine=True)
 
     def _forget(self, key: str) -> None:
@@ -271,6 +278,7 @@ class Runner:
                 log.error("Не вдалося зайти на «%s»: %s", visit.title, e)
                 self.notify(f"❌ Не вдалося зайти на «{visit.title}»: {e}. Зайди сам: {visit.url}", urgent=True)
                 self.finished.add(visit.key)
+                self._save_visited()
             return
         start, end = self._window(visit)
         if session.page is None:
@@ -289,6 +297,28 @@ class Runner:
         self.active[visit.key] = session
         # Одразу дивимось у зустріч: те, що вже є в чаті, — історія, а все наступне — нове.
         self._look(visit.key, session, now)
+
+    def _save_visited(self) -> None:
+        """Записати пари, з яких уже вийшли (чи зайти на які не вдалося). Ті, що йдуть зараз, — ні: якщо програму
+        перезапустять посеред пари, вона має зайти на неї знову."""
+        if self.visited_file is None:
+            return
+        # Ключ пари починається з дати («2026-10-05|11:10:00|…») — старіші за вчора не тримаємо.
+        keep_from = f"{self.clock().date() - timedelta(days=1)}"
+        keys = sorted(k for k in self.finished - set(self.active) if k[:10] >= keep_from)
+        try:
+            self.visited_file.parent.mkdir(parents=True, exist_ok=True)
+            self.visited_file.write_text(json.dumps(keys, ensure_ascii=False), encoding="utf-8")
+        except OSError as e:
+            log.warning("Не вдалося запам'ятати відвідану пару: %s", e)
+
+    def _load_visited(self) -> set[str]:
+        if self.visited_file is None:
+            return set()
+        try:
+            return set(json.loads(self.visited_file.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            return set()
 
     def run_forever(self, poll_seconds: float = 20) -> None:
         log.info("autopara запущено. Не вимикай комп'ютер і не давай йому заснути під час пар.")

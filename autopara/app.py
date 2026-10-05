@@ -179,7 +179,7 @@ class Controller:
         )
         runner = Runner(
             self.config, make_source(self.config), joiner, clock=self.clock, assistant=info.assistant,
-            app_audio=info.app_audio,
+            app_audio=info.app_audio, visited_file=self.config.data_dir / "visited.json",
         )
         info.refine_allowed = lambda: runner.quiet(self.clock())  # уточнення — лише коли пари не скоро
         return runner, joiner

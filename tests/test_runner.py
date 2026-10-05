@@ -349,3 +349,28 @@ def test_chat_actions_happen_at_once_not_on_the_next_tick():
     runner.assistant.on_command("напиши тест", at("09:40"))
     runner.act_now(at("09:40"))  # так робить програма кожні пів секунди між кроками
     assert joiner.written == ["тест"]
+
+
+def test_restart_does_not_rejoin_a_lesson_we_already_left(tmp_path):
+    """Наживо: після перезапуску програма знову зайшла на пару, яка вже завершилась (зустріч закрили раніше)."""
+    visited = tmp_path / "visited.json"
+    runner, _, joiner = make_runner([make_lesson()])
+    runner.visited_file = visited
+    runner.tick(at("09:28"))
+    runner._leave(next(iter(runner.active)), "зустріч завершилась")
+    again, _, joiner2 = make_runner([make_lesson()])
+    again.visited_file = visited
+    again.finished = again._load_visited()
+    again.tick(at("10:00"))
+    assert joiner2.joined == []  # пара ще «йде» за розкладом, але з неї вже вийшли
+
+    # А якщо програму закрили посеред пари — після запуску заходимо знову.
+    runner3, _, joiner3 = make_runner([make_lesson(start="11:10", end="12:30")])
+    runner3.visited_file = tmp_path / "other.json"
+    runner3.tick(at("11:08"))
+    runner3.finish_all()
+    runner4, _, joiner4 = make_runner([make_lesson(start="11:10", end="12:30")])
+    runner4.visited_file = tmp_path / "other.json"
+    runner4.finished = runner4._load_visited()
+    runner4.tick(at("11:20"))
+    assert joiner4.joined == ["Бази даних"]

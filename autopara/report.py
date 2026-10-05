@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import notes
@@ -39,6 +39,9 @@ FINAL_PROMPT = (
 )
 
 
+BLINK = timedelta(minutes=2)  # коротше — не пара, а випадковий захід (і звіт про нього не потрібен)
+
+
 class Reporter:
     """Після кожної пари: запис у ~/.autopara/Пари/<Предмет>/ (завжди) і звіт у Telegram (якщо ввімкнено)."""
 
@@ -62,8 +65,12 @@ class Reporter:
     def finish(self, record: LessonRecord) -> None:
         """Пара скінчилась: запис — одразу (щоб не загубився, навіть якщо програму зараз закриють),
         підсумок і звіт — потім (після всіх конспектів, що вже в черзі)."""
-        path = self.save(record)
         recorded = self.audio.stop(record.report_id) if self.audio is not None else None
+        if not (record.transcript or record.chat) and record.left - record.joined < BLINK:
+            if recorded is not None:
+                recorded[0].unlink(missing_ok=True)
+            return  # зайшов і одразу вийшов (зустріч уже скінчилась) — звітувати нема про що
+        path = self.save(record)
         if recorded is not None and self.refiner is not None:
             # Звіт — з уточненої розшифровки (див. refine.py): вона буде пізніше, зате точніша.
             self.refiner.submit(record, path, *recorded)

@@ -129,3 +129,14 @@ def test_decisions_go_before_background_summaries():
         threading.Event().wait(0.05)
     worker.stop()
     assert order == ["decision", "summary"]
+
+
+def test_no_report_for_a_blink(tmp_path):
+    """Зайшов у вже порожню зустріч і за кілька секунд вийшов — звітувати нема про що."""
+    inbox = Inbox()
+    reporter = Reporter(inbox, FakeBrain(), InlineWorker(), tmp_path)
+    assistant = Assistant(MeSettings(name="Ляшко Денис"), lambda text, urgent=False: None)
+    assistant.on_chunk, assistant.on_finished = reporter.chunk, reporter.finish
+    assistant.attach("pair", "Бази даних (Лк)", "Петренко П.П.", at("09:30"), at("10:50"), now=at("10:00:33"))
+    assistant.detach("pair", at("10:00:36"))
+    assert list(inbox) == [] and not list(tmp_path.iterdir())
