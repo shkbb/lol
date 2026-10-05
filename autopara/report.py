@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from . import notes
-from .assistant import LessonRecord
+from .assistant import CHUNK_CHARS, LessonRecord
 from .brain import BrainError
 
 log = logging.getLogger(__name__)
@@ -43,6 +45,8 @@ class Reporter:
         self.worker = worker
         self.folder = folder
         self.send = send
+        self.audio = None  # refine.LessonAudio — звук пари для уточнення після неї
+        self.refiner = None  # refine.Refiner — друге, точніше розпізнавання після пари
         self._notes: dict[str, list[str]] = {}
         self._lock = threading.Lock()
 
@@ -56,10 +60,45 @@ class Reporter:
         """Пара скінчилась: запис — одразу (щоб не загубився, навіть якщо програму зараз закриють),
         підсумок і звіт — потім (після всіх конспектів, що вже в черзі)."""
         path = self.save(record)
+        recorded = self.audio.stop(record.report_id) if self.audio is not None else None
+        if recorded is not None and self.refiner is not None:
+            # Звіт — з уточненої розшифровки (див. refine.py): вона буде пізніше, зате точніша.
+            self.refiner.submit(record, path, *recorded)
+            if self.send:
+                self.notifier(f"📝 «{record.title}» скінчилась. Звіт пришлю, щойно ще раз уважно розшифрую запис "
+                              "(у перервах між парами чи після них).")
+            return
+        self._later(record, path)
+
+    def _later(self, record: LessonRecord, path: Path | None) -> None:
         if self.worker is not None:
             self.worker.submit(lambda: self._finish(record, path))
         else:
             threading.Thread(target=self._finish, args=(record, path), daemon=True).start()
+
+    def fallback(self, record: LessonRecord, path: Path | None) -> None:
+        """Уточнити не вийшло — звіт із живої розшифровки, як і раніше."""
+        self._later(record, path)
+
+    def complete(self, record: LessonRecord, path: Path | None, refined: list[tuple[datetime, str]]) -> None:
+        """Уточнена розшифровка готова (потік уточнення): конспект і звіт — уже з неї."""
+        with self._lock:
+            self._notes.pop(record.report_id, None)  # конспект живої розшифровки вже не потрібен
+        live = record
+        record = replace(record, transcript=refined)
+        parts = []
+        if self.brain is not None:
+            for piece in _pieces([text for _, text in refined], CHUNK_CHARS):
+                try:
+                    parts.append(self.brain.summarize(CHUNK_PROMPT, piece))
+                except BrainError as e:
+                    log.warning("Не вдалося законспектувати шматок пари: %s", e)
+        summary = self._compose(parts, record)
+        path = self.save(record, summary, live=live) or path
+        if self.send:
+            self.notifier(render(record, summary) + "\n\n🎧 Розшифровку уточнено після пари.")
+            if path is not None:
+                self.notifier.document(path.read_bytes(), path.name, f"Розшифровка «{record.title}»")
 
     def _summarize_chunk(self, report_id: str, text: str) -> None:
         try:
@@ -75,17 +114,7 @@ class Reporter:
             self._summarize_chunk(record.report_id, record.rest)
         with self._lock:
             parts = self._notes.pop(record.report_id, [])
-        summary = ""
-        others = [f"{m.author or '?'}: {m.text}" for _, m in record.chat]
-        if self.brain is not None and (parts or len(others) >= 5):
-            material = "\n\n".join(f"Частина {i}:\n{note}" for i, note in enumerate(parts, 1))
-            if others:
-                material += "\n\nЧат:\n" + "\n".join(others[-40:])
-            try:
-                summary = self.brain.summarize(FINAL_PROMPT, material)
-            except BrainError as e:
-                log.warning("Не вдалося скласти звіт: %s", e)
-                summary = "\n".join(parts)  # хоч би конспект частинами
+        summary = self._compose(parts, record)
         if summary and path is not None:
             notes.add_summary(path, summary)
         if self.send:
@@ -93,16 +122,45 @@ class Reporter:
             if path is not None:
                 self.notifier.document(path.read_bytes(), path.name, f"Розшифровка «{record.title}»")
 
-    def save(self, record: LessonRecord, summary: str = "") -> Path | None:
-        """Розшифровка й чат пари — у теку її предмета (лише локально)."""
+    def _compose(self, parts: list[str], record: LessonRecord) -> str:
+        """Конспект частинами й чат → підсумок пари (або хоч би конспект частинами)."""
+        others = [f"{m.author or '?'}: {m.text}" for _, m in record.chat]
+        if self.brain is None or not (parts or len(others) >= 5):
+            return ""
+        material = "\n\n".join(f"Частина {i}:\n{note}" for i, note in enumerate(parts, 1))
+        if others:
+            material += "\n\nЧат:\n" + "\n".join(others[-40:])
+        try:
+            return self.brain.summarize(FINAL_PROMPT, material)
+        except BrainError as e:
+            log.warning("Не вдалося скласти звіт: %s", e)
+            return "\n".join(parts)
+
+    def save(self, record: LessonRecord, summary: str = "", live: LessonRecord | None = None) -> Path | None:
+        """Розшифровка й чат пари — у теку її предмета (лише локально). ``live`` — жива розшифровка
+        для порівняння, коли основна вже уточнена."""
         if self.folder is None or not (record.transcript or record.chat):
             return None
         path = notes.lesson_path(self.folder, record.title, record.start)
         header = f"{record.title} — {record.start:%d.%m.%Y %H:%M}–{record.end:%H:%M}, {record.teacher}"
         transcript = [f"[{t:%H:%M:%S}] {text}" for t, text in record.transcript]
         chat = [f"[{t:%H:%M:%S}] {m.author or '?'}: {m.text}" for t, m in record.chat]
-        notes.write(path, header, summary, transcript, chat)
+        earlier = [f"[{t:%H:%M:%S}] {text}" for t, text in live.transcript] if live is not None else None
+        notes.write(path, header, summary, transcript, chat, live=earlier)
         return path
+
+
+def _pieces(lines: list[str], size: int) -> list[str]:
+    """Розшифровка шматками приблизно по ``size`` символів — для конспекту частинами."""
+    pieces, current = [], ""
+    for line in lines:
+        if current and len(current) + len(line) > size:
+            pieces.append(current)
+            current = ""
+        current = f"{current} {line}".strip()
+    if current:
+        pieces.append(current)
+    return pieces
 
 
 def render(record: LessonRecord, summary: str) -> str:

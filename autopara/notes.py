@@ -16,6 +16,7 @@ FOLDER = "Пари"
 SUMMARY_MARK = "--- Підсумок ---"
 TRANSCRIPT_MARK = "--- Розшифровка ---"
 CHAT_MARK = "--- Чат ---"
+LIVE_MARK = "--- Розшифровка наживо (для порівняння) ---"  # коли основна — уточнена після пари
 TITLE_RE = re.compile(r"^(.*?)\s*\(([^()]{1,12})\)\s*$")  # «Бази даних (Лк)» → «Бази даних», «Лк»
 NOW_RE = re.compile(r"зараз|сьогодні|ця пара|цій парі|цієї пари|на парі|викладач|сейчас|сегодня", re.I)
 
@@ -34,13 +35,16 @@ def lesson_path(root: Path, title: str, start: datetime) -> Path:
     return root / safe(subject) / f"{start:%Y-%m-%d %H-%M}{' ' + safe(kind) if kind else ''}.txt"
 
 
-def write(path: Path, header: str, summary: str, transcript: list[str], chat: list[str]) -> None:
+def write(path: Path, header: str, summary: str, transcript: list[str], chat: list[str],
+          live: list[str] | None = None) -> None:
     lines = [header, ""]
     if summary:
         lines += [SUMMARY_MARK, summary.strip(), ""]
     lines += [TRANSCRIPT_MARK, *transcript]
     if chat:
         lines += ["", CHAT_MARK, *chat]
+    if live:
+        lines += ["", LIVE_MARK, *live]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -102,7 +106,7 @@ def summary_of(path: Path, chars: int = 700) -> str:
     if SUMMARY_MARK in body:
         summary = body.split(SUMMARY_MARK, 1)[1].split(TRANSCRIPT_MARK, 1)[0].strip()
         return f"{header}\nПідсумок: {summary[:chars]}"
-    transcript = body.split(TRANSCRIPT_MARK, 1)[-1].split(CHAT_MARK, 1)[0].strip()
+    transcript = body.split(TRANSCRIPT_MARK, 1)[-1].split(CHAT_MARK, 1)[0].split(LIVE_MARK, 1)[0].strip()
     return f"{header}\nКінець розшифровки: …{transcript[-chars:]}" if transcript else header
 
 
@@ -114,7 +118,7 @@ def snippets(root: Path, question: str, limit: int = 4, chars: int = 300) -> lis
     found = []
     for path in sorted(root.glob("*/*.txt")):
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = path.read_text(encoding="utf-8").split(LIVE_MARK, 1)[0].splitlines()  # жива копія — не вдруге
         except OSError:
             continue
         for index, line in enumerate(lines[2:], 2):

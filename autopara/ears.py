@@ -25,6 +25,7 @@ import sys
 import threading
 from array import array
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from math import sqrt
 from pathlib import Path
@@ -139,8 +140,14 @@ class AudioQueue:
         self._closed = False
         self._ready = threading.Condition()
         self._warned = False
+        self.listeners: list[Callable[[bytes], None]] = []  # ще хтось хоче цей звук (запис пари для уточнення)
 
     def feed(self, pcm: bytes) -> None:
+        for listener in self.listeners:
+            try:
+                listener(pcm)
+            except Exception:  # noqa: BLE001 — запис для уточнення не має зупиняти вуха
+                log.debug("Слухач звуку зламався", exc_info=True)
         with self._ready:
             if self._closed or not pcm:
                 return
@@ -236,6 +243,22 @@ def loudness(pcm: bytes) -> int:
 
 def is_silence(pcm: bytes) -> bool:
     return loudness(pcm) < SILENCE_RMS
+
+
+def split_quietly(pcm: bytes, seconds: int) -> list[tuple[float, bytes]]:
+    """Довгий запис — на шматки по ~``seconds`` с, різ у найтихішій чверті секунди перед межею (не посеред слова).
+    Повертає (початок шматка в секундах, звук)."""
+    frame = int(RATE * FRAME_SECONDS) * 2
+    size = RATE * 2 * seconds
+    pieces, start = [], 0
+    while len(pcm) - start > size + RATE * 2 * 30:
+        lo, hi = start + size - RATE * 2 * 30, start + size
+        lo -= lo % frame
+        cut = min(range(lo, hi, frame), key=lambda at: loudness(pcm[at:at + frame]))
+        pieces.append((start / RATE / 2, pcm[start:cut]))
+        start = cut
+    pieces.append((start / RATE / 2, pcm[start:]))
+    return [(offset, piece) for offset, piece in pieces if piece]
 
 
 class Segmenter:
@@ -383,6 +406,49 @@ def resolve_model(model: str) -> str:
     return "large-v3-turbo" if cpus >= 4 and ram >= 8 else "small"
 
 
+class ModelGate:
+    """Одна модель на двох: вуха наживо — завжди першими, уточнення після пари — лише коли вони вільні
+    (перерва, тиша на парі, після пар). Так перекличку на наступній парі не пропустимо через уточнення."""
+
+    def __init__(self, idle_seconds: float = 20):
+        self.idle_seconds = idle_seconds
+        self._cond = threading.Condition()
+        self._busy = False
+        self._live_waiting = 0
+        self._last_live = -1e9
+
+    @contextmanager
+    def live(self):
+        with self._cond:
+            self._live_waiting += 1
+            while self._busy:
+                self._cond.wait()
+            self._live_waiting -= 1
+            self._busy = True
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._busy = False
+                self._last_live = monotonic()
+                self._cond.notify_all()
+
+    @contextmanager
+    def background(self, stop: threading.Event | None = None):
+        with self._cond:
+            while self._busy or self._live_waiting or monotonic() - self._last_live < self.idle_seconds:
+                if stop is not None and stop.is_set():
+                    raise InterruptedError("програма зупиняється")
+                self._cond.wait(1)
+            self._busy = True
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._busy = False
+                self._cond.notify_all()
+
+
 class WhisperTranscriber:
     """Whisper (faster-whisper, локально на процесорі). Для кожного шматка повертає ще й упевненість.
 
@@ -398,6 +464,7 @@ class WhisperTranscriber:
         self.language = language
         self.hints = hints
         self._hotwords = True
+        self.gate = ModelGate()
         self._load(resolve_model(model))
 
     def _load(self, model: str) -> None:
@@ -425,17 +492,50 @@ class WhisperTranscriber:
         hint = self.hints() if self.hints else ""
         if hint and self._hotwords:
             options["hotwords"] = hint
-        try:
-            segments, _ = self.model.transcribe(audio, **options)
-        except TypeError:  # стара версія faster-whisper без hotwords
-            self._hotwords = False
-            options.pop("hotwords", None)
-            segments, _ = self.model.transcribe(audio, **options)
+        with self.gate.live():
+            try:
+                segments = list(self.model.transcribe(audio, **options)[0])
+            except TypeError:  # стара версія faster-whisper без hotwords
+                self._hotwords = False
+                options.pop("hotwords", None)
+                segments = list(self.model.transcribe(audio, **options)[0])
         return [
             Heard(segment.text.strip(), is_confident(segment.avg_logprob, segment.no_speech_prob))
             for segment in segments
             if segment.text.strip() and not is_hint_echo(segment.text, hint)
         ]
+
+    def transcribe_long(self, pcm: bytes, hint: str = "", stop: threading.Event | None = None,
+                        piece_seconds: int = 600) -> list[tuple[float, str]]:
+        """Уточнення після пари — як сервіси субтитрів: увесь запис, точніший пошук (beam 5), контекст
+        попереднього тексту й запасні «температури». Повертає (секунда від початку запису, текст).
+
+        Запис ділимо на шматки по ~10 хв (у тихому місці), щоб не тримати в пам'яті всю пару, а контекст
+        переносимо з шматка в шматок. Модель беремо лише тоді, коли вуха наживо вільні (див. ModelGate).
+        """
+        import numpy as np
+
+        lines: list[tuple[float, str]] = []
+        previous = ""
+        for offset, piece in split_quietly(pcm, piece_seconds):
+            audio = np.frombuffer(piece, dtype=np.int16).astype(np.float32) / 32768.0
+            prompt = " ".join(part for part in (hint, previous[-200:]) if part)
+            options = dict(language=self.language, vad_filter=True, beam_size=5, condition_on_previous_text=True,
+                           temperature=[0.0, 0.2, 0.4], initial_prompt=prompt or None)
+            if hint and self._hotwords:
+                options["hotwords"] = hint
+            with self.gate.background(stop):
+                segments = iter(self.model.transcribe(audio, **options)[0])
+            while True:
+                with self.gate.background(stop):  # кожне вікно в 30 с — окремо: між ними можуть пройти вуха
+                    segment = next(segments, None)
+                if segment is None:
+                    break
+                text = clean_text(segment.text)
+                if text and not is_hint_echo(text, hint):
+                    lines.append((offset + segment.start, text))
+                    previous = (previous + " " + text)[-400:]
+        return lines
 
 
 def is_hint_echo(text: str, hint: str) -> bool:

@@ -29,6 +29,7 @@ from .ears import (
 )
 from .media import AudioBuffer, Clipper, FrameBuffer
 from . import notes
+from .refine import LessonAudio, Refiner
 from .report import QUESTION_PROMPT, Reporter
 from .telegram import Notifier, TelegramBot
 
@@ -91,11 +92,17 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         stack.frames = FrameBuffer()
         audio = AudioBuffer() if config.ears.enabled else None
 
+    ears = None
+    lesson_audio = None
     if config.ears.enabled:
         if problem := whisper_available():
             log.warning("Вуха вимкнено: %s (у вікні програми — кнопка «Встановити»)", problem)
         else:
             queue = AudioQueue()  # сюди йде звук пари, звідки б він не брався
+            # Звук кожної пари ще й у файл — після пари розпізнаємо його вдруге, точніше (refine.py).
+            lesson_audio = LessonAudio(config.data_dir / "audio", clock)
+            queue.listeners.append(lesson_audio.feed)
+            stoppers.append(lesson_audio.close)
             stoppers += _audio_sources(config, queue, stack)
             ears = Ears(
                 None,
@@ -116,6 +123,18 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     reporter = Reporter(notifier, None, None, lessons_folder, send=config.telegram.reports)
     assistant.on_chunk = reporter.chunk
     assistant.on_finished = reporter.finish
+    if ears is not None and lesson_audio is not None:
+        refiner = Refiner(
+            config.data_dir / "audio",
+            lambda: ears.transcribe if hasattr(ears.transcribe, "transcribe_long") else None,
+            lambda record: ", ".join(part for part in (config.me.name, record.teacher, record.title) if part),
+            reporter.complete,
+            reporter.fallback,
+        )
+        reporter.audio, reporter.refiner = lesson_audio, refiner
+        assistant.on_started = lesson_audio.start
+        refiner.start()
+        stoppers.append(refiner.stop)
 
     if worker:
 

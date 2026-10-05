@@ -253,6 +253,7 @@ class Assistant:
         self.on_moment: Callable[[str, str, datetime], None] | None = None  # (ключ, заголовок, коли) → вирізка
         self.on_chunk: Callable[[str, str], None] | None = None  # (звіт, шматок розшифровки) → конспект
         self.on_finished: Callable[[LessonRecord], None] | None = None  # пара скінчилась → звіт
+        self.on_started: Callable[[str], None] | None = None  # почалась пара (її звіт) → писати її звук
         self.wake_brain = wake_brain  # None — «мозок» вимкнено, працюють лише рефлекси
         # Вільне питання з Telegram → мозок (питання, контекст, поточна пара). None — мозку немає, лише команди.
         self.ask_brain: Callable[[str, str, str], None] | None = None
@@ -279,6 +280,7 @@ class Assistant:
             meeting.can_chat = can_chat
             self.meetings[key] = meeting
             self._order.append(key)
+            self._started(meeting.report_id)
 
     def next_lesson(self, key: str, title: str, start: datetime, end: datetime, now: datetime | None = None) -> None:
         """Наступна пара в тій самій зустрічі: звіт про попередню і чистий аркуш."""
@@ -292,6 +294,7 @@ class Assistant:
             fresh.lesson_number = number
             fresh.seen, fresh.chat_primed, fresh.can_chat = meeting.seen, True, meeting.can_chat
             self.meetings[key] = fresh
+            self._started(fresh.report_id)
 
     def detach(self, key: str, now: datetime | None = None) -> None:
         with self._lock:
@@ -300,6 +303,13 @@ class Assistant:
                 self._order.remove(key)
             if meeting is not None:
                 self._finish(meeting, now or datetime.now(meeting.start.tzinfo))
+
+    def _started(self, report_id: str) -> None:
+        if self.on_started is not None:
+            try:
+                self.on_started(report_id)
+            except Exception:  # noqa: BLE001 — запис звуку для уточнення не має заважати парі
+                log.exception("Не вдалося почати запис звуку пари")
 
     def _finish(self, meeting: Meeting, now: datetime) -> None:
         if self.on_finished is None:
