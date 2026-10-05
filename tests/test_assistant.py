@@ -648,3 +648,20 @@ def test_only_replies_to_alerts_go_to_the_meeting_chat():
     assert "Сам не пишу" in alert and assistant.answers_alert(alert)  # сповіщення, що чекає відповіді
     assert not assistant.answers_alert("🧠 Сьогодні говорили про індекси.")  # відповідь мозку — це розмова
     assert not assistant.answers_alert("")
+
+
+def test_brain_does_not_retell_the_lecture():
+    """Наживо мозок раз на кілька хвилин переказував лекцію («Викладач обговорює…») — це спам: усе є у звіті."""
+    assistant, inbox, _ = make(brain=True)
+    recap = "Викладач Петренко Петро Петрович продовжує розмову про безпеку розробки, згадує Fortify і SonarQube."
+    assistant.apply_decision(KEY, Decision("notify", message=recap), at("10:01"))
+    assistant.apply_decision(KEY, Decision("notify", message="Викладач пояснює статичний аналіз коду."), at("10:20"))
+    assert inbox.messages == []
+    # Те, що стосується тебе, — завжди.
+    assistant.apply_decision(KEY, Decision("notify", message="Викладач оголосив контрольну в понеділок."), at("10:21"))
+    assistant.apply_decision(KEY, Decision("notify", message="Викладач питає Ляшка, чи він на парі."), at("10:22"))
+    assert len(inbox.messages) == 2 and "контрольну" in inbox.messages[0][0] and "Ляшка" in inbox.messages[1][0]
+    # Інше нетермінове — не частіше раз на 10 хв.
+    assistant.apply_decision(KEY, Decision("notify", message="Почалась демонстрація екрана."), at("10:25"))
+    assistant.apply_decision(KEY, Decision("notify", message="Почалась демонстрація екрана."), at("10:40"))
+    assert len(inbox.messages) == 3
