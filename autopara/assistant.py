@@ -292,6 +292,7 @@ class Assistant:
         self._alerts: deque[str] = deque(maxlen=30)  # сповіщення, відповідь на які йде в чат пари
         self.dialog: deque[tuple[str, str]] = deque(maxlen=DIALOG_TURNS)  # остання розмова з ботом
         self.schedule_note: Callable[[datetime], str] | None = None  # пари на сьогодні з часом — для розмови з мозком
+        self.events: deque[tuple[datetime, str]] = deque(maxlen=12)  # що робила програма: зайшла, вийшла й чому
 
     # --- Життєвий цикл зустрічі ------------------------------------------------
 
@@ -983,6 +984,9 @@ class Assistant:
                     lines.append(note)
             except Exception:  # noqa: BLE001 — розклад лише підказка
                 log.debug("Не вдалося описати розклад", exc_info=True)
+        if self.events:
+            lines.append("Що сьогодні робила програма (найсвіжіше внизу):\n"
+                         + "\n".join(f"{when:%H:%M} {text}" for when, text in self.events if when.date() == now.date()))
         if meeting is None:
             lines.append("Студент зараз не на парі.")
             return "\n".join(lines)
@@ -1027,6 +1031,11 @@ class Assistant:
         if urgent:
             return True
         return meeting.last_brain_notify is None or now - meeting.last_brain_notify >= BRAIN_NOTIFY_GAP
+
+    def note_event(self, when: datetime, text: str) -> None:
+        """Дія програми («Зайшов на…», «Вийшов з…: зустріч завершилась») — щоб на «чому вийшов?» мозок знав відповідь."""
+        with self._lock:
+            self.events.append((when, text))
 
     def answers_alert(self, replied: str) -> bool:
         """Чи це відповідь на сповіщення, що чекає відповіді в чат пари («тебе кличуть», «написати в чат?»)."""

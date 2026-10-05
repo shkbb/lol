@@ -71,6 +71,8 @@ class Runner:
 
     def notify(self, text: str, urgent: bool = False, routine: bool = False) -> None:
         """``routine`` — звичайне «зайшов/вийшов»: його можна вимкнути в налаштуваннях."""
+        if self.assistant is not None:
+            self.assistant.note_event(self.clock(), text)  # мозок знатиме, що й чому робила програма
         if routine and not self.config.telegram.joins:
             log.info(text)
         elif self.assistant is not None:

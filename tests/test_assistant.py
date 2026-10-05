@@ -669,3 +669,13 @@ def test_brain_does_not_retell_the_lecture():
     assistant.apply_decision(KEY, Decision("notify", message="Почалась демонстрація екрана."), at("10:25"))
     assistant.apply_decision(KEY, Decision("notify", message="Почалась демонстрація екрана."), at("10:40"))
     assert len(inbox.messages) == 3
+
+
+def test_brain_knows_why_the_app_left():
+    """Наживо на «чому вийшов раніше?» мозок вигадав відповідь — бо не знав, що робила програма."""
+    assistant = Assistant(MeSettings(name="Ляшко Денис"), Inbox())
+    asked = []
+    assistant.ask_brain = lambda question, context, current: asked.append(context)
+    assistant.note_event(at("13:26"), "👋 Вийшов з «Програмування мобільних пристроїв (Лк)»: зустріч завершилась")
+    assistant.on_command("чому вийшов раніше?", at("13:27"))
+    assert "13:26 👋 Вийшов з «Програмування мобільних пристроїв (Лк)»: зустріч завершилась" in asked[0]
