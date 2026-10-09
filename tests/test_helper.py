@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from autopara import notes
-from autopara.helper import Helper, Library, tokens
+from autopara.helper import Helper, Library, sections, sound, tokens
 
 
 def record(root, title, start, teacher, summary, lines, chat=()):
@@ -62,14 +62,50 @@ def test_search_finds_words_in_any_form_and_cites_place(tmp_path):
     assert Helper(lib, None).sources("Коли говорили про PCI DSS?", "search", NOW).startswith("[Безпека розробки, 09.10 12:55]")
 
 
-def test_model_gets_only_sources_and_rules(tmp_path):
+def test_lessons_tasks_and_teachers_come_straight_from_summaries(tmp_path):
+    asked = []
+    helper = Helper(library(tmp_path), lambda system, text: asked.append(text) or "відповідь")
+    last = helper.answer("Що було на останній парі?", NOW)
+    assert last.startswith("📖 Безпека розробки програмного забезпечення (Пз), 09.10 12:40") and "валідація вхідних даних" in last
+    tasks = helper.answer("Що задали з безпеки розробки?", NOW)
+    assert tasks.startswith("📝") and "захистити 1 і 2 лабораторні" in tasks and "Безпека розробки (Пз), 09.10" in tasks
+    assert helper.answer("Що було вчора?", NOW).startswith("За 08.10 (четвер) записів пар немає")
+    assert "Мельник О.В." in helper.answer("Хто викладає бази даних?", NOW)
+    assert asked == []  # мовна модель не потрібна — отже, й вигадати нічого не може
+
+
+def test_summary_placeholders_and_empty_deadlines_are_dropped():
+    parts = sections("**Про що:** ключі.\n**Завдання й дедлайни:** Зняти відео до [дата]. Захистити лабу 2. "
+                     "Дедлайни інших завдань не вказані.\n**Важливе:** нічого")
+    assert parts["Завдання й дедлайни"] == "Захистити лабу 2." and parts["Про що"] == "ключі."
+
+
+def test_search_answer_is_cited_by_code_and_general_knowledge_is_marked(tmp_path):
     prompts = []
-    helper = Helper(library(tmp_path), lambda system, text: prompts.append((system, text)) or "ок",
-                    schedule=lambda now: "📅 сьогодні пар більше немає")
-    assert helper.answer("Що задали з безпеки розробки?", NOW, dialog="Студент: привіт\nautopara: привіт!") == "ок"
-    system, text = prompts[0]
-    assert "ЛИШЕ з джерел" in system and "(Безпека, 05.10 11:21)" in system
-    assert "захистити 1 і 2 лабораторні" in text and "Розмова перед цим" in text and text.endswith(
-        "Студент пише: Що задали з безпеки розробки?")
-    helper.answer("Що було вчора?", NOW)
-    assert "За 08.10.2026 записів пар немає" in prompts[-1][1]  # мовна модель знатиме, що вигадувати нема з чого
+    helper = Helper(library(tmp_path), lambda system, text: prompts.append((system, text)) or "**Не потрібна**, якщо платить банк.")
+    reply = helper.answer("Коли говорили про PCI DSS?", NOW, dialog="Студент: привіт\nautopara: привіт!")
+    assert reply.startswith("Не потрібна, якщо платить банк.") and reply.endswith("Джерела: Безпека розробки, 09.10 12:55")
+    system, text = prompts[-1]
+    assert "Знайдено в записах пар" in text and "Розмова перед цим" in text and text.endswith("Студент пише: Коли говорили про PCI DSS?")
+    assert helper.answer("Поясни, що таке REST API", NOW).startswith("📚 ")  # у записах немає — загальні знання
+    assert "Знайдено в записах" not in prompts[-1][1]
+    assert helper.answer("Що казали про Kubernetes?", NOW).startswith("У записах пар про Kubernetes нічого не знайшов")
+    helper.answer("Привіт! Як справи?", NOW)
+    assert "Знайдено в записах" not in prompts[-1][1]  # привітання — не пошук
+
+
+def test_terms_match_in_any_spelling(tmp_path):
+    record(tmp_path, "Безпека розробки програмного забезпечення (Лк)", "2026-10-05T11:10", "Петренко П.П.", "",
+           ["[11:44:00] Два приклади в індустрії — Ovasp Zap, тобто ОВАСП, які займаються безпекою"])
+    lib = Library(tmp_path)
+    lib.refresh()
+    found = lib.search("Що казали про OWASP?")
+    assert found and found[0][1].time == "11:44"
+    assert sound("OWASP") == sound("ОВАСП") == sound("Ovasp")
+
+
+def test_without_language_model_data_answers_still_work(tmp_path):
+    helper = Helper(library(tmp_path), None)
+    assert helper.quick("Що задали з безпеки?", NOW).startswith("📝")
+    assert helper.quick("Поясни, що таке REST API", NOW) is None  # тут потрібна модель
+    assert helper.answer("Поясни, що таке REST API", NOW).startswith("Мовна модель ще не готова")

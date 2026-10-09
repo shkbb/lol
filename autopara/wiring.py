@@ -161,29 +161,45 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         refiner.start()
         stoppers.append(refiner.stop)
 
+    # Помічник з навчання: розклад, «що було на парі», завдання — з даних, одразу й навіть без мовної моделі;
+    # пошук у записах і розмова — коли модель готова (helper.ask). Див. helper.py.
+    helper = Helper(Library(lessons_folder), None, schedule=lambda now: stack.schedule_text(now))
+
+    def answer(question: str, context: str, current: str) -> None:
+        """Відповідь, якій потрібна мовна модель (окремим потоком — це до хвилини)."""
+        now = clock()
+        dialog, events = assistant.chat_memory(now)
+        try:
+            reply = helper.answer(question, now, live=context if current else "", dialog=dialog, events=events)
+        except BrainError as e:
+            reply = f"не вийшло відповісти: {e}"
+        else:
+            assistant.remember_reply(reply)
+        notifier(reply if reply.startswith(("📅", "📖", "📝", "👤", "У записах")) else f"🧠 {reply}")
+
+    def ask(question: str, context: str, current: str) -> str | None:
+        """Питання з Telegram: відповідь з даних — одразу (рядок), інакше думаємо у фоні (None)."""
+        try:
+            ready = helper.quick(question, clock())
+        except Exception as e:  # noqa: BLE001 — зіпсований запис пари не має ламати розмову
+            log.warning("Помічник: %s", e)
+            ready = None
+        if ready is not None:
+            assistant.remember_reply(ready)
+            return ready
+        if helper.ask is None:
+            return "🧠 Мовна модель ще не готова (Ollama) — на таке відповім, щойно вона запуститься. Розклад, завдання й «що було на парі» — питай уже."
+        threading.Thread(target=answer, args=(question, context, current), name="brain-question", daemon=True).start()
+        return None
+
+    if listening:
+        assistant.ask_brain = ask
+
     if worker:
-
-        helper = Helper(Library(lessons_folder), brain.summarize,
-                        schedule=lambda now: stack.schedule_text(now))
-
-        def answer(question: str, context: str, current: str) -> None:
-            """Повідомлення в Telegram (окремим потоком): розклад — одразу з даних; про пари — пошук у записах і
-            відповідь лише з них, з посиланнями; решта — звичайна розмова (див. helper.py)."""
-            now = clock()
-            dialog, events = assistant.chat_memory(now)
-            try:
-                reply = helper.answer(question, now, live=context if current else "", dialog=dialog, events=events)
-            except BrainError as e:
-                reply = f"не вийшло відповісти: {e}"
-            else:
-                assistant.remember_reply(reply)
-            notifier(reply if reply.startswith(("📅", "Найближчими")) else f"🧠 {reply}")
 
         def brain_ready() -> None:
             assistant.wake_brain = worker.wake
-            assistant.ask_brain = lambda question, context, current: threading.Thread(
-                target=answer, args=(question, context, current), name="brain-question", daemon=True
-            ).start()
+            helper.ask = brain.summarize
             reporter.brain, reporter.worker = brain, worker
             log.info("Мозок: модель %s", config.brain.model)
 

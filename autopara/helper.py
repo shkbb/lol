@@ -1,13 +1,13 @@
 """Помічник з навчання в Telegram — не лише про поточну пару.
 
-Старий бот брав «щось із записів» і просив маленьку модель відповісти — вона губилась і вигадувала.
-Тепер так:
-- **розклад і «ти на парі?»** — відповідь із даних одразу, без мовної моделі (вигадувати там нічого);
-- **про пари** — спершу знаходимо потрібне: яку пару мають на увазі («остання», «вчора», «з баз даних»,
-  «05.10»), а в ній і в усіх записах — шматки, де про це говорили (пошук за словами з урахуванням відмінків,
-  BM25). Модель відповідає лише з цих джерел і каже, звідки взяла: «(Безпека, 05.10 11:21)»; немає в
-  джерелах — так і каже;
-- **будь-що інше** — звичайна розмова, але з позначкою, що це загальні знання, а не з пари.
+Маленька мовна модель (4B) — найслабша ланка: вона губиться, плутає пари й вигадує. Тож вона робить якомога менше:
+- **розклад** — відповідь із даних, без моделі;
+- **що було на парі, що задали, дедлайни** — прямо з підсумків пар (розділи «Про що», «Завдання й дедлайни»):
+  яку пару мають на увазі («остання», «вчора», «з баз даних», «05.10»), знаходимо самі, а модель не потрібна —
+  отже, й вигадати нічого не може;
+- **коли/що казали про щось** — шукаємо в усіх записах шматки, де про це говорили (пошук за словами з урахуванням
+  відмінків, BM25), модель коротко відповідає лише з них, а звідки це — дописуємо самі: «Безпека, 09.10 12:55»;
+- **будь-що інше** — звичайна розмова; пояснення понять — з позначкою «📚» (загальні знання, не з пари).
 """
 
 from __future__ import annotations
@@ -31,6 +31,14 @@ WORD_RE = re.compile(r"[a-zа-яіїєґ0-9']+", re.I)
 STOP = set("""і й та а але або чи що як це той та ті цей ця ці там тут так ну от вже ще же би б не ні на в у з із зі до від по за
 про для при над під між через щоб коли де хто який яка яке які мене тебе йому їй нам вам їх я ти він вона воно ми ви вони
 мій твій свій наш ваш був була було були є буде будуть бути може можна треба також тобто просто дуже ось оце от""".split())
+# Слова самого питання («що казали про OWASP на парі») — шукати їх у записах нема сенсу.
+QUESTION_LEMMAS = {"казати", "сказати", "говорити", "розповідати", "пояснювати", "пара", "викладач", "саме", "взагалі",
+                   "бути", "коли", "що", "який", "останній", "минулий"}
+TRANSLIT = str.maketrans({"а": "a", "б": "b", "в": "v", "г": "h", "ґ": "g", "д": "d", "е": "e", "є": "ie", "ж": "zh",
+                          "з": "z", "и": "y", "і": "i", "ї": "i", "й": "i", "к": "k", "л": "l", "м": "m", "н": "n",
+                          "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts",
+                          "ч": "ch", "ш": "sh", "щ": "shch", "ь": "", "ю": "iu", "я": "ia", "'": "", "ё": "e", "ы": "y",
+                          "э": "e", "ъ": ""})
 WEEKDAYS = ["понеділ", "вівтор", "серед", "четвер", "п'ятниц", "субот", "неділ"]
 CHUNK_CHARS = 600
 
@@ -43,47 +51,126 @@ LESSON_RE = re.compile(r"(останн|минул|попередн)\w*\s+пар|
                        r"\d\d?\.\d\d|" + "|".join(WEEKDAYS), re.I)
 
 SYSTEM = (
-    "Ти — autopara, помічник студента з навчання в Telegram. Програма сама ходить на онлайн-пари, слухає їх "
-    "і зберігає записи; ти допомагаєш студентові розібратися, що було на парах, що задали, і просто відповідаєш "
-    "на питання. Пиши українською, по-людськи й коротко (до 120 слів), без вступів.\n"
-    "Правила:\n"
-    "1. Про пари, завдання, дедлайни й слова викладачів — ЛИШЕ з джерел нижче. Після факту з джерела в дужках "
-    "вкажи, звідки він: предмет, дата й час, наприклад «(Безпека, 05.10 11:21)». Розшифровка автоматична, з "
-    "помилками розпізнавання: перекручені слова виправляй за змістом, але нічого не домислюй.\n"
-    "2. Якщо в джерелах відповіді немає — так і скажи («у записах пар цього немає»). Не вигадуй пар, дат, завдань.\n"
-    "3. Якщо питання не про пари (пояснити поняття, порадити, поговорити) — відповідай як розумний співрозмовник і "
-    "почни з «📚» (загальні знання, не з пари).\n"
-    "4. Ти не можеш нічого робити на парі сам; якщо просять дію — підкажи команду: «екран», «чат», «статус», "
+    "Ти — autopara, помічник студента з навчання в Telegram. Програма сама ходить на онлайн-пари, слухає їх і "
+    "зберігає записи. Пиши українською, по-людськи й коротко: 2–5 речень, без вступів, без заголовків і без "
+    "розмітки (жодних ** чи #).\n"
+    "Якщо нижче є «Знайдено в записах пар» — відповідай лише з цього; розшифровка автоматична, з помилками "
+    "розпізнавання: перекручені слова виправляй за змістом, але нічого не домислюй. Чого там немає — так і скажи. "
+    "Не вигадуй пар, дат, завдань і дедлайнів.\n"
+    "Якщо записів нема і питання не про пари — відповідай як розумний співрозмовник.\n"
+    "Ти не можеш нічого робити на парі сам; якщо просять дію — підкажи команду: «екран», «чат», «статус», "
     "«напиши <текст>», «вийди»."
 )
+SECTION_RE = re.compile(r"^\**\s*(Про що|Що робили|Завдання й дедлайни|Важливе|Чат)\s*:?\**\s*:?\s*(.*)$")
+# «Завдання: не було», «Важливе: нічого» — показувати нема чого.
+NOTHING_RE = re.compile(r"^(не було|немає|нема|нічого|не задано|не оголошено|не вказано|—|-)\b", re.I)
+TEACHER_RE = re.compile(r"хто (викладає|веде|читає|викладач)|як\w* (звати|звуть) викладач|викладач\w* (з|по|у|в)\b", re.I)
+SMALL_TALK_RE = re.compile(r"^\W*(привіт|вітаю|добр(ий|ого|е|ий день|ого ранку)|хай|hello|hi|дякую|дяки|спасибі|як справи|"
+                           r"як ти|ти тут|хто ти|що ти вмієш|ок|окей|добре|клас|супер)\b", re.I)
+EXPLAIN_RE = re.compile(r"що так\w*|поясни|як працю|навіщо|чим відрізня|розкажи про|що означа|приклад", re.I)
+PLACEHOLDER_RE = re.compile(r"\[[^\]]{2,40}\]")
+ABSENT_RE = re.compile(r"^(дедлайн|термін)\w*[^.]*\bне (було )?(вказан|встановлен|оголошен|названо|надано)", re.I)
+ABOUT_LESSONS_RE = re.compile(r"казал|казав|сказал|говорил|розповідал|пояснювал|на пар|викладач|в записах|у записах", re.I)
+SEARCH_STRONG = 3.0  # BM25: нижче — у записах про це майже нічого, тож це загальне питання
+WEEKDAY_NAMES = ["понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота", "неділя"]
+
+
+def sections(summary: str) -> dict[str, str]:
+    """Розділи підсумку пари: {"Про що": …, "Завдання й дедлайни": …}."""
+    found: dict[str, str] = {}
+    current = ""
+    for raw in summary.splitlines():
+        line = raw.strip()
+        if m := SECTION_RE.match(line):
+            current = m.group(1)
+            found[current] = m.group(2).strip().strip("*").strip()
+        elif current and line:
+            found[current] = (found[current] + " " + line).strip()
+    # Мовна модель іноді лишає заповнювачі («подати до [дата]») — таке речення нічого не каже, а лише плутає.
+    clean = {name: " ".join(part for part in re.split(r"(?<=[.!?])\s+", text)
+                            if not PLACEHOLDER_RE.search(part) and not ABSENT_RE.match(part))
+             for name, text in found.items()}
+    return {name: text for name, text in clean.items() if text}
+
+
+def _shorten(text: str, limit: int) -> str:
+    """Перші речення до ``limit`` знаків."""
+    if len(text) <= limit:
+        return text
+    out = ""
+    for part in re.split(r"(?<=[.!?])\s+", text):
+        if out and len(out) + len(part) > limit:
+            break
+        out = f"{out} {part}".strip()
+    return out if len(out) <= limit else out[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def plain(text: str) -> str:
+    """Telegram показує текст як є: прибрати розмітку маркдауну, яку любить мовна модель."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"^\s*[*-]\s+", "• ", text, flags=re.M)
+    text = re.sub(r"^#+\s*", "", text, flags=re.M)
+    return text.strip()
+
+
+def whole_sentences(text: str) -> str:
+    """Модель обірвалась на ліміті слів — лишити лише повні речення."""
+    text = text.strip()
+    if not text or text[-1] in ".!?…)»\"" or "\n" not in text and len(text) < 200:
+        return text
+    cut = max(text.rfind(mark) for mark in (". ", "! ", "? ", ".\n", "!\n", "?\n"))
+    return text[:cut + 1].strip() if cut > len(text) // 3 else text + "…"
 
 
 def _lemmatizer():
+    """(лема слова, чи слово є в словнику)."""
     try:
         import pymorphy3
 
         analyzer = pymorphy3.MorphAnalyzer(lang="uk")
-        cache: dict[str, str] = {}
+        cache: dict[str, tuple[str, bool]] = {}
 
-        def lemma(word: str) -> str:
+        def lemma(word: str) -> tuple[str, bool]:
             if word not in cache:
-                cache[word] = analyzer.parse(word)[0].normal_form
+                cache[word] = (analyzer.parse(word)[0].normal_form, analyzer.word_is_known(word))
             return cache[word]
 
         return lemma
     except Exception:  # noqa: BLE001 — немає словника: основа слова (перші 6 літер) — гірше, але працює
-        return lambda word: word[:6]
+        return lambda word: (word[:6], True)
 
 
 _lemma = None
+
+
+def sound(word: str) -> str:
+    """Як слово звучить: англійські терміни Whisper пише то латиницею, то кирилицею («OWASP», «ОВАСП», «Ovasp»).
+    Транслітерація й приголосні — однаковий ключ для всіх трьох."""
+    w = word.lower().translate(TRANSLIT)
+    for a, b in (("ph", "f"), ("gh", ""), ("ck", "k"), ("kh", "h"), ("w", "v"), ("c", "k"), ("q", "k"), ("x", "ks"), ("g", "h")):
+        w = w.replace(a, b)
+    if not w:
+        return ""
+    return "~" + re.sub(r"(.)\1+", r"\1", w[0] + re.sub(r"[aeiouy]", "", w[1:]))
 
 
 def tokens(text: str) -> list[str]:
     global _lemma
     if _lemma is None:
         _lemma = _lemmatizer()
-    words = [word.lower() for word in WORD_RE.findall(text.replace("’", "'").replace("ʼ", "'"))]
-    return [_lemma(word) for word in words if word not in STOP and len(word) > 1]
+    out = []
+    for word in WORD_RE.findall(text.replace("’", "'").replace("ʼ", "'")):
+        word = word.lower()
+        if word in STOP or len(word) < 2:
+            continue
+        lemma, known = _lemma(word)
+        if lemma in QUESTION_LEMMAS:
+            continue
+        out.append(lemma)
+        latin = word.isascii() and not word.isdigit()
+        if (latin or not known) and len(word) >= 3:
+            out.append(sound(word))  # термін, назва, абревіатура — знайдеться і в іншому написанні
+    return out
 
 
 @dataclass
@@ -103,10 +190,18 @@ class LessonDoc:
     chat: list[tuple[str, str]]
 
     @property
+    def parts(self) -> dict[str, str]:
+        return sections(self.summary)
+
+    @property
     def short(self) -> str:
         """Коротка назва для посилань: «Безпека», «Бази даних»."""
-        words = self.subject.split()
-        return " ".join(words[:2]) if len(words) > 2 else self.subject
+        out: list[str] = []
+        for word in self.subject.split():  # «Якість і тестування», а не «Якість і»
+            out.append(word)
+            if sum(len(part) > 2 for part in out) >= 2:
+                break
+        return " ".join(out)
 
     def label(self, time: str = "") -> str:
         return f"{self.short}, {self.day:%d.%m}" + (f" {time}" if time else "")
@@ -243,7 +338,8 @@ def _day_from(question: str, today: date) -> date | None:
 
 
 class Helper:
-    """Відповідь на повідомлення студента. ``ask(system, text)`` — мовна модель; ``schedule(now)`` — розклад текстом."""
+    """Відповідь на повідомлення студента. ``ask(system, text)`` — мовна модель (None — ще не готова);
+    ``schedule(now)`` — розклад текстом."""
 
     def __init__(self, library: Library, ask: Callable[[str, str], str] | None,
                  schedule: Callable[[datetime], str] | None = None):
@@ -262,24 +358,122 @@ class Helper:
             return "now"
         return "search"
 
-    def answer(self, question: str, now: datetime, live: str = "", dialog: str = "", events: str = "") -> str:
+    def quick(self, question: str, now: datetime) -> str | None:
+        """Відповідь без мовної моделі — з розкладу й підсумків пар. None — тут потрібна модель."""
         kind = self.route(question)
         if kind == "schedule" and self.schedule is not None:
             return self.schedule(now)
+        if kind == "search" and TEACHER_RE.search(question):
+            self.library.refresh()
+            return self._teachers(question)
+        if kind not in ("lesson", "tasks"):
+            return None
         self.library.refresh()
-        sources = self.sources(question, kind, now, live)
+        if kind == "tasks":
+            return self._tasks(question, now)
+        if not EXPLAIN_RE.search(question) and not re.search(r"\bколи\b|що (казав|казала|сказав|говорив)", question, re.I):
+            return self._lessons(question, now)
+        return None
+
+    def answer(self, question: str, now: datetime, live: str = "", dialog: str = "", events: str = "") -> str:
+        if (ready := self.quick(question, now)) is not None:
+            return ready
+        kind = self.route(question)
+        self.library.refresh()
+        talk = bool(SMALL_TALK_RE.search(question)) and len(question) < 60  # «Привіт! Як справи?» — шукати нема чого
+        found = self.library.search(question, limit=6) if kind != "now" and not talk else []
+        strong = [item for item in found if item[0] >= SEARCH_STRONG]
+        sources = self.sources(question, kind, now, live) if strong or kind == "now" else ""
+        if not sources and ABOUT_LESSONS_RE.search(question) and not talk:
+            topic = m.group(1) if (m := re.search(r"\bпро\s+(.+?)[?.!]*$", question, re.I)) else "це"
+            return (f"У записах пар про {topic[:60]} нічого не знайшов. Можливо, Whisper записав це інакше або цього "
+                    "не було на парах, де я був.")
         if self.ask is None:
-            return "Мовна модель зараз недоступна. " + (("Ось що знайшов у записах:\n" + sources[:1500]) if sources else "")
-        parts = [f"Зараз {now:%d.%m.%Y %H:%M}, {['понеділок', 'вівторок', 'середа', 'четвер', 'пʼятниця', 'субота', 'неділя'][now.weekday()]}."]
-        if self.schedule is not None:
-            parts.append(self.schedule(now))
+            if sources:
+                return "Мовна модель ще не готова, ось що знайшов у записах пар:\n" + sources[:1500]
+            return "Мовна модель ще не готова (Ollama) — на таке поки не відповім. Розклад і завдання — питай."
+        parts = [f"Зараз {now:%d.%m.%Y %H:%M}, {WEEKDAY_NAMES[now.weekday()]}."]
         if events:
             parts.append(events)
         if dialog:
             parts.append("Розмова перед цим:\n" + dialog)
-        parts.append("Джерела:\n" + (sources or "(у записах пар про це нічого не знайшлося)"))
+        if sources:
+            parts.append("Знайдено в записах пар:\n" + sources)
         parts.append(f"Студент пише: {question}")
-        return self.ask(SYSTEM, "\n\n".join(parts))
+        reply = plain(whole_sentences(self.ask(SYSTEM, "\n\n".join(parts))))
+        if strong:
+            return reply + "\n\n" + self._cite(strong)
+        if not sources and EXPLAIN_RE.search(question):
+            return "📚 " + reply  # загальні знання, не з пари
+        return reply
+
+    @staticmethod
+    def _cite(found: list[tuple[float, Chunk]]) -> str:
+        """Звідки відповідь: «Безпека, 09.10 12:55, 12:57» — пишемо самі, а не просимо модель."""
+        places: dict[str, list[str]] = {}
+        for _, chunk in found[:4]:
+            places.setdefault(chunk.doc.label(), []).append(chunk.time)
+        return "Джерела: " + "; ".join(f"{label} {', '.join(sorted(set(times)))}" for label, times in places.items())
+
+    def _teachers(self, question: str) -> str | None:
+        """«Хто викладає бази даних?» — з записів пар (у заголовку кожного — викладач з розкладу)."""
+        named = self.library.subjects_named(question)
+        if not named:
+            return None
+        by_kind: dict[str, str] = {}
+        for doc in self.library.docs:
+            if doc.subject in named and doc.teacher:
+                by_kind[doc.kind or "пара"] = doc.teacher
+        if not by_kind:
+            return None
+        return f"👤 {named[0]}:\n" + "\n".join(f"• {kind}: {teacher}" for kind, teacher in by_kind.items())
+
+    def _lessons(self, question: str, now: datetime) -> str:
+        """«Що було на останній парі / вчора / на парі з баз даних» — з підсумків пар."""
+        picked = self._pick_docs(question, now)
+        day = _day_from(question, now.date())
+        if day is None and self.library.subjects_named(question):
+            picked = picked[-1:]  # «що було на парі з баз даних» — остання така пара
+        if not picked:
+            if day is not None:
+                return f"За {day:%d.%m} ({WEEKDAY_NAMES[day.weekday()]}) записів пар немає — програма тоді не була на парах або нічого не чула."
+            if self.library.subjects_named(question):
+                return "Записів цієї пари ще немає."
+            picked = self.library.docs[-1:]
+            if not picked:
+                return "Записів пар ще немає — вони з'являться після першої пари."
+        many = len(picked) > 1
+        out = []
+        for doc in picked[-4:]:
+            parts = doc.parts
+            head = f"📖 {doc.title}, {doc.day:%d.%m} {doc.start}–{doc.end}" + (f", {doc.teacher}" if doc.teacher else "")
+            if not parts:
+                start = " ".join(text for _, text in doc.lines[:8])[:400]
+                out.append(f"{head}\nПідсумку немає. Початок розшифровки: {start}" if start else f"{head}\nПідсумку немає.")
+                continue
+            names = ("Про що", "Завдання й дедлайни") if many else ("Про що", "Що робили", "Завдання й дедлайни", "Важливе")
+            lines = [f"{name}: {parts[name]}" for name in names if parts.get(name) and not NOTHING_RE.match(parts[name])]
+            out.append("\n".join([head, *lines]))
+        return "\n\n".join(out) + "\n\n(підсумки складає мовна модель з автоматичної розшифровки — можливі неточності)"
+
+    def _tasks(self, question: str, now: datetime) -> str:
+        """«Що задали з …», «які дедлайни», «які лаби захистити» — розділ «Завдання й дедлайни» підсумків пар."""
+        picked = self._pick_docs(question, now)
+        named = self.library.subjects_named(question)
+        if not picked and not named and _day_from(question, now.date()) is None:
+            since = now.date() - timedelta(days=14)
+            picked = [doc for doc in self.library.docs if doc.day >= since]
+        items = []
+        for doc in picked:
+            task = doc.parts.get("Завдання й дедлайни", "")
+            if task and not NOTHING_RE.match(task):
+                items.append(f"• {doc.short} ({doc.kind or doc.title}), {doc.day:%d.%m}: {_shorten(task, 300)}")
+        if not items:
+            where = f" з «{named[0]}»" if named else ""
+            return f"📝 У записах пар{where} завдань і дедлайнів не знайшов." + (
+                "" if picked else " (записів за цей час немає)")
+        return "📝 Завдання з записів пар:\n" + "\n".join(items[-8:]) + (
+            "\n\n(з автоматичних підсумків — дати й номери краще звір у Classroom)")
 
     def sources(self, question: str, kind: str, now: datetime, live: str = "", budget: int = 4000) -> str:
         library = self.library
@@ -296,16 +490,9 @@ class Helper:
             body = doc.summary or "Підсумку немає. Початок: " + " ".join(text for _, text in doc.lines[:12])[:600]
             out.append(f"{head}\n{body}")
         scope = picked or None
-        if kind == "tasks":
-            query = question + " завдання лабораторна здати дедлайн до"
-        else:
-            query = question
+        query = question + " завдання лабораторна здати дедлайн до" if kind == "tasks" else question
         for _, chunk in library.search(query, limit=6, docs=scope):
             out.append(f"[{chunk.doc.label(chunk.time)}] {chunk.text}")
-        if not out and kind in ("lesson", "tasks") and library.docs and day is None:
-            latest = library.docs[-3:] if kind == "tasks" else library.docs[-1:]
-            for doc in latest:
-                out.append(f"[{doc.title}, {doc.day:%d.%m.%Y} {doc.start}–{doc.end}]\n{doc.summary or '(без підсумку)'}")
         text = ""
         for piece in out:
             piece = piece if len(piece) <= 1600 else piece[:1600] + "…"  # довгий підсумок не витісняє решту джерел
@@ -327,6 +514,8 @@ class Helper:
             docs = [doc for doc in docs if doc.day == day]  # того дня записів немає — так і скажемо
         if re.search(r"(останн|минул|попередн)\w*\s+пар", question, re.I) and day is None:
             return docs[-1:]
+        if named and day is None:
+            return docs[-3:]
         if named or day is not None:
             return docs[-5:]
         return []

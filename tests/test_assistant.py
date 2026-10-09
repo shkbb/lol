@@ -615,6 +615,14 @@ def test_question_without_a_lesson_is_about_past_ones():
     assert asked and "не на парі" in asked[0]
 
 
+def test_answer_from_data_comes_at_once():
+    """Розклад, завдання, «що було на парі» помічник знає без мовної моделі — тоді без «Думаю…»."""
+    assistant = Assistant(MeSettings(name="Ляшко Денис"), Inbox())
+    assistant.ask_brain = lambda question, context, current: "📝 Завдання з записів пар: …" if "задали" in question else None
+    assert assistant.on_command("Що задали з баз даних?", at("12:00")).startswith("📝")
+    assert assistant.on_command("Поясни, що таке індекс?", at("12:00")).startswith("🧠 Думаю")
+
+
 def test_plain_words_are_actions_not_questions():
     """«Кинь скрін, що ти на парі» — наживо пішло мозку, а той відповів «скріншотів немає». Тепер це скріншот."""
     assistant, inbox = listening("off")

@@ -269,8 +269,9 @@ class Assistant:
         self.on_finished: Callable[[LessonRecord], None] | None = None  # пара скінчилась → звіт
         self.on_started: Callable[[str], None] | None = None  # почалась пара (її звіт) → писати її звук
         self.wake_brain = wake_brain  # None — «мозок» вимкнено, працюють лише рефлекси
-        # Вільне питання з Telegram → мозок (питання, контекст, поточна пара). None — мозку немає, лише команди.
-        self.ask_brain: Callable[[str, str, str], None] | None = None
+        # Вільне питання з Telegram → помічник (питання, контекст, поточна пара): готова відповідь — одразу,
+        # None — відповідь прийде пізніше окремим повідомленням. None замість функції — лише команди.
+        self.ask_brain: Callable[[str, str, str], str | None] | None = None
         self.meetings: dict[str, Meeting] = {}
         self._order: list[str] = []
         self._actions: list[Action] = []
@@ -903,8 +904,8 @@ class Assistant:
                 if self.dialog:
                     context += "\n\nРозмова перед цим:\n" + "\n".join(f"{who}: {said}" for who, said in self.dialog)
                 self.dialog.append(("Студент", command[:500]))
-                self.ask_brain(command[:500], context, meeting.title if meeting else "")
-                return "🧠 Думаю… відповім за хвилину."
+                ready = self.ask_brain(command[:500], context, meeting.title if meeting else "")
+                return ready or "🧠 Думаю… відповім за хвилину."  # з даних — одразу, мовній моделі треба час
             if meeting is None:
                 return "Зараз я не на парі."
             if not meeting.can_chat and (
