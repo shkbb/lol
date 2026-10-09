@@ -86,12 +86,16 @@ def test_search_answer_is_cited_by_code_and_general_knowledge_is_marked(tmp_path
     reply = helper.answer("Коли говорили про PCI DSS?", NOW, dialog="Студент: привіт\nautopara: привіт!")
     assert reply.startswith("Не потрібна, якщо платить банк.") and reply.endswith("Джерела: Безпека розробки, 09.10 12:55")
     system, text = prompts[-1]
-    assert "Знайдено в записах пар" in text and "Розмова перед цим" in text and text.endswith("Студент пише: Коли говорили про PCI DSS?")
+    assert "Уривки з записів пар" in text and "Розмова перед цим" in text
+    assert text.index("Питання студента: Коли говорили про PCI DSS?") < text.index("Уривки")  # питання — перед уривками
+    assert text.endswith("Відповідай на питання «Коли говорили про PCI DSS?» лише з цих уривків, своїми словами, 2–4 речення.")
     assert helper.answer("Поясни, що таке REST API", NOW).startswith("📚 ")  # у записах немає — загальні знання
-    assert "Знайдено в записах" not in prompts[-1][1]
+    assert "Уривки з записів" not in prompts[-1][1]
+    explained = helper.answer("Що таке PCI DSS?", NOW)
+    assert explained.startswith("📚 ") and explained.endswith("На парах про це: Безпека розробки, 09.10 12:55")
     assert helper.answer("Що казали про Kubernetes?", NOW).startswith("У записах пар про Kubernetes нічого не знайшов")
     helper.answer("Привіт! Як справи?", NOW)
-    assert "Знайдено в записах" not in prompts[-1][1]  # привітання — не пошук
+    assert "Уривки з записів" not in prompts[-1][1]  # привітання — не пошук
 
 
 def test_terms_match_in_any_spelling(tmp_path):
