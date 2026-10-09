@@ -1023,6 +1023,14 @@ class Assistant:
         evidence = quote or ""
         return any(pattern.search(evidence) for pattern, _ in self._patterns) or bool(URGENT_RE.search(evidence))
 
+    def chat_memory(self, now: datetime) -> tuple[str, str]:
+        """Для помічника: попередня розмова (без щойно поставленого питання) і що сьогодні робила програма."""
+        with self._lock:
+            turns = list(self.dialog)[:-1]
+            events = [f"{when:%H:%M} {text}" for when, text in self.events if when.date() == now.date()]
+        dialog = "\n".join(f"{who}: {said}" for who, said in turns)
+        return dialog, ("Що сьогодні робила програма:\n" + "\n".join(events)) if events else ""
+
     def note_event(self, when: datetime, text: str) -> None:
         """Дія програми («Зайшов на…», «Вийшов з…: зустріч завершилась») — щоб на «чому вийшов?» мозок знав відповідь."""
         with self._lock:

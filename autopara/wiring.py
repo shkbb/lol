@@ -33,7 +33,8 @@ from .ears import (
 from .media import AudioBuffer, Clipper, FrameBuffer
 from . import notes
 from .refine import LessonAudio, Refiner
-from .report import QUESTION_PROMPT, Reporter
+from .helper import Helper, Library
+from .report import Reporter
 from .telegram import Notifier, TelegramBot
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class Stack:
     # (app.py) уточнює це розкладом — ще й коли найближча пара не скоро.
     refine_allowed: Callable[[], bool] = lambda: True
     voice_meter: object | None = None  # ears.VoiceMeter, якщо вуха ввімкнені
+    schedule_text: Callable[[datetime], str] = lambda now: ""  # розклад текстом (app.py підставляє з Runner)
 
 
 @contextmanager
@@ -157,18 +159,21 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     if worker:
 
+        helper = Helper(Library(lessons_folder), lambda system, text: brain.summarize(system, text, num_ctx=6144),
+                        schedule=lambda now: stack.schedule_text(now))
+
         def answer(question: str, context: str, current: str) -> None:
-            """Вільне питання з Telegram — окремим потоком, щоб не стояти в черзі за конспектами.
-            Мозок сам заглядає в записи пар: потрібний предмет, його останні пари, згадки слів з питання."""
-            found = notes.gather(lessons_folder, question, current, brain.choose)
-            material = "\n\n".join(part for part in (context, found) if part)
+            """Повідомлення в Telegram (окремим потоком): розклад — одразу з даних; про пари — пошук у записах і
+            відповідь лише з них, з посиланнями; решта — звичайна розмова (див. helper.py)."""
+            now = clock()
+            dialog, events = assistant.chat_memory(now)
             try:
-                reply = brain.summarize(QUESTION_PROMPT, f"{material}\n\nСтудент пише: {question}")
+                reply = helper.answer(question, now, live=context if current else "", dialog=dialog, events=events)
             except BrainError as e:
                 reply = f"не вийшло відповісти: {e}"
             else:
                 assistant.remember_reply(reply)
-            notifier(f"🧠 {reply}")
+            notifier(reply if reply.startswith(("📅", "Найближчими")) else f"🧠 {reply}")
 
         def brain_ready() -> None:
             assistant.wake_brain = worker.wake

@@ -194,6 +194,7 @@ class Controller:
         )
         info.refine_allowed = lambda: runner.quiet(self.clock())  # уточнення — лише коли пари не скоро
         info.assistant.schedule_note = runner.today_note  # мозок знає, яка пара була, яка йде, яка далі
+        info.schedule_text = runner.schedule_text  # «яка наступна пара?» — з розкладу, без мовної моделі
         return runner, joiner
 
     def _tick_if_due(self) -> None:

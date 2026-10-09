@@ -315,6 +315,30 @@ class Runner:
             lines.append(f"- {start:%H:%M}–{end:%H:%M} «{visit.title}» — {state}")
         return "\n".join(lines)
 
+    def schedule_text(self, now: datetime, days: int = 4) -> str:
+        """Розклад на сьогодні й найближчі дні — відповідь на «яка наступна пара», «що завтра» (без мовної моделі)."""
+        names = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
+        visits = sorted((v for v in list(self.plan.visits) if v.leave_at > now), key=lambda v: v.join_at)
+        lines, shown_days = [], []
+        for visit in visits:
+            start, end = self._window(visit)
+            if start.date() not in shown_days:
+                if len(shown_days) == days:
+                    break
+                shown_days.append(start.date())
+                when = "сьогодні" if start.date() == now.date() else (
+                    "завтра" if start.date() == now.date() + timedelta(days=1) else f"{names[start.weekday()]} {start:%d.%m}")
+                lines.append(f"📅 {when}:")
+            mark = " — іде зараз" if visit.key in self.active else ""
+            lines.append(f"  {start:%H:%M}–{end:%H:%M} {visit.title}{mark}")
+        if not lines:
+            return f"Найближчими {self.config.schedule.days_ahead} днями пар з посиланнями немає."
+        unlinked = [lesson for lesson in self.plan.unlinked if lesson.ends_at(self.tz) > now][:3]
+        if unlinked:
+            lines.append("Без посилання (сам не зайду): " + ", ".join(
+                f"{lesson.title} {names[lesson.day.weekday()]} {lesson.start:%H:%M}" for lesson in unlinked))
+        return "\n".join(lines)
+
     def quiet(self, now: datetime, ahead: timedelta = timedelta(minutes=15)) -> bool:
         """Пари немає й найближчі ``ahead`` не буде — можна братися за важку фонову роботу (уточнення
         розшифровки). Викликається з іншого потоку, тож будь-яка несподіванка — «ні»."""

@@ -146,13 +146,17 @@ class OllamaBrain:
             log.debug("Не вдалося вивантажити модель мозку: %s", e)
             return False
 
-    def summarize(self, instruction: str, text: str) -> str:
-        """Вільний текст (конспект, звіт) — без JSON і без дій."""
+    def summarize(self, instruction: str, text: str, num_ctx: int | None = None) -> str:
+        """Вільний текст (конспект, звіт, відповідь помічника) — без JSON і без дій. ``num_ctx`` — довший контекст
+        для відповідей з джерелами: інакше Ollama (типово 4096) мовчки обрізає підказку, і модель відповідає порожнім."""
+        options: dict = {"temperature": 0.2, "num_predict": 400}
+        if num_ctx:
+            options["num_ctx"] = num_ctx
         payload = {
             "model": self.model,
             "stream": False,
             "keep_alive": KEEP_ALIVE,
-            "options": {"temperature": 0.2, "num_predict": 400},
+            "options": options,
             "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": text}],
         }
         try:
