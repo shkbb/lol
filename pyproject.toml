@@ -11,9 +11,9 @@ requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
     "beautifulsoup4>=4.12",
-    "playwright>=1.49",
-    "pymorphy3>=2.0",
-    "pymorphy3-dicts-uk>=2.4",  # 1.49+: install chromium --no-shell
+    "playwright>=1.49",  # 1.49+: install chromium --no-shell
+    "pymorphy3>=2.0",  # леми українських слів — пошук у записах пар з урахуванням відмінків
+    "pymorphy3-dicts-uk>=2.4",
     "tomli-w>=1.0",  # збереження налаштувань із вікна програми
     "PySide6-Essentials>=6.8",  # вікно програми (Qt): звичайна програма для Linux, Windows і macOS
     "imageio-ffmpeg>=0.5",  # свій ffmpeg для відеовирізок — нічого не треба встановлювати окремо
