@@ -40,6 +40,7 @@ def app_icon() -> QIcon:
 
 class MainWindow(QMainWindow):
     show_requested = Signal()  # із потоку локального API: «покажи вікно» (запустили ще раз з ярлика)
+    quit_requested = Signal()  # з потоку оновлення: «вийди» — нову версію запустить процес оновлення
 
     def __init__(self, model, bridge, on_quit):
         super().__init__()
@@ -97,6 +98,7 @@ class MainWindow(QMainWindow):
 
         self.tray = self._tray()
         self.show_requested.connect(self.bring_up)
+        self.quit_requested.connect(self.quit_program)
 
         self.poll = QTimer(self)
         self.poll.setInterval(1500)

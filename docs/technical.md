@@ -533,3 +533,22 @@ Zoom у справжньому Chromium на тестових сторінках
 
 Формат форми розкладу підглянуто у відкритому застосунку
 [KyivSec/DuiktTimetable](https://github.com/KyivSec/DuiktTimetable).
+
+## Релізи й автооновлення
+
+Копії з архіву (`install.sh` / `install.bat`) оновлюються самі (`autopara/updater.py`): раз на 6 годин
+дивляться останній реліз `shkbb/lol`, завантажують його `autopara.zip`, перевіряють (наш архів, та сама
+версія всередині, без підозрілих шляхів), роблять резервну копію в `.update/backup`, замінюють файли
+програми (не чіпаючи `.venv` і `profiles/`), доставляють залежності, якщо змінився `pyproject.toml`, і
+перезапускаються лише тоді, коли найближчі 30 хв немає пари. Окремий процес (`python -m autopara.updater
+finish`) запускає нову копію й чекає, поки вона відмітиться в `update-health.json`; не відмітилась за
+2 хв — відкочує. Копію з git автооновлення не чіпає.
+
+Випустити нову версію:
+
+```bash
+# 1) підняти версію в pyproject.toml і autopara/__init__.py, закомітити й запушити
+git archive --format=zip --prefix=autopara/ -o autopara.zip HEAD
+gh release create v0.X.Y autopara.zip -R shkbb/lol --title "autopara 0.X.Y" --notes "Що змінилось — коротко"
+```
+

@@ -47,6 +47,10 @@ class SettingsPage(QWidget):
     def update_state(self, state: dict) -> None:
         if self.accounts is not None:
             self.accounts.update_state(state)
+        update = state.get("update") or {}
+        if update and getattr(self, "update_note", None) is not None:
+            status = update.get("status") or ""
+            self.update_note.setText(f"Версія {update.get('version', '?')}" + (f" · {status}" if status else ""))
 
     # --- Вкладки ----------------------------------------------------------------------
 
@@ -257,6 +261,18 @@ class SettingsPage(QWidget):
                                         "З них і мозок відповідає на питання в Telegram.")
         records.add(w.hbox(w.button("📂 Відкрити записи пар", "", self._open_records), "stretch"))
         page.add(records)
+
+        updates = w.Card("Оновлення", "Нові версії програма ставить сама — коли немає пари, і повертає попередню, якщо нова "
+                                      "не запуститься. Що змінилось, напише в Telegram.")
+        updates.add(w.switch_row(model, "updates.auto", "Оновлюватись самостійно", default=True))
+        self.update_note = w.label("", "muted")
+
+        def check_update() -> None:
+            self.update_note.setText("Перевіряю…")
+            self.bridge.call_api(app_module.api_update, fail=lambda m: self.update_note.setText(f"⚠ {m}"))
+
+        updates.add(w.hbox(self.update_note, "stretch", w.button("Перевірити зараз", "", check_update)))
+        page.add(updates)
 
         program = w.Card("Програма")
         program.add(w.hbox(w.button("Пройти майстер ще раз", "", self.window.show_wizard),

@@ -53,6 +53,7 @@ def run(config: Config, config_path: Path, hidden: bool = False) -> None:
     model = ConfigModel(bridge)
     window = MainWindow(model, bridge, on_quit=stop)
     program.server.show_window = window.show_requested.emit
+    program.request_quit = window.quit_requested.emit  # оновлення: закрити вікно й вийти (нову копію запустить оновлювач)
     if not hidden or not configured(config):
         window.show()
 

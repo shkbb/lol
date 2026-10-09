@@ -117,6 +117,11 @@ class BrainSettings:
 
 
 @dataclass
+class UpdateSettings:
+    auto: bool = True  # самому ставити нові версії з GitHub (лише в копії з архіву; копію з git — ні)
+
+
+@dataclass
 class Config:
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
     join: JoinSettings = field(default_factory=JoinSettings)
@@ -125,6 +130,7 @@ class Config:
     telegram: TelegramSettings = field(default_factory=TelegramSettings)
     ears: EarsSettings = field(default_factory=EarsSettings)
     brain: BrainSettings = field(default_factory=BrainSettings)
+    updates: UpdateSettings = field(default_factory=UpdateSettings)
     timezone: str = "Europe/Kyiv"
     data_dir: Path = DEFAULT_DATA_DIR
 
@@ -157,7 +163,7 @@ RETIRED_KEYS = {"join": {"browser_channel", "browser_path"}}  # тепер за�
 
 
 def parse_config(data: dict) -> Config:
-    allowed = {"schedule", "join", "links", "me", "telegram", "ears", "brain", "timezone", "data_dir"}
+    allowed = {"schedule", "join", "links", "me", "telegram", "ears", "brain", "updates", "timezone", "data_dir"}
     data = {key: value for key, value in data.items() if key not in RETIRED_SECTIONS}
     for section, keys in RETIRED_KEYS.items():
         if isinstance(data.get(section), dict):
@@ -208,6 +214,7 @@ def parse_config(data: dict) -> Config:
         telegram=telegram,
         ears=ears,
         brain=_build(BrainSettings, data.get("brain", {}), "brain"),
+        updates=_build(UpdateSettings, data.get("updates", {}), "updates"),
     )
     if "timezone" in data:
         config.timezone = str(data["timezone"])

@@ -63,6 +63,10 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     elif config.telegram.token:
         log.warning("Telegram: бот не підключений до твого чату — підключи його у вікні програми (вкладка Telegram)")
     notifier = Notifier(bot, desktop=config.telegram.desktop)
+    from .updater import take_done
+
+    if done := take_done(config.data_dir):  # щойно оновились (чи відкотились) — сказати, що змінилось
+        notifier(done)
 
     brain = worker = None
     if config.brain.enabled:

@@ -24,6 +24,7 @@ import time
 import tomllib
 import urllib.request
 from collections import deque
+from typing import Callable
 from concurrent.futures import Future
 from contextlib import ExitStack
 from dataclasses import astuple, replace
@@ -115,6 +116,14 @@ class Controller:
     def snapshot(self) -> dict:
         with self._state_lock:
             return dict(self._state)
+
+    def is_quiet(self, ahead: timedelta = timedelta(minutes=30)) -> bool:
+        """Пари зараз немає й найближчі ``ahead`` не буде — можна перезапуститися (оновлення)."""
+        state = self.snapshot()
+        if state.get("active"):
+            return False
+        limit = self.clock() + ahead
+        return all(datetime.fromisoformat(visit["join_at"]) > limit for visit in state.get("upcoming") or [])
 
     def shutdown(self) -> None:
         if self._thread.is_alive():
@@ -650,11 +659,24 @@ class Handler(BaseHTTPRequestHandler):
         self._json(status, data)
 
 
+def api_update(server: AppServer, query: dict, body: dict):
+    """Кнопка «Перевірити оновлення»: перевірка йде у фоні, стан видно в /api/state → update."""
+    updater = getattr(server, "updater", None)
+    if updater is None:
+        return 404, {"error": "оновлення недоступне"}
+    updater.check_now()
+    return 200, {"result": "checking"}
+
+
 def api_state(server: AppServer, query: dict, body: dict):
     config = server.controller.config
     state = server.controller.snapshot()
     state["configured"] = configured(config)
     state["university"] = UNIVERSITIES.get(config.schedule.university, "")
+    updater = getattr(server, "updater", None)
+    from . import __version__
+
+    state["update"] = {"version": __version__, "status": updater.status if updater else ""}
     return 200, state
 
 
@@ -876,6 +898,7 @@ ROUTES = {
     ("GET", "/api/audio-devices"): api_audio_devices,
     ("POST", "/api/install-ears"): api_install_ears,
     ("POST", "/api/show"): api_show,
+    ("POST", "/api/update"): api_update,
 }
 
 
@@ -959,17 +982,30 @@ class Program:
         self.controller = Controller(config, config_path)
         self.server = AppServer(self.controller, port=port, logs=self.logs)
         self.lock: Path | None = None
+        # Вікно (gui) підміняє це на «закрити вікно й вийти»; без вікна — просто зупинитися.
+        self.request_quit: Callable[[], None] = self._quit_without_window
+        self.quit_requested = threading.Event()
+        from .updater import Updater
+
+        self.updater = Updater(config.data_dir, lambda: self.controller.config.updates.auto,
+                               self.controller.is_quiet, lambda: self.request_quit())
+        self.server.updater = self.updater
+
+    def _quit_without_window(self) -> None:
+        self.quit_requested.set()
 
     def start(self, autostart: bool = True) -> None:
         self.controller.start()
         self.lock = write_lock(self.server.port, self.server.token)
         browser_setup.prepare_in_background()  # якщо браузер програми ще не завантажено — докачати, поки налаштовують
+        self.updater.start()  # нові версії з GitHub — самі (крім копії з git)
         if autostart and configured(self.config):
             threading.Thread(target=_autostart, args=(self.controller,), daemon=True).start()
         elif not configured(self.config):
             log.warning("Група ще не вибрана — відкрий вікно програми (autopara app) і заповни налаштування")
 
     def stop(self) -> None:
+        self.updater.stop()
         self.server.server_close()
         self.controller.shutdown()
         if self.lock is not None:
@@ -981,6 +1017,8 @@ def serve(config: Config, config_path: Path, autostart: bool = True, port: int =
     program = Program(config, config_path, port=port)
     program.start(autostart)
     log.info("autopara працює у фоні без вікна")
+    # Оновлення просить вийти — зупиняємо сервер, і serve() завершується (нову копію запустить процес оновлення).
+    program.request_quit = lambda: threading.Thread(target=program.server.shutdown, daemon=True).start()
     try:
         program.server.serve_forever()
     except KeyboardInterrupt:
