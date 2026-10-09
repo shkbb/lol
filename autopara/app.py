@@ -846,7 +846,11 @@ def api_audio_devices(server: AppServer, query: dict, body: dict):
 
 def api_install_ears(server: AppServer, query: dict, body: dict):
     """Доставити розпізнавання мови в те саме середовище Python, де працює програма, і перезапустити вуха."""
+    from .accel import has_nvidia
+
     packages = ["faster-whisper>=1.0"] + ([] if sys.platform.startswith("linux") else ["sounddevice>=0.4"])
+    if has_nvidia() and sys.platform != "darwin":  # бібліотеки CUDA: розпізнавання на відеокарті (див. accel.py)
+        packages += ["nvidia-cublas-cu12", "nvidia-cudnn-cu12>=9,<10"]
     log.info("Встановлюю розпізнавання мови (%s) — 1–3 хвилини...", ", ".join(packages))
     result = subprocess.run([sys.executable, "-m", "pip", "install", *packages], capture_output=True, text=True)
     if result.returncode != 0:

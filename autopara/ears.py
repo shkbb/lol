@@ -32,6 +32,9 @@ from pathlib import Path
 from time import monotonic
 from typing import Callable, Protocol
 
+from . import accel
+from .accel import Device
+
 log = logging.getLogger(__name__)
 
 SINK = "autopara"
@@ -429,30 +432,31 @@ def available_ram_gb() -> float | None:
         return None
 
 
-def resolve_refine_model(refine: str, live: str) -> str:
-    """Модель для уточнення після пари: "auto" — large-v3 на потужному комп'ютері (вона точніша, а поспішати
-    після пари нікуди), інакше та сама, що наживо; "off" — не уточнювати."""
+def resolve_refine_model(refine: str, live: str, device: Device | None = None) -> str:
+    """Модель для уточнення після пари: "auto" — large-v3 на потужному комп'ютері чи з відеокартою (вона точніша,
+    а поспішати після пари нікуди), інакше та сама, що наживо; "off" — не уточнювати."""
     if refine != "auto":
         return refine
     cpus, ram = os.cpu_count() or 1, total_ram_gb()
-    return "large-v3" if cpus >= 8 and ram >= 12 else resolve_model(live)
+    gpu = device is not None and device.gpu
+    return "large-v3" if gpu or (cpus >= 8 and ram >= 12) else resolve_model(live)
 
 
 class Paused(Exception):
     """Уточнення треба відкласти: скоро пара (або вона вже йде) — процесор і пам'ять потрібні їй."""
 
 
-def resolve_model(model: str) -> str:
-    """"auto" → модель для вух наживо за потужністю комп'ютера: large-v3-turbo там, де встигатиме, інакше small.
+def resolve_model(model: str, device: Device | None = None) -> str:
+    """"auto" → модель для вух наживо за потужністю комп'ютера: з відеокартою NVIDIA — large-v3, на процесорі —
+    large-v3-turbo там, де встигатиме, інакше small.
 
-    Наживо головне — встигати (помітити, що тебе кличуть): на живій парі навіть потужний ноутбук з large-v3
-    відставав на 10+ хв і мусив пропускати звук. Точність для звіту дає уточнення після пари (refine.py) — уже
-    large-v3. Якщо модель наживо не встигатиме, вуха самі перейдуть на легшу (див. LIGHTER_MODEL).
+    Наживо головне — встигати (помітити, що тебе кличуть): на живій парі навіть потужний ноутбук з large-v3 на
+    процесорі відставав на 10+ хв і мусив пропускати звук. Точність для звіту дає уточнення після пари (refine.py) —
+    уже large-v3. Якщо модель наживо не встигатиме, вуха самі перейдуть на легшу (див. LIGHTER_MODEL).
     """
     if model != "auto":
         return model
-    cpus, ram = os.cpu_count() or 1, total_ram_gb()
-    return "large-v3-turbo" if cpus >= 4 and ram >= 8 else "small"
+    return accel.live_model(device or accel.CPU, os.cpu_count() or 1, total_ram_gb())
 
 
 class ModelGate:
@@ -504,7 +508,8 @@ class WhisperTranscriber:
     ``hints`` — підказка з іменами (викладач, ти, назва пари): так Whisper рідше перекручує прізвища.
     """
 
-    def __init__(self, model: str = "small", language: str = "uk", hints: Callable[[], str] | None = None):
+    def __init__(self, model: str = "small", language: str = "uk", hints: Callable[[], str] | None = None,
+                 device: str = "auto", free_memory: bool = False):
         try:
             from faster_whisper import WhisperModel
         except ImportError as e:
@@ -514,12 +519,32 @@ class WhisperTranscriber:
         self.hints = hints
         self._hotwords = True
         self.gate = ModelGate()
-        self._load(resolve_model(model))
+        self.device = accel.whisper_device(device, free=free_memory)
+        self._auto = model == "auto"
+        self._load(resolve_model(model, self.device))
 
     def _load(self, model: str) -> None:
-        log.info("Завантажую модель розпізнавання мови %r (перший раз — кілька хвилин)...", model)
+        log.info("Завантажую модель розпізнавання мови %r на %s (перший раз — кілька хвилин)...", model, self.device.label)
         self.name = model
+        if self.device.gpu:
+            try:
+                self.model = self._factory(model, device=self.device.device, compute_type=self.device.compute_type)
+                self._try_once()
+                return
+            except Exception as e:  # noqa: BLE001 — бракує бібліотек CUDA, пам'яті карти тощо: процесор теж добре
+                log.warning("Відеокарта %s не впоралась (%s) — розпізнаю на процесорі", self.device.label, e)
+                self.model = None
+                self.device = accel.CPU
+                if self._auto:  # «сама обери» — на процесорі це вже інша модель (large-v3 там не встигає наживо)
+                    self.name = model = resolve_model("auto", accel.CPU)
         self.model = self._factory(model, device="cpu", compute_type="int8")
+
+    def _try_once(self) -> None:
+        """Секунда тиші через усю модель: помилки CUDA (немає cuDNN тощо) вилазять саме на першому розпізнаванні."""
+        import numpy as np
+
+        list(self.model.transcribe(np.zeros(RATE, dtype=np.float32), language=self.language, beam_size=1,
+                                   vad_filter=False, without_timestamps=True)[0])
 
     def downgrade(self) -> bool:
         """Перейти на легшу модель, якщо ця не встигає за парою. False — легшої немає."""

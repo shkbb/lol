@@ -71,6 +71,8 @@ desktop = true            # дублювати сповіщення на роб�
 [ears]                    # слухати пару (локальне розпізнавання мови, будь-яка ОС)
 enabled = true
 model = "auto"            # auto — за потужністю комп'ютера; або small (швидко) / large-v3-turbo (точніше, autopara listen-test)
+refine_model = "auto"     # друге, точніше розпізнавання після пари (для звіту): auto — large-v3; "off" — не уточнювати
+device = "auto"           # де розпізнавати: auto — відеокарта NVIDIA, якщо є (CUDA), інакше процесор; "cpu" — лише процесор
 language = "uk"
 source = "auto"           # пари в браузері: "auto" — звук лише з вкладки пари; "pulse" — увесь звук браузера програми (Linux)
 app_device = ""           # Zoom-клієнт на Windows/macOS: віртуальний кабель, напр. "CABLE Output" чи "BlackHole" (README → «Вуха»)

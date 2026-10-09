@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import threading
 from datetime import datetime
@@ -19,6 +20,7 @@ from typing import Callable
 
 import requests
 
+from . import accel
 from .assistant import Decision
 
 log = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ LOW_MEMORY_GB = 2.0
 # кількох запитів вивантажуємо модель — з нею йде й накопичене; наступний запит завантажить її за секунди.
 REQUESTS_PER_LOAD = 5
 COOLDOWN_SECONDS = 45
+CONTEXT = 6144  # токенів підказки й відповіді разом
 
 SYSTEM_PROMPT = """Ти — помічник студента на онлайн-парі. Студента зараз немає біля комп'ютера; \
 його мікрофон і камера вимкнені, і ти не можеш їх увімкнути.
@@ -95,16 +98,33 @@ def parse_decision(content: str) -> Decision:
 
 
 class OllamaBrain:
-    def __init__(self, url: str, model: str, session: requests.Session | None = None, timeout: float = 180):
+    """``gpu`` — чи пускати модель на відеокарту (None — визначити самим, див. accel.brain_on_gpu). Без неї модель
+    рахує процесор, і поки йде пара (``busy``), бере лише половину ядер — решта лишається вухам."""
+
+    def __init__(self, url: str, model: str, session: requests.Session | None = None, timeout: float = 180,
+                 gpu: bool | None = None, busy: Callable[[], bool] = lambda: False):
         self.url = url.rstrip("/")
         self.model = model
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.gpu = accel.brain_on_gpu() if gpu is None else gpu
+        self.busy = busy
         self._requests = 0
         self._count_lock = threading.Lock()
 
+    def _options(self, options: dict) -> dict:
+        # Один розмір контексту для всіх запитів: Ollama перезавантажує модель, щойно він змінюється, а рішення
+        # й конспекти наживо чергуються. Типові 4096 ще й мовчки обрізали відповіді з джерелами.
+        options = {"num_ctx": CONTEXT, **options}
+        if not self.gpu:
+            options["num_gpu"] = 0
+            if self.busy():
+                options["num_thread"] = max(2, (os.cpu_count() or 4) // 4)  # половина фізичних ядер
+        return options
+
     def _ask(self, payload: dict, timeout: float) -> dict:
         """Запит до Ollama; після кожних REQUESTS_PER_LOAD — вивантажити модель (див. REQUESTS_PER_LOAD)."""
+        payload = {**payload, "options": self._options(payload.get("options", {}))}
         try:
             response = self.session.post(f"{self.url}/api/chat", json=payload, timeout=timeout)
             response.raise_for_status()
@@ -147,8 +167,8 @@ class OllamaBrain:
             return False
 
     def summarize(self, instruction: str, text: str, num_ctx: int | None = None) -> str:
-        """Вільний текст (конспект, звіт, відповідь помічника) — без JSON і без дій. ``num_ctx`` — довший контекст
-        для відповідей з джерелами: інакше Ollama (типово 4096) мовчки обрізає підказку, і модель відповідає порожнім."""
+        """Вільний текст (конспект, звіт, відповідь помічника) — без JSON і без дій. ``num_ctx`` — інший розмір
+        контексту, ніж CONTEXT (лише якщо справді треба: зміна розміру — це перезавантаження моделі)."""
         options: dict = {"temperature": 0.2, "num_predict": 400}
         if num_ctx:
             options["num_ctx"] = num_ctx

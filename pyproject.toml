@@ -23,6 +23,8 @@ dependencies = [
 [project.optional-dependencies]
 # «вуха»: локальне розпізнавання мови; sounddevice — слухати Zoom-клієнт через віртуальний кабель (Windows, macOS)
 ears = ["faster-whisper>=1.0", "sounddevice>=0.4; platform_system != 'Linux'"]
+# відеокарта NVIDIA: бібліотеки CUDA для Whisper (інсталятор ставить їх сам, якщо бачить NVIDIA; див. accel.py)
+cuda = ["nvidia-cublas-cu12; platform_system != 'Darwin'", "nvidia-cudnn-cu12>=9,<10; platform_system != 'Darwin'"]
 dev = ["pytest>=8", "numpy"]
 
 [project.scripts]

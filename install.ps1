@@ -50,7 +50,12 @@ $venv = (Resolve-Path ".venv\Scripts\python.exe").Path
 & $venv -m pip install -q --upgrade pip
 
 Say "2/4 autopara з розпізнаванням мови (кілька хвилин)"
-& $venv -m pip install -q -e ".[ears]"
+# З відеокартою NVIDIA — ще й бібліотеки CUDA (~1,5 ГБ): розпізнавання на ній у рази швидше (див. autopara\accel.py).
+$extras = & $venv -c "import sys; sys.path.insert(0, '.'); from autopara.accel import pip_extras; print(pip_extras())"
+if (-not $extras) { $extras = "ears" }
+if ($extras -ne "ears") { Write-Host "Бачу відеокарту NVIDIA — розпізнаватиму на ній (докачаю бібліотеки CUDA, ~1,5 ГБ)." }
+& $venv -m pip install -q -e ".[$extras]"
+if ($LASTEXITCODE -ne 0) { & $venv -m pip install -q -e ".[ears]" }
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Розпізнавання мови не встановилось — ставлю без нього (доставити можна кнопкою у вікні програми)." -ForegroundColor Yellow
     & $venv -m pip install -q -e .

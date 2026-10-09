@@ -26,7 +26,10 @@ say "1/4 Окреме середовище Python (.venv)"
 .venv/bin/python -m pip install -q --upgrade pip
 
 say "2/4 autopara з розпізнаванням мови"
-if ! .venv/bin/python -m pip install -q -e ".[ears]"; then
+# З відеокартою NVIDIA — ще й бібліотеки CUDA (~1,5 ГБ): розпізнавання на ній у рази швидше (див. autopara/accel.py).
+extras=$(.venv/bin/python -c "import sys; sys.path.insert(0, '.'); from autopara.accel import pip_extras; print(pip_extras())" 2>/dev/null || echo ears)
+[ "$extras" = "ears" ] || echo "Бачу відеокарту NVIDIA — розпізнаватиму на ній (докачаю бібліотеки CUDA, ~1,5 ГБ)."
+if ! .venv/bin/python -m pip install -q -e ".[$extras]" && ! .venv/bin/python -m pip install -q -e ".[ears]"; then
   echo "Розпізнавання мови не встановилось — ставлю без нього (доставити можна кнопкою у вікні програми)."
   .venv/bin/python -m pip install -q -e .
 fi

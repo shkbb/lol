@@ -148,7 +148,9 @@ def restore(install: Path, backup: Path) -> None:
 
 
 def install_dependencies(install: Path) -> None:
-    for extra in ('.[ears]', '.'):
+    from .accel import pip_extras
+
+    for extra in (f".[{pip_extras()}]", ".[ears]", "."):
         result = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", extra], cwd=install,
                                 capture_output=True, text=True)
         if result.returncode == 0:

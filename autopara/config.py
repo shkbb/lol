@@ -96,7 +96,9 @@ class TelegramSettings:
 @dataclass
 class EarsSettings:
     enabled: bool = True
-    model: str = "auto"  # наживо: "auto" — large-v3-turbo на потужному комп'ютері, інакше small
+    model: str = "auto"  # наживо: "auto" — large-v3 з відеокартою NVIDIA, large-v3-turbo на потужному комп'ютері, інакше small
+    # Де розпізнавати: "auto" — на відеокарті NVIDIA, якщо вона є (CUDA), інакше на процесорі; "cpu"; "cuda".
+    device: str = "auto"
     # Друге, точніше розпізнавання після пари — для звіту й запису: "auto" — large-v3 на потужному
     # комп'ютері (інакше та сама модель, що наживо); "off" — не уточнювати, звіт одразу з живої розшифровки.
     refine_model: str = "auto"
@@ -206,6 +208,8 @@ def parse_config(data: dict) -> Config:
     ears = _build(EarsSettings, data.get("ears", {}), "ears")
     if ears.source not in ("auto", "browser", "pulse"):
         raise ConfigError('[ears] source має бути "auto", "browser" або "pulse"')
+    if ears.device not in ("auto", "cpu", "cuda"):
+        raise ConfigError('[ears] device має бути "auto", "cpu" або "cuda"')
     config = Config(
         schedule=schedule,
         join=join,

@@ -134,9 +134,11 @@ class Refiner:
                  complete: Callable[[LessonRecord, Path | None, list[tuple[datetime, str]]], None],
                  fallback: Callable[[LessonRecord, Path | None], None],
                  allowed: Callable[[], bool] = lambda: True, free_gb: Callable[[], float | None] = lambda: None,
-                 poll_seconds: float = 30, worker: Callable[[Path, int, str], list[str]] | None = None):
+                 poll_seconds: float = 30, worker: Callable[[Path, int, str], list[str]] | None = None,
+                 device: str = "auto"):
         self.folder = folder
         self.model = model
+        self.device = device
         self.language = language
         self.hint = hint
         self.complete = complete
@@ -153,7 +155,7 @@ class Refiner:
 
     def _worker_command(self, job: Path, beam: int, hint: str) -> list[str]:
         return [sys.executable, "-m", "autopara.refine_worker", str(job), "--model", self.model,
-                "--language", self.language, "--beam", str(beam), "--hint", hint]
+                "--language", self.language, "--beam", str(beam), "--hint", hint, "--device", self.device]
 
     def start(self) -> None:
         for job in sorted(self.folder.glob("*.json")) if self.folder.is_dir() else []:

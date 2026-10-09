@@ -5,7 +5,7 @@
 розшифровує один запис, пише результат і завершується, віддаючи все. Під тиском пам'яті ядро вб'є першим
 саме його (не програму й не робочий стіл), а процесор він бере з нижчим пріоритетом.
 
-    python -m autopara.refine_worker <завдання.json> --model large-v3 --language uk --beam 5 --hint "…"
+    python -m autopara.refine_worker <завдання.json> --model large-v3 --language uk --beam 5 --hint "…" --device auto
 
 Результат — <завдання>.result.json: [[секунда від початку запису, текст], …].
 """
@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--language", default="uk")
     parser.add_argument("--beam", type=int, default=5)
     parser.add_argument("--hint", default="")
+    parser.add_argument("--device", default="auto")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s уточнення: %(message)s", datefmt="%H:%M:%S")
     be_gentle()
@@ -57,7 +58,8 @@ def main(argv: list[str] | None = None) -> int:
 
     job = Path(args.job)
     pcm = job.with_suffix(".raw").read_bytes()
-    transcriber = WhisperTranscriber(args.model, args.language)
+    # free_memory: вуха наживо вже тримають свою модель на відеокарті — беремо карту, лише якщо на ній ще є місце.
+    transcriber = WhisperTranscriber(args.model, args.language, device=args.device, free_memory=True)
     lines = transcriber.transcribe_long(pcm, args.hint, beam_size=args.beam)
     result = job.with_suffix(".result.json")
     partial = result.with_suffix(".tmp")

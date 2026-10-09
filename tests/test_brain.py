@@ -34,6 +34,21 @@ def test_decide_sends_schema_and_parses():
     assert ollama.payload["messages"][1] == {"role": "user", "content": "ситуація"}
 
 
+def test_integrated_graphics_brain_runs_on_processor_and_yields_during_lessons():
+    ollama = FakeOllama("відповідь")
+    lesson = [False]
+    brain = OllamaBrain("http://x", "gemma3:4b", session=ollama, gpu=False, busy=lambda: lesson[0])
+    brain.summarize("інструкція", "текст")
+    options = ollama.payload["options"]
+    # Вбудована карта (Vulkan) вішала GPU — лише процесор; контекст один на всі запити (інакше перезавантаження).
+    assert options["num_gpu"] == 0 and options["num_ctx"] == 6144 and "num_thread" not in options
+    lesson[0] = True
+    brain.choose("що обрати?", ["а", "б"])
+    assert ollama.payload["options"]["num_thread"] >= 2 and ollama.payload["options"]["num_ctx"] == 6144
+    OllamaBrain("http://x", "gemma3:4b", session=ollama, gpu=True).summarize("і", "т")
+    assert "num_gpu" not in ollama.payload["options"]  # окрема карта — як вирішить сама Ollama
+
+
 def test_invented_actions_become_none():
     assert parse_decision('{"action": "unmute", "message": "", "reason": ""}').action == "none"
 

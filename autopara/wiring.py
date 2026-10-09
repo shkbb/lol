@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterator
 
+from . import accel
 from .assistant import Assistant
 from .brain import BrainConnector, BrainError, BrainMemoryGuard, BrainWorker, OllamaBrain
 from .config import Config
@@ -72,7 +73,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     brain = worker = None
     if config.brain.enabled:
-        brain = OllamaBrain(config.brain.url, config.brain.model)
+        brain = OllamaBrain(config.brain.url, config.brain.model, busy=lambda: not stack.refine_allowed())
         worker = BrainWorker(brain, clock)
         stoppers.append(worker.stop)
 
@@ -126,7 +127,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
                 lambda text, confident: assistant.on_heard(text, clock(), confident),
                 queue,
                 on_audio=audio.add if audio else None,
-                load=lambda: WhisperTranscriber(config.ears.model, config.ears.language, hints=assistant.whisper_hints),
+                load=lambda: WhisperTranscriber(config.ears.model, config.ears.language, hints=assistant.whisper_hints,
+                                                device=config.ears.device),
                 on_ready=lambda: setattr(assistant, "ears_on", True),
             )
             ears.start()
@@ -140,7 +142,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     reporter = Reporter(notifier, None, None, lessons_folder, send=config.telegram.reports)
     assistant.on_chunk = reporter.chunk
     assistant.on_finished = reporter.finish
-    refine_name = resolve_refine_model(config.ears.refine_model, config.ears.model)
+    refine_name = resolve_refine_model(config.ears.refine_model, config.ears.model,
+                                       accel.whisper_device(config.ears.device) if ears is not None else None)
     if ears is not None and lesson_audio is not None and refine_name != "off":
         refiner = Refiner(
             config.data_dir / "audio",
@@ -151,6 +154,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             reporter.fallback,
             allowed=lambda: stack.refine_allowed(),
             free_gb=available_ram_gb,
+            device=config.ears.device,
         )
         reporter.audio, reporter.refiner = lesson_audio, refiner
         assistant.on_started = lesson_audio.start
@@ -159,7 +163,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     if worker:
 
-        helper = Helper(Library(lessons_folder), lambda system, text: brain.summarize(system, text, num_ctx=6144),
+        helper = Helper(Library(lessons_folder), brain.summarize,
                         schedule=lambda now: stack.schedule_text(now))
 
         def answer(question: str, context: str, current: str) -> None:
