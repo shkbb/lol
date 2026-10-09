@@ -760,8 +760,10 @@ class Browser:
         args = ["--disable-blink-features=AutomationControlled", "--no-default-browser-check"]
         # Без цього прапорця Google не пускає логінитись («браузер може бути небезпечним»).
         ignore = ["--enable-automation"]
+        # Звук пари грає без «жесту людини»: інакше браузер міг мовчки не програвати Meet — і вуха глухли
+        # (наживо: два дні пар без жодного звуку).
+        args.append("--autoplay-policy=no-user-gesture-required")
         if self.audio_tap is not None:
-            args.append("--autoplay-policy=no-user-gesture-required")  # щоб збирач звуку стартував одразу
             # Вуха беруть звук вкладки пари (getDisplayMedia) — без запитання на екрані. «Без звуку» тоді робить
             # сам збирач (suppressLocalAudioPlayback): з --mute-audio записувалася б тиша.
             args.append("--auto-accept-this-tab-capture")
@@ -920,7 +922,24 @@ class Joiner:
             self._app_links_file.write_text(json.dumps(links + [url], ensure_ascii=False), encoding="utf-8")
             log.info("Запам'ятав: на %s надалі заходжу Zoom-клієнтом", url)
 
-    def _enable_ears(self, page: Page) -> None:
+    def repair_ears(self, session: Session) -> bool:
+        """Сторож вух: звуку давно немає — розбудити звук сторінки й захопити вкладку наново. True — було що робити."""
+        page = session.page
+        if page is None or page.is_closed():
+            return False
+        try:
+            cdp = page.context.new_cdp_session(page)
+            try:
+                cdp.send("Runtime.evaluate", {"expression": "window.__autoparaTap && window.__autoparaTap.wake()",
+                                              "userGesture": True, "returnByValue": True})
+            finally:
+                cdp.detach()
+        except PlaywrightError as e:
+            log.debug("Не вдалося розбудити звук сторінки: %s", e)
+        self._enable_ears(page, again=True)
+        return True
+
+    def _enable_ears(self, page: Page, again: bool = False) -> None:
         """Вуха слухають лише вкладку пари, куди зайшла програма, — не YouTube чи інші вкладки."""
         if self.browser.audio_tap is None:
             return
@@ -933,7 +952,7 @@ class Joiner:
             try:
                 suppress = "true" if self.settings.mute_sound else "false"
                 result = cdp.send("Runtime.evaluate", {
-                    "expression": f"window.__autoparaTap.captureTab({suppress})",
+                    "expression": f"window.__autoparaTap.captureTab({suppress}, {'true' if again else 'false'})",
                     "awaitPromise": True, "userGesture": True, "returnByValue": True,
                 })
             finally:

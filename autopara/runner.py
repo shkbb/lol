@@ -21,7 +21,10 @@ from .session import JoinError, Session
 
 log = logging.getLogger(__name__)
 
-SLEEP_GUARD_AHEAD = timedelta(hours=24)  # за скільки до пари вже не даємо комп'ютеру заснути
+SLEEP_GUARD_AHEAD = timedelta(hours=24)
+# Сторож вух: на парі стільки тиші — лагодимо; ще стільки після ремонту — кажемо студенту (один раз за пару).
+EARS_SILENT_REPAIR = timedelta(minutes=5)
+EARS_SILENT_ALERT = timedelta(minutes=3)  # за скільки до пари вже не даємо комп'ютеру заснути
 
 # Якщо до кінця пари лишилось менше — вже не заходимо.
 TOO_LATE = timedelta(minutes=5)
@@ -42,6 +45,7 @@ class Runner:
         assistant: Assistant | None = None,
         visited_file: Path | None = None,
         schedule_cache: Path | None = None,
+        ears_silence: Callable[[], float] | None = None,
     ):
         self.config = config
         self.assistant = assistant
@@ -58,6 +62,9 @@ class Runner:
         # Останній розклад із сайту — на диску: якщо сайт розкладу ляже (наживо: не відповідав DNS), а програму
         # саме перезапустили, вона однаково зайде на пари за збереженим розкладом.
         self.schedule_cache = schedule_cache
+        # Скільки секунд у звуці пари не було мови (сторож вух) — None, якщо вуха вимкнені.
+        self.ears_silence = ears_silence
+        self._ears: dict[str, dict] = {}  # пара → коли зайшли, коли лагодили, чи вже казали студенту
         self.finished: set[str] = self._load_visited()
         self.attempts: dict[str, int] = {}
         self.retry_at: dict[str, datetime] = {}
@@ -186,6 +193,7 @@ class Runner:
                 self._forget(key)
                 continue
             seen = self._look(key, session, now)
+            self._watch_ears(key, session, seen, now)
             if self.config.join.auto_leave and (reason := self._leave_reason(session, seen, now)):
                 self._leave(key, reason)
 
@@ -226,6 +234,32 @@ class Runner:
             self.assistant.on_chat(key, self.joiner.read_chat(session), now)
         return seen
 
+    def _watch_ears(self, key: str, session: Session, seen: Observation, now: datetime) -> None:
+        """Вуха не мають глухнути мовчки (наживо два дні пар пройшли без жодного звуку, і ніхто не знав).
+        Довго тиша, а в зустрічі люди — лагодимо звук сторінки; не допомогло — кажемо студенту один раз."""
+        if self.ears_silence is None:
+            return
+        state = self._ears.setdefault(key, {"joined": now, "repaired": None, "alerted": False})
+        silent = timedelta(seconds=self.ears_silence())
+        lonely = seen.participants is not None and seen.participants < 2
+        if silent < EARS_SILENT_REPAIR or lonely or now - state["joined"] < EARS_SILENT_REPAIR:
+            if state["alerted"] and silent < EARS_SILENT_REPAIR:
+                self.notify(f"👂 Знову чую «{session.title}».")
+            state.update(repaired=None, alerted=False)
+            return
+        minutes = int(silent.total_seconds() // 60)
+        if state["repaired"] is None:
+            state["repaired"] = now
+            log.warning("👂 На «%s» вже %d хв тиша — лагоджу звук сторінки", session.title, minutes)
+            repair = getattr(self.joiner, "repair_ears", None)
+            if repair is None or not repair(session):
+                state["repaired"] = now - EARS_SILENT_ALERT  # лагодити нічого (Zoom-клієнт) — одразу кажемо
+        elif not state["alerted"] and now - state["repaired"] >= EARS_SILENT_ALERT:
+            state["alerted"] = True
+            self.notify(
+                f"👂 На «{session.title}» вже {minutes} хв не чую жодного звуку. Або там справді тиша, або звук "
+                "до мене не доходить (полагодити сам не зміг). Глянь «екран».", urgent=True)
+
     def _leave_reason(self, session: Session, seen: Observation, now: datetime) -> str | None:
         if session.decider is not None:
             return session.decider.update(now, seen)
@@ -240,6 +274,7 @@ class Runner:
         self.notify(f"👋 Вийшов з «{session.title}»: {reason}", routine=True)
 
     def _forget(self, key: str) -> None:
+        self._ears.pop(key, None)
         session = self.active.pop(key, None)
         if session is not None and session.page is None and self.app_audio is not None:
             self.app_audio.stop()

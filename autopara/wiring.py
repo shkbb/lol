@@ -21,6 +21,7 @@ from .ears import (
     NullSink,
     PulseAppCapture,
     PulseRecorder,
+    VoiceMeter,
     WhisperTranscriber,
     available_ram_gb,
     find_cable,
@@ -50,6 +51,7 @@ class Stack:
     # Чи можна зараз уточнювати розшифровку (важка робота): за замовчуванням — коли немає пари; програма
     # (app.py) уточнює це розкладом — ще й коли найближча пара не скоро.
     refine_allowed: Callable[[], bool] = lambda: True
+    voice_meter: object | None = None  # ears.VoiceMeter, якщо вуха ввімкнені
 
 
 @contextmanager
@@ -109,6 +111,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             # Звук кожної пари ще й у файл — після пари розпізнаємо його вдруге, точніше (refine.py).
             lesson_audio = LessonAudio(config.data_dir / "audio", clock)
             queue.listeners.append(lesson_audio.feed)
+            stack.voice_meter = VoiceMeter()  # сторож вух: коли востаннє була мова (Runner._watch_ears)
+            queue.listeners.append(stack.voice_meter)
             stoppers.append(lesson_audio.close)
             stoppers += _audio_sources(config, queue, stack)
             ears = Ears(

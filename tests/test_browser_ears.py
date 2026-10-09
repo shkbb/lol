@@ -141,3 +141,32 @@ def test_tab_sound_is_resampled_without_aliasing(tmp_path):
     voice = spectrum[(freqs > 400) & (freqs < 480)].max()
     alias = spectrum[(freqs > 3800) & (freqs < 4200)].max()  # 16 − 12 = 4 кГц
     assert voice > 1000 * alias
+
+
+def test_ears_can_be_repaired_by_capturing_the_tab_again(tmp_path):
+    """Сторож вух: давно тиша — розбудити звук сторінки й захопити вкладку наново (звук знову йде)."""
+    from datetime import datetime, timedelta
+
+    from autopara.config import JoinSettings
+    from autopara.joiner import Joiner
+    from autopara.planner import Visit
+    from autopara.session import Session
+
+    stream = AudioQueue()
+    joiner = Joiner(JoinSettings(mute_sound=True), tmp_path, audio_tap=stream.feed_base64)
+    try:
+        page = joiner.browser.new_page()
+        page.route("https://meet.google.com/**", lambda route: route.fulfill(body=HIGH_PITCH, content_type="text/html"))
+        page.goto("https://meet.google.com/abc-defg-hij")
+        joiner._enable_ears(page)
+        page.wait_for_timeout(1500)
+        first = stream.read(10**9)
+        now = datetime.now()
+        session = Session(Visit("https://meet.google.com/abc-defg-hij", "meet", [], now, now + timedelta(hours=1)),
+                          now + timedelta(hours=1), page)
+        assert joiner.repair_ears(session)
+        page.wait_for_timeout(2500)
+        again = stream.read(10**9)
+    finally:
+        joiner.close()
+    assert len(first) > 16_000 and len(again) >= 16_000 * 2 * 2  # після ремонту звук іде далі

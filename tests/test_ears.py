@@ -232,12 +232,23 @@ def test_ears_flush_the_tail_when_the_class_ends():
 
 
 def test_audio_source_choice(monkeypatch):
+    # На будь-якій ОС — звук самої вкладки пари: наживо на Linux звук через PipeWire два дні мовчки не доходив.
     monkeypatch.setattr(ears, "pulse_available", lambda: None)
-    assert ears.pick_source("auto") == "pulse"  # Linux: звук самого браузера програми — так чути справжній Meet
-    monkeypatch.setattr(ears, "pulse_available", lambda: "немає pactl")
-    assert ears.pick_source("auto") == "browser"  # без системного звуку (Windows, macOS) — зі сторінки пари
+    assert ears.pick_source("auto") == "browser"
     assert ears.pick_source("browser") == "browser"
-    assert ears.pick_source("pulse") == "pulse"
+    assert ears.pick_source("pulse") == "pulse"  # запасний шлях — лише за явним вибором
+
+
+def test_voice_meter_notices_silence(monkeypatch):
+    clock = {"now": 100.0}
+    monkeypatch.setattr(ears, "monotonic", lambda: clock["now"])
+    meter = ears.VoiceMeter()
+    clock["now"] = 160.0
+    meter(tone(1, 5))  # тиша
+    assert meter.silent_for() == 60.0
+    meter(tone(1, 3000))  # мова
+    clock["now"] = 170.0
+    assert meter.silent_for() == 10.0
 
 
 ZOOM_JSON = """[

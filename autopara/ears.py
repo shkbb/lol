@@ -93,16 +93,25 @@ def whisper_available() -> str | None:
 def pick_source(setting: str) -> str:
     """"pulse" чи "browser" для налаштування [ears] source.
 
-    За замовчуванням на Linux — звук самого браузера програми через PipeWire/PulseAudio: так вуха чують
-    рівно те, що браузер грає, як би сторінка всередині не була влаштована (справжній Meet віддає збирачу
-    на сторінці тишу). У браузері програми відкрита лише пара, тож чужого туди не потрапляє.
-    Деінде (і якщо системного звуку немає) — зі сторінки пари.
+    За замовчуванням — звук самої вкладки пари (getDisplayMedia, ears_tap.js) на будь-якій ОС: він не залежить
+    від того, куди система чи сам Meet направили звук. Наживо на Linux звук браузера через віртуальний вихід
+    PipeWire два дні поспіль мовчки не доходив до вух. "pulse" лишається запасним шляхом за явним вибором.
     """
-    if setting == "browser":
-        return "browser"
-    if setting == "pulse":
-        return "pulse"
-    return "pulse" if pulse_available() is None else "browser"
+    return "pulse" if setting == "pulse" else "browser"
+
+
+class VoiceMeter:
+    """Сторож вух: коли востаннє в звуці пари була мова (будь-який гучний звук, не тиша)."""
+
+    def __init__(self):
+        self.last_voice = monotonic()
+
+    def __call__(self, pcm: bytes) -> None:
+        if loudness(pcm) >= SILENCE_RMS * 2:
+            self.last_voice = monotonic()
+
+    def silent_for(self) -> float:
+        return monotonic() - self.last_voice
 
 
 class AudioStream(Protocol):

@@ -356,6 +356,7 @@ def test_restart_does_not_rejoin_a_lesson_we_already_left(tmp_path):
     visited = tmp_path / "visited.json"
     runner, _, joiner = make_runner([make_lesson()])
     runner.visited_file = visited
+    runner.clock = lambda: at("10:00")  # пам'ять про пари — відносно «сьогодні», а не реальної дати запуску тестів
     runner.tick(at("09:28"))
     runner._leave(next(iter(runner.active)), "зустріч завершилась")
     again, _, joiner2 = make_runner([make_lesson()])
@@ -367,6 +368,7 @@ def test_restart_does_not_rejoin_a_lesson_we_already_left(tmp_path):
     # А якщо програму закрили посеред пари — після запуску заходимо знову.
     runner3, _, joiner3 = make_runner([make_lesson(start="11:10", end="12:30")])
     runner3.visited_file = tmp_path / "other.json"
+    runner3.clock = lambda: at("11:10")
     runner3.tick(at("11:08"))
     runner3.finish_all()
     runner4, _, joiner4 = make_runner([make_lesson(start="11:10", end="12:30")])
@@ -420,3 +422,41 @@ def test_joined_by_link_then_the_scheduled_lesson_takes_over_the_title():
     runner.tick(at("09:28"))  # пара з розкладу — та сама зустріч
     [session] = runner.active.values()
     assert session.title == "Бази даних" and joiner.joined == ["Тестовий вхід"]
+
+
+def test_deaf_ears_are_repaired_then_reported_once():
+    """Наживо два дні пар пройшли без жодного звуку — і ніхто не знав. Тепер: тиша при людях — ремонт, потім сказати."""
+    runner, _, joiner = make_runner([make_lesson()])
+    silence = {"seconds": 0.0}
+    runner.ears_silence = lambda: silence["seconds"]
+    repaired, told = [], []
+    joiner.repair_ears = lambda session: repaired.append(session) or True
+    runner.notify = lambda text, urgent=False, routine=False: routine or told.append(text)  # без «зайшов/вийшов»
+    joiner.seen = Observation(participants=12)
+    runner.tick(at("09:28"))
+    silence["seconds"] = 600
+    runner.tick(at("09:29"))
+    runner.tick(at("09:33"))  # лише зайшли — ще рано щось вирішувати
+    assert repaired == []
+    runner.tick(at("09:35"))
+    assert len(repaired) == 1 and told == []  # спершу лагодимо самі
+    runner.tick(at("09:37"))
+    assert told == []  # ще чекаємо, чи допоміг ремонт
+    runner.tick(at("09:39"))
+    runner.tick(at("09:45"))
+    assert len(told) == 1 and "не чую жодного звуку" in told[0] and len(repaired) == 1  # сказали один раз
+    silence["seconds"] = 5
+    runner.tick(at("09:46"))
+    assert told[-1].startswith("👂 Знову чую")
+
+
+def test_silence_alone_in_the_meeting_is_not_an_alarm():
+    runner, _, joiner = make_runner([make_lesson()])
+    runner.ears_silence = lambda: 900.0
+    told = []
+    joiner.repair_ears = lambda session: True
+    runner.notify = lambda text, urgent=False, routine=False: routine or told.append(text)
+    joiner.seen = Observation(participants=1)  # у зустрічі лише ми — тиша природна
+    for minute in (28, 35, 45, 55):
+        runner.tick(at(f"09:{minute}"))
+    assert told == []

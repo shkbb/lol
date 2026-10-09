@@ -28,8 +28,14 @@
     },
     // Найнадійніше: звук самої вкладки (як «поділитися вкладкою зі звуком»), — хоч би як сторінка його грала.
     // Браузер програми запущено так, що дозвіл дається без запитання. suppress — не грати в колонки («Без звуку»).
-    async captureTab(suppress) {
-      if (state.tab && state.tab.readyState === "live") return "уже";
+    async captureTab(suppress, again) {
+      if (state.tab && state.tab.readyState === "live" && !again) return "уже";
+      if (again) {  // сторож вух: звуку давно немає — захоплюємо вкладку наново
+        if (state.tab) state.tab.stop();
+        if (state.tabCtx) state.tabCtx.close().catch(() => {});
+        state.tab = null;
+        state.tabCtx = null;
+      }
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
           video: true, audio: true, preferCurrentTab: true, selfBrowserSurface: "include",
@@ -49,6 +55,18 @@
       } catch (e) {
         return `не вийшло: ${e.name}`;
       }
+    },
+    // Розбудити звук сторінки: програвачі, які браузер призупинив, і аудіоконтексти (сторож вух).
+    wake() {
+      let woken = 0;
+      for (const el of document.querySelectorAll("audio, video")) {
+        if (el.paused && (el.srcObject || el.src)) { el.play().catch(() => {}); woken += 1; }
+        if (el.muted && el.tagName === "AUDIO") { el.muted = false; woken += 1; }
+      }
+      for (const ctx of [state.ctx, state.tabCtx]) {
+        if (ctx && ctx.state === "suspended") { ctx.resume().catch(() => {}); woken += 1; }
+      }
+      return woken;
     },
     stats() {  // для журналу в autopara -v: звідки береться звук
       const now = Date.now();
