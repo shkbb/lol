@@ -21,11 +21,11 @@ if [ -z "$python" ]; then
   exit 1
 fi
 
-say "1/4 Окреме середовище Python (.venv)"
+say "1/5 Окреме середовище Python (.venv)"
 [ -d .venv ] || "$python" -m venv .venv
 .venv/bin/python -m pip install -q --upgrade pip
 
-say "2/4 autopara з розпізнаванням мови"
+say "2/5 autopara з розпізнаванням мови"
 # З відеокартою NVIDIA — ще й бібліотеки CUDA (~1,5 ГБ): розпізнавання на ній у рази швидше (див. autopara/accel.py).
 extras=$(.venv/bin/python -c "import sys; sys.path.insert(0, '.'); from autopara.accel import pip_extras; print(pip_extras())" 2>/dev/null || echo ears)
 [ "$extras" = "ears" ] || echo "Бачу відеокарту NVIDIA — розпізнаватиму на ній (докачаю бібліотеки CUDA, ~1,5 ГБ)."
@@ -34,11 +34,41 @@ if ! .venv/bin/python -m pip install -q -e ".[$extras]" && ! .venv/bin/python -m
   .venv/bin/python -m pip install -q -e .
 fi
 
-say "3/4 Браузер програми (у ньому вона заходить на пари; ~150 МБ)"
+say "3/5 Браузер програми (у ньому вона заходить на пари; ~150 МБ)"
 .venv/bin/python -m playwright install chromium --no-shell \
   || echo "Не вийшло — не страшно: програма завантажить браузер сама при першому запуску."
 
-say "4/4 Ярлик"
+say "4/5 Мозок програми — Ollama (сповіщення про оголошення, звіти після пар, відповіді бота)"
+# Мовні моделі (~4 ГБ) програма докачає сама, коли Ollama запрацює; без неї працюють вхід на пари, вуха й команди.
+if command -v ollama >/dev/null 2>&1; then
+  echo "Ollama вже є."
+elif [ ! -t 0 ]; then
+  echo "Встанови Ollama пізніше: https://ollama.com/download — мозок програма підключить сама."
+else
+  if [ "$(uname)" = "Darwin" ]; then
+    how="brew install ollama"
+    command -v brew >/dev/null 2>&1 || how=""
+  elif command -v pacman >/dev/null 2>&1; then
+    how="sudo pacman -S --needed ollama && sudo systemctl enable --now ollama"
+  else
+    how="curl -fsSL https://ollama.com/install.sh | sh"
+  fi
+  if [ -z "$how" ]; then
+    echo "Встанови Ollama з https://ollama.com/download (перетягни в «Програми» й запусти) — мозок програма підключить сама."
+  else
+    printf 'Встановити Ollama зараз? Виконаю: %s\n(може спитати пароль від комп'"'"'ютера) [Т/н] ' "$how"
+    read -r answer
+    case "$answer" in
+      [нНnN]*) echo "Пропускаю. Поставити можна будь-коли: https://ollama.com/download" ;;
+      *) sh -c "$how" || echo "Не вийшло — встанови пізніше з https://ollama.com/download, мозок підключиться сам." ;;
+    esac
+    if [ "$(uname)" = "Darwin" ] && command -v ollama >/dev/null 2>&1; then
+      brew services start ollama >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+say "5/5 Ярлик"
 app="$PWD/.venv/bin/autopara"
 if [ "$(uname)" = "Darwin" ]; then
   mkdir -p "$HOME/Applications"
