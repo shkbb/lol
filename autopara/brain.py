@@ -236,7 +236,7 @@ class OllamaBrain:
         try:
             tags = self.session.get(f"{self.url}/api/tags", timeout=5).json()
         except (requests.RequestException, ValueError):
-            return "Ollama не встановлена чи не запущена — ollama.com/download (на Arch: sudo pacman -S ollama)"
+            return "Ollama не встановлена чи не запущена — встанови з ollama.com/download (або запусти install ще раз)"
         names = {model.get("name") for model in tags.get("models", [])}
         if self.model not in names and f"{self.model}:latest" not in names:
             return f"модель {self.model} ще не завантажена — програма завантажить її сама під час запуску"
@@ -443,8 +443,9 @@ class ChatBrain:
         if self.big is None or not self.big_ready or not self.quiet():
             return False
         free = self.free_gb()
-        warm = self._big_used is not None
-        return free is None or warm or free + self.SMALL_GB >= self.need_gb
+        if free is None:
+            return False  # не знаємо, скільки вільно (macOS) — розумну модель не ризикуємо вантажити
+        return self._big_used is not None or free + self.SMALL_GB >= self.need_gb
 
     def _evict_big(self) -> None:
         if self._big_used is None or self.big is None:
@@ -466,7 +467,9 @@ class ChatBrain:
         free = self.free_gb()
         for _ in range(10):
             free = self.free_gb()
-            if free is None or free >= self.need_gb:
+            if free is None:
+                return False
+            if free >= self.need_gb:
                 return True
             self.wait(1)
         log.info("Розумний режим: вільно лише %.1f ГБ (треба %.1f) — пише швидка модель", free, self.need_gb)

@@ -244,6 +244,8 @@ def test_chat_questions_go_to_the_big_model_only_when_free():
     quiet[0], free[0] = True, 2.0  # пам'яті мало навіть без швидкої
     assert not chat.will_think_long() and chat.summarize("і", "т") == "швидка"
     assert chat.summarize("і", "т", images=[b"jpg"]) == "швидка"  # фото — швидка (вона бачить картинки)
+    free[0] = None  # macOS: скільки вільно — невідомо, тож розумну не вантажимо
+    assert not chat.will_think_long() and chat.summarize("і", "т") == "швидка"
 
 
 def test_quick_model_waits_while_the_smart_one_answers():
