@@ -36,6 +36,7 @@ from .media import AudioBuffer, Clipper, FrameBuffer
 from . import notes
 from .refine import LessonAudio, Refiner
 from .helper import Helper, Library, subject_terms
+from .weekly import WeeklyDigest
 from .report import Reporter
 from .telegram import Notifier, TelegramBot
 
@@ -349,6 +350,17 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         return subject_terms([doc for doc in helper.library.docs if doc.subject == subject])
 
     assistant.terms_for = terms_for
+
+    if bot is not None and config.telegram.weekly:
+        def upcoming(now: datetime) -> str:
+            try:
+                return stack.schedule_text(now, days=6)
+            except TypeError:  # розклад без параметра днів
+                return stack.schedule_text(now)
+
+        weekly = WeeklyDigest(helper.library, notifier, clock, upcoming, config.data_dir / "weekly.json")
+        weekly.start()
+        stoppers.append(weekly.stop)
 
     # Сторож: мовчазні проблеми (диск, Ollama, застрягле уточнення, старий розклад) — у Telegram, з порадою.
     checks = [health.disk_check(config.data_dir), health.refine_check(config.data_dir / "audio"),
