@@ -1,7 +1,18 @@
 import plistlib
 import types
 
+import pytest
+
 from autopara import autostart
+
+
+@pytest.fixture(autouse=True)
+def no_real_systemctl(monkeypatch):
+    """Тести ніколи не кличуть справжній systemctl; за замовчуванням — система без systemd-сесії."""
+    calls = []
+    monkeypatch.setattr(autostart, "_systemctl", lambda *args: calls.append(args) or type("R", (), {"stdout": "", "returncode": 0})())
+    monkeypatch.setattr(autostart, "systemd_session", lambda: False)
+    return calls
 
 
 def test_linux_autostart_entry(monkeypatch, tmp_path):
@@ -88,3 +99,24 @@ def test_old_autostart_entry_is_rewritten_with_safe_command(monkeypatch, tmp_pat
     assert autostart.refresh()
     assert "Exec=/home/me/autopara/.venv/bin/python -P -m autopara app --hidden" in entry.read_text(encoding="utf-8")
     assert not autostart.refresh()  # уже як треба
+
+
+def test_with_a_systemd_session_autostart_is_a_service_that_restarts_itself(monkeypatch, tmp_path, no_real_systemctl):
+    """GNOME/KDE: служба autopara-app.service — стартує з сесією й сама піднімає програму, якщо та впала;
+    старий запис в ~/.config/autostart прибирається (двічі не стартуємо)."""
+    monkeypatch.setattr(autostart.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(autostart.sys, "executable", "/home/me/autopara/.venv/bin/python")
+    monkeypatch.setattr(autostart, "systemd_session", lambda: True)
+    old = tmp_path / "autostart" / "autopara.desktop"
+    old.parent.mkdir(parents=True)
+    old.write_text("[Desktop Entry]\nExec=/home/me/autopara/.venv/bin/python -P -m autopara app --hidden\n", encoding="utf-8")
+    assert autostart.refresh()  # старий автозапуск → служба
+    unit = (tmp_path / "systemd" / "user" / "autopara-app.service").read_text(encoding="utf-8")
+    assert "ExecStart=/home/me/autopara/.venv/bin/python -P -m autopara app --hidden" in unit
+    assert "Restart=on-failure" in unit and "WantedBy=graphical-session.target" in unit
+    assert ("enable", "autopara-app.service") in no_real_systemctl and not old.exists()
+    assert autostart.status() == {"supported": True, "enabled": True, "note": ""} and autostart.managed_service()
+    assert not autostart.refresh()  # уже як треба
+    assert not autostart.set_enabled(False)["enabled"]
+    assert ("disable", "autopara-app.service") in no_real_systemctl and not autostart.managed_service()

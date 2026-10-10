@@ -21,3 +21,12 @@ def make_lesson(day=date(2026, 10, 5), start="09:30", end="10:50", subject="Ба
 @pytest.fixture
 def lesson():
     return make_lesson
+
+
+@pytest.fixture(autouse=True)
+def _no_real_systemd(monkeypatch):
+    """Жоден тест не кличе справжній systemctl (служба автозапуску) — навіть якщо на цьому комп'ютері є systemd-сесія."""
+    from autopara import autostart
+
+    monkeypatch.setattr(autostart, "_systemctl", lambda *args: type("R", (), {"stdout": "", "returncode": 0})())
+    monkeypatch.setattr(autostart, "systemd_session", lambda: False)

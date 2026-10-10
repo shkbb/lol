@@ -255,13 +255,41 @@ class Updater:
         return self.status
 
 
+class _Service:
+    """Програма, запущена службою systemd (autopara-app.service): «живий» — поки служба не впала."""
+
+    def poll(self) -> int | None:
+        from .autostart import _systemctl
+
+        state = _systemctl("is-active", "autopara-app.service").stdout.strip()
+        return 1 if state in ("failed", "inactive") else None
+
+    def terminate(self) -> None:
+        from .autostart import _systemctl
+
+        _systemctl("stop", "autopara-app.service")
+
+
+def start_app():
+    """Запустити програму так, як її запускає автозапуск: службою (тоді вона й надалі перезапускатиметься сама,
+    якщо впаде) або окремим процесом."""
+    from .autostart import _systemctl, managed_service
+
+    if managed_service():
+        try:
+            if _systemctl("start", "autopara-app.service").returncode == 0:
+                return _Service()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return detached([sys.executable, "-P", "-m", "autopara", "app", "--hidden"])
+
+
 def finish(wait_pid: int, version: str, data_dir: Path, install: Path, start_timeout: float = 120) -> int:
     """Окремий процес: стара копія вийшла → запустити нову → переконатися, що стартувала, інакше відкотити."""
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline and _alive(wait_pid):
         time.sleep(1)
-    app = [sys.executable, "-P", "-m", "autopara", "app", "--hidden"]
-    child = detached(app)
+    child = start_app()
     health = data_dir / HEALTH
     deadline = time.monotonic() + start_timeout
     while time.monotonic() < deadline:
@@ -280,7 +308,7 @@ def finish(wait_pid: int, version: str, data_dir: Path, install: Path, start_tim
     if backup.is_dir():
         restore(install, backup)
     (data_dir / DONE).write_text(json.dumps({"failed": version}, ensure_ascii=False), encoding="utf-8")
-    detached(app)
+    start_app()  # попередня версія — так само, як запускається завжди
     return 1
 
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterator
 
-from . import accel
+from . import accel, health
 from .assistant import Assistant
 from .brain import BrainConnector, BrainError, BrainMemoryGuard, BrainWorker, ChatBrain, OllamaBrain
 from .config import Config
@@ -332,6 +332,15 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     helper.about = about_me
     stack.helper = helper
+
+    # Сторож: мовчазні проблеми (диск, Ollama, застрягле уточнення, старий розклад) — у Telegram, з порадою.
+    checks = [health.disk_check(config.data_dir), health.refine_check(config.data_dir / "audio"),
+              health.schedule_check(config.data_dir / "schedule-cache.json")]
+    if brain is not None:
+        checks.append(health.ollama_check(brain.reachable))
+    guard_health = health.Health(notifier, checks)
+    guard_health.start()
+    stoppers.append(guard_health.stop)
 
     if worker:
 
