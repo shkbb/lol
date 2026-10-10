@@ -76,8 +76,8 @@ def latest(session: requests.Session | None = None) -> Release | None:
     return Release(tag.lstrip("vV"), url, str(data.get("body") or "")[:1500])
 
 
-def is_newer(release: Release, current: str = __version__) -> bool:
-    return parse_version(release.version) > parse_version(current)
+def is_newer(release: Release, current: str | None = None) -> bool:
+    return parse_version(release.version) > parse_version(current or __version__)
 
 
 def download(release: Release, folder: Path, session: requests.Session | None = None) -> Path:
@@ -248,7 +248,7 @@ class Updater:
         (self.data_dir / DONE).write_text(json.dumps({"from": __version__, "to": release.version, "notes": release.notes},
                                                      ensure_ascii=False), encoding="utf-8")
         (self.data_dir / HEALTH).unlink(missing_ok=True)
-        detached([sys.executable, "-m", "autopara.updater", "finish", "--wait", str(os.getpid()),
+        detached([sys.executable, "-P", "-m", "autopara.updater", "finish", "--wait", str(os.getpid()),
                   "--version", release.version, "--data", str(self.data_dir), "--install", str(self.install)])
         self.status = f"оновлююсь до {release.version}"
         self.quit_app()
@@ -260,7 +260,7 @@ def finish(wait_pid: int, version: str, data_dir: Path, install: Path, start_tim
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline and _alive(wait_pid):
         time.sleep(1)
-    app = [sys.executable, "-m", "autopara", "app", "--hidden"]
+    app = [sys.executable, "-P", "-m", "autopara", "app", "--hidden"]
     child = detached(app)
     health = data_dir / HEALTH
     deadline = time.monotonic() + start_timeout

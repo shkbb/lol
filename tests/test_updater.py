@@ -122,7 +122,7 @@ def test_update_waits_for_a_free_moment_then_installs_and_restarts(tmp_path, mon
     up.data_dir.mkdir(parents=True)
     assert up.step() == "оновлююсь до 0.2.0"
     assert (install / "autopara" / "new_module.py").exists() and quits == [True]
-    assert launched[0] == ["pip"] and launched[1][:4] == [sys.executable, "-m", "autopara.updater", "finish"]
+    assert launched[0] == ["pip"] and launched[1][:5] == [sys.executable, "-P", "-m", "autopara.updater", "finish"]
     assert "Вуха не глухнуть" in take_done(up.data_dir) and take_done(up.data_dir) == ""  # сказати лише раз
 
 

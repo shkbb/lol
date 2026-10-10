@@ -21,7 +21,9 @@ def command() -> list[str]:
     python = Path(sys.executable)
     if sys.platform == "win32" and python.with_name("pythonw.exe").exists():
         python = python.with_name("pythonw.exe")  # без вікна консолі
-    return [str(python), "-m", "autopara", "app", "--hidden"]
+    # -P: не брати поточну теку в sys.path. Автозапуск стартує з домашньої теки, а там лежить тека «autopara» з
+    # програмою — і Python брав її за пакет замість коду (нова версія на старті падала: немає __version__).
+    return [str(python), "-P", "-m", "autopara", "app", "--hidden"]
 
 
 def _config_home() -> Path:
@@ -112,3 +114,20 @@ def set_enabled(enabled: bool) -> dict:
         else:
             path.unlink(missing_ok=True)
     return status()
+
+
+def refresh() -> bool:
+    """Автозапуск увімкнений, але записаний старою версією (інша команда) — переписати. True — переписали."""
+    try:
+        if sys.platform not in ("win32", "darwin") and not systemd_unit().exists():
+            path = desktop_file()
+            if path.exists():
+                wanted = f"Exec={' '.join(_desktop_quote(arg) for arg in command())}"
+                if wanted not in path.read_text(encoding="utf-8").splitlines():
+                    set_enabled(True)
+                    return True
+        elif status().get("enabled"):
+            set_enabled(True)  # Windows і macOS: запис дешевий, а команда могла змінитись
+    except OSError:
+        return False
+    return False

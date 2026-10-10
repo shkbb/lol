@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from . import autostart, browser_setup
+from . import autostart as autostart_module
 from .checks import run_checks
 from .config import UNIVERSITIES, Config, ConfigError, config_to_dict, parse_config, save_config, user_config_dir
 from .ears import whisper_available
@@ -1004,6 +1005,8 @@ class Program:
         self.lock = write_lock(self.server.port, self.server.token)
         browser_setup.prepare_in_background()  # якщо браузер програми ще не завантажено — докачати, поки налаштовують
         self.updater.start()  # нові версії з GitHub — самі (крім копії з git)
+        if autostart_module.refresh():
+            log.info("Автозапуск оновлено під нову версію програми")
         if autostart and configured(self.config):
             threading.Thread(target=_autostart, args=(self.controller,), daemon=True).start()
         elif not configured(self.config):

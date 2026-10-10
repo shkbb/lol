@@ -154,7 +154,7 @@ class Refiner:
         self._waiting_logged = ""
 
     def _worker_command(self, job: Path, beam: int, hint: str) -> list[str]:
-        return [sys.executable, "-m", "autopara.refine_worker", str(job), "--model", self.model,
+        return [sys.executable, "-P", "-m", "autopara.refine_worker", str(job), "--model", self.model,
                 "--language", self.language, "--beam", str(beam), "--hint", hint, "--device", self.device]
 
     def start(self) -> None:
