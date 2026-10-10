@@ -257,3 +257,11 @@ def test_group_search_for_the_ui(site):
     requests_made = len(site.requests)
     client.search_groups("іпз")
     assert len(site.requests) == requests_made  # список груп кешується
+
+
+def test_name_matches_needs_surname_and_name_in_any_order():
+    from autopara.rozklad import name_matches
+
+    assert name_matches("Ляшко Денис Іванович", "ляшко денис") and name_matches("Ляшко Денис Іванович", "Денис Ляшко")
+    assert not name_matches("Ляшко Денис Іванович", "Ляшко")  # одне прізвище — замало
+    assert not name_matches("Ляшко Дмитро Іванович", "Ляшко Денис")

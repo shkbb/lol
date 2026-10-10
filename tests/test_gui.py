@@ -325,3 +325,31 @@ def test_login_opens_browser_inside_the_wizard_and_returns(running_app, qt):
     window._login_seen = True
     window.refresh()
     assert window.current_key() == "settings"
+
+
+def test_wizard_finds_the_student_by_name_alone(qt, tmp_path):
+    """ДУІКТ: досить прізвища й імені — група, курс, власний розклад і ім'я для сповіщень заповнюються самі."""
+    from autopara.rozklad import Target
+
+    class People:
+        def all_groups(self):
+            return []
+
+        def find_people(self, name):
+            assert name == "Ляшко Денис"
+            return [Target(2, 3, 77, group_name="ТЦР-32", faculty_name="ФІТ", student_id=5, student_name="Ляшко Денис Іванович")]
+
+    controller = Controller(Config(), tmp_path / "config.toml")
+    server = AppServer(controller)
+    server.autostart = FakeAutostart()
+    server.sources["duikt"] = People()
+    window, model = window_for(server, qt)
+    group = window.wizard.stack.widget(0).findChild(panels.GroupPanel)
+    assert group.me_box.isVisibleTo(group)  # ДУІКТ — пошук за ПІБ є
+    group.me.setText("Ляшко Денис")
+    group._find_me()
+    wait_until(lambda: model.get("schedule.student") == "Ляшко Денис Іванович")
+    assert (model.get("schedule.group"), model.get("schedule.course"), model.get("schedule.group_id")) == ("ТЦР-32", 3, 77)
+    assert model.get("me.name") == "Ляшко Денис" and "✓ Знайдено: Ляшко Денис Іванович, ТЦР-32, 3 курс" in group.state.text()
+    group._pick_university("kpi")
+    assert not group.me_box.isVisibleTo(group)  # КПІ студентів за ПІБ не віддає — лише група

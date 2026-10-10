@@ -756,6 +756,19 @@ def api_students(server: AppServer, query: dict, body: dict):
     return 200, {"students": [student.name for student in students]}
 
 
+def api_find_me(server: AppServer, query: dict, body: dict):
+    """ДУІКТ: знайти студента за прізвищем та ім'ям у всіх групах (~1 хв) — група, курс і власний розклад одразу."""
+    name = (query.get("name") or "").strip()
+    if len(name.split()) < 2:
+        return 400, {"error": "напиши прізвище та ім'я"}
+    found = server.source_for("duikt").find_people(name)
+    return 200, {"people": [
+        {"student": person.student_name, "group": person.group_name, "faculty": person.faculty_name,
+         "course": person.course or None, "faculty_id": person.faculty_id or None, "group_id": person.group_id or None}
+        for person in found
+    ]}
+
+
 def api_lessons(server: AppServer, query: dict, body: dict):
     config = server.controller.config
     source = make_source(config) if config.schedule.base_url else server.source_for(config.schedule.university)
@@ -889,6 +902,7 @@ ROUTES = {
     ("POST", "/api/import"): api_import,
     ("GET", "/api/groups"): api_groups,
     ("GET", "/api/students"): api_students,
+    ("GET", "/api/find-me"): api_find_me,
     ("GET", "/api/lessons"): api_lessons,
     ("POST", "/api/start"): api_command("start"),
     ("POST", "/api/stop"): api_command("user_stop"),

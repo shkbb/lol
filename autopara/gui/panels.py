@@ -73,6 +73,19 @@ class GroupPanel(QWidget):
         row.addStretch(1)
         layout.addLayout(row)
 
+        # ДУІКТ: досить прізвища й імені — програма сама знайде групу, курс і твій розклад (див. api_find_me).
+        self.me = QLineEdit(model.get("schedule.student") or model.get("me.name") or "")
+        self.me.setPlaceholderText("Прізвище та ім'я, напр. Ляшко Денис")
+        self.me.returnPressed.connect(self._find_me)
+        self.me_button = w.button("Знайти мене", "primary", self._find_me)
+        self.me_box = QWidget()
+        me_layout = QVBoxLayout(self.me_box)
+        me_layout.setContentsMargins(0, 0, 0, 0)
+        me_layout.addWidget(w.field("Знайди себе в розкладі", self.me,
+                                    "Програма сама знайде твою групу, курс і розклад з урахуванням підгруп (~1 хв)."))
+        me_layout.addLayout(w.hbox(self.me_button, "stretch"))
+        layout.addWidget(self.me_box)
+
         self.search = QLineEdit(model.get("schedule.group") or "")
         self.search.setClearButtonEnabled(True)
         self.search.textEdited.connect(self._typed)
@@ -82,7 +95,8 @@ class GroupPanel(QWidget):
         self.results.hide()
         self.results.itemClicked.connect(self._picked)
         self.state = w.label("", "muted")
-        layout.addWidget(w.field("Група", self.search))
+        self.group_field = w.field("Група", self.search)
+        layout.addWidget(self.group_field)
         layout.addWidget(self.results)
         layout.addWidget(self.state)
         self._timer = QTimer(self)
@@ -113,6 +127,52 @@ class GroupPanel(QWidget):
 
     def _university(self) -> str:
         return self.model.get("schedule.university") or "duikt"
+
+    def _find_me(self) -> None:
+        name = " ".join(self.me.text().split())
+        if len(name.split()) < 2:
+            self.state.setText("Напиши прізвище та ім'я")
+            return
+        self.me_button.setEnabled(False)
+        self.state.setText("Шукаю тебе в розкладі ДУІКТ… (~1 хв, усі групи)")
+        self.bridge.call_api(app_module.api_find_me, {"name": name}, ok=self._found_me, fail=self._not_found_me)
+
+    def _found_me(self, data: dict) -> None:
+        self.me_button.setEnabled(True)
+        people = data.get("people") or []
+        if not people:
+            self.state.setText("Не знайшов — перевір прізвище та ім'я або вибери групу нижче")
+            return
+        if len(people) == 1:
+            self._choose_me(people[0])
+            return
+        self.results.clear()
+        for person in people:
+            item = QListWidgetItem(f"{person['student']}    {person['group']} · {person.get('course') or '?'} курс")
+            item.setData(256, {"person": person})
+            self.results.addItem(item)
+        self.results.show()
+        self.state.setText("Знайшов кількох — вибери себе")
+
+    def _not_found_me(self, message: str) -> None:
+        self.me_button.setEnabled(True)
+        self.state.setText(f"Не вдалося знайти: {message}")
+
+    def _choose_me(self, person: dict) -> None:
+        """Знайшли себе: група, курс, власний розклад і ім'я для сповіщень («тебе кличуть») — самі."""
+        self.model.set("schedule.group", person["group"])
+        self.model.set("schedule.faculty_id", person.get("faculty_id"))
+        self.model.set("schedule.course", person.get("course"))
+        self.model.set("schedule.group_id", person.get("group_id"))
+        self.model.set("schedule.group_uid", None)
+        self.model.set("schedule.student", person["student"])
+        if not (self.model.get("me.name") or "").strip():
+            self.model.set("me.name", " ".join(person["student"].split()[:2]))  # Прізвище Ім'я
+        self.search.setText(person["group"])
+        self.results.hide()
+        self._describe()
+        self.model.save_now()
+        self.chosen.emit()
 
     def _placeholder(self) -> None:
         kpi = self._university() == "kpi"
@@ -176,6 +236,9 @@ class GroupPanel(QWidget):
         group = item.data(256)
         if not group:
             return
+        if "person" in group:
+            self._choose_me(group["person"])
+            return
         self.model.set("schedule.group", group["name"])
         self.model.set("schedule.faculty_id", group.get("faculty_id"))
         self.model.set("schedule.course", group.get("course"))
@@ -191,8 +254,11 @@ class GroupPanel(QWidget):
     def _describe(self) -> None:
         group = self.model.get("schedule.group")
         course = self.model.get("schedule.course")
+        student = self.model.get("schedule.student")
+        self.me_box.setVisible(self._university() == "duikt")  # КПІ студентів за ПІБ не віддає — лише група
         if group:
-            self.state.setText(f"✓ Обрано: {group}" + (f", {course} курс" if course else ""))
+            self.state.setText(("✓ Знайдено: " + student + ", " if student else "✓ Обрано: ") + group
+                               + (f", {course} курс" if course else ""))
         else:
             self.state.setText("Групу ще не обрано")
 

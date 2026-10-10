@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, time, tzinfo
 from time import sleep
@@ -244,6 +245,14 @@ def find_student(students: list[Option], query: str) -> Option:
     raise RozkladError(f"«{query}» підходить кільком студентам: {names} — уточни ім'я")
 
 
+def name_matches(student_name: str, query: str) -> bool:
+    """«Ляшко Денис» чи «денис ляшко» підходить до «Ляшко Денис Іванович»: кожне слово запиту — початок якогось слова
+    ПІБ. Щонайменше два слова — одне прізвище знайшло б пів університету."""
+    wanted = _name_words(query)
+    words = _name_words(student_name)
+    return len(wanted) >= 2 and all(any(word.startswith(q) for word in words) for q in wanted)
+
+
 # --- HTTP-клієнт -------------------------------------------------------------
 
 
@@ -328,6 +337,30 @@ class RozkladClient:
                     if c != first and (found := search(fac, c)):
                         return found
         raise RozkladError(f"групу «{name}» на сайті розкладу не знайдено")
+
+    def find_people(self, name: str, workers: int = 4) -> list[Target]:
+        """Студенти з таким ПІБ у всіх групах ДУІКТ — щоб у майстрі не вибирати факультет, курс і групу: досить
+        прізвища й імені. Списки груп публічні; проходимо всі (~250 груп) по кілька запитів разом, ~1 хв."""
+        groups = self.all_groups()
+        local = threading.local()
+
+        def scan(group: Target) -> list[Target]:
+            client = getattr(local, "client", None)
+            if client is None:  # своя сесія й свій токен форм у кожному потоці
+                client = local.client = RozkladClient(self.base_url, timeout=self.timeout)
+            try:
+                students = client.students(group.faculty_id, group.course, group.group_id)
+            except RozkladError:
+                return []
+            return [Target(group.faculty_id, group.course, group.group_id, group_name=group.group_name,
+                           faculty_name=group.faculty_name, student_id=student.id, student_name=student.name)
+                    for student in students if name_matches(student.name, name)]
+
+        found: list[Target] = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for matches in pool.map(scan, groups):
+                found += matches
+        return found
 
     def resolve_student(self, target: Target, student: str) -> Target:
         found = find_student(self.students(target.faculty_id, target.course, target.group_id), student)
