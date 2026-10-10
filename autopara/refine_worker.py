@@ -53,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s уточнення: %(message)s", datefmt="%H:%M:%S")
     be_gentle()
+    from .winpaths import ascii_model_cache
+
+    ascii_model_cache()  # той самий кеш моделей, що й у програми (Windows і кирилиця в імені користувача)
 
     from .ears import WhisperTranscriber
 

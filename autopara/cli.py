@@ -402,6 +402,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from .winpaths import ascii_model_cache
+
+    ascii_model_cache()  # Windows із кирилицею в імені користувача — моделі в латинській теці
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)

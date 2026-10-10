@@ -13,7 +13,7 @@ function Test-Python($exe, [string[]]$prefix) {
 
 function Find-Python {
     if (Get-Command py -ErrorAction SilentlyContinue) {
-        foreach ($version in "-3.13", "-3.12", "-3.11") {
+        foreach ($version in "-3.13", "-3.12", "-3.11", "-3.14") {
             if (Test-Python "py" @($version)) { return @("py", $version) }
         }
     }
