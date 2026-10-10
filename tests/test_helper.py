@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from autopara import notes
-from autopara.helper import Helper, Library, sections, sound, tokens
+from autopara.helper import Helper, Library, next_lesson, sections, sound, tokens
 
 
 def record(root, title, start, teacher, summary, lines, chat=()):
@@ -113,3 +113,33 @@ def test_without_language_model_data_answers_still_work(tmp_path):
     assert helper.quick("Що задали з безпеки?", NOW).startswith("📝")
     assert helper.quick("Поясни, що таке REST API", NOW) is None  # тут потрібна модель
     assert helper.answer("Поясни, що таке REST API", NOW).startswith("Мовна модель ще не готова")
+
+
+def test_any_conversation_knows_schedule_and_recent_lessons_but_does_not_dump_records(tmp_path):
+    prompts = []
+    helper = Helper(library(tmp_path), lambda system, text: prompts.append((system, text)) or "Встигнеш: пара о 08:00.",
+                    schedule=lambda now: "📅 завтра:\n  08:00–09:20 Архітектура ПЗ (Лк)")
+    assert helper.route("Чи встигну в магазин перед наступною парою?") == "search"  # це розмова, не розклад
+    assert helper.answer("Чи встигну в магазин перед наступною парою?", NOW) == "Встигнеш: пара о 08:00."
+    system, text = prompts[-1]
+    assert "про будь-що" in system and "лише українською" in system
+    assert "08:00–09:20 Архітектура ПЗ" in text and "09.10 12:40 Безпека розробки" in text  # розклад і останні пари
+    for chat in ("сьогодні був важкий день", "Допоможи написати лист викладачу, що я захворів", "Про що ця пісня?"):
+        assert not helper.answer(chat, NOW).startswith(("📖", "📝"))  # не вивалює підсумки пар
+        assert "Уривки з записів" not in prompts[-1][1]
+
+
+def test_russian_answer_is_never_sent(tmp_path):
+    replies = iter(["Привет, всё хорошо, что делаешь?", "Привіт, усе добре, що робиш?"])
+    helper = Helper(library(tmp_path), lambda system, text: next(replies))
+    assert helper.answer("Привіт! Як справи?", NOW) == "Привіт, усе добре, що робиш?"
+
+
+def test_next_lesson_is_said_in_words_and_requests_are_not_lookups(tmp_path):
+    table = "📅 сьогодні пар більше немає\n📅 пн 12.10:\n  08:00–09:20 Архітектура ПЗ (Лк)\n  09:30–10:50 Бази даних (Пз)"
+    assert next_lesson(table, NOW) == "понеділок 12.10 (через 3 дн.) о 08:00 — Архітектура ПЗ (Лк)"
+    asked = []
+    helper = Helper(library(tmp_path), lambda system, text: asked.append(text) or "Шановна …", schedule=lambda now: table)
+    letter = helper.answer("Допоможи написати лист викладачу з баз даних, що я захворів", NOW)
+    assert letter == "Шановна …" and "викладач Мельник О.В." in asked[-1]  # пише лист, знаючи викладача
+    assert "Найближча пара: понеділок 12.10 (через 3 дн.) о 08:00" in asked[-1]

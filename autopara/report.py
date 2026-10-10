@@ -17,13 +17,14 @@ from typing import Callable
 from . import notes
 from .assistant import CHUNK_CHARS, LessonRecord
 from .brain import BrainError
+from .lang import UKRAINIAN_ONLY, ukrainian
 
 log = logging.getLogger(__name__)
 
 CHUNK_PROMPT = (
     "Ти конспектуєш онлайн-пару для студента, якого на ній не було. Тобі дають уривок автоматичної "
     "розшифровки (можливі помилки розпізнавання). Випиши 2–5 коротких пунктів українською: що пояснювали, "
-    "що робили, і окремо — будь-які завдання, дедлайни, оголошення. Без вступу."
+    "що робили, і окремо — будь-які завдання, дедлайни, оголошення. Без вступу. " + UKRAINIAN_ONLY
 )
 QUESTION_PROMPT = (
     "Ти — autopara, помічник студента: сам ходить за нього на онлайн-пари, слухає їх і пише йому в Telegram. "
@@ -37,7 +38,8 @@ FINAL_PROMPT = (
     "Ти складаєш короткий звіт про пару для студента, якого на ній не було. Тобі дають конспект пари "
     "частинами і, можливо, повідомлення з чату. Напиши українською, до 150 слів, рівно в такому форматі:\n"
     "Про що: …\nЩо робили: …\nЗавдання й дедлайни: … (або «не було»)\nВажливе: … (або «нічого»)\n"
-    "Лише те, що справді казали. Без заповнювачів у дужках ([дата], [ім'я]): чого не казали — просто не згадуй."
+    "Лише те, що справді казали. Без заповнювачів у дужках ([дата], [ім'я]): чого не казали — просто не згадуй. "
+    + UKRAINIAN_ONLY
 )
 
 
@@ -103,7 +105,8 @@ class Reporter:
         if self.brain is not None:
             for piece in _pieces([text for _, text in refined], CHUNK_CHARS):
                 try:
-                    parts.append(self.brain.summarize(CHUNK_PROMPT, piece))
+                    if note := ukrainian(self.brain.summarize, CHUNK_PROMPT, piece):
+                        parts.append(note)
                 except BrainError as e:
                     log.warning("Не вдалося законспектувати шматок пари: %s", e)
         summary = self._compose(parts, record)
@@ -116,9 +119,12 @@ class Reporter:
 
     def _summarize_chunk(self, report_id: str, text: str) -> None:
         try:
-            note = self.brain.summarize(CHUNK_PROMPT, text)
+            note = ukrainian(self.brain.summarize, CHUNK_PROMPT, text)
         except BrainError as e:
             log.warning("Не вдалося законспектувати шматок пари: %s", e)
+            return
+        if note is None:
+            log.warning("Конспект шматка пари вийшов російською — пропускаю")
             return
         with self._lock:
             self._notes.setdefault(report_id, []).append(note)
@@ -153,7 +159,8 @@ class Reporter:
         if others:
             material += "\n\nЧат:\n" + "\n".join(others[-40:])
         try:
-            return self.brain.summarize(FINAL_PROMPT, material)
+            summary = ukrainian(self.brain.summarize, FINAL_PROMPT, material)
+            return summary if summary is not None else "\n".join(parts)
         except BrainError as e:
             log.warning("Не вдалося скласти звіт: %s", e)
             return "\n".join(parts)

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import notes
+from .lang import UKRAINIAN_ONLY, ukrainian
 
 log = logging.getLogger(__name__)
 
@@ -45,32 +46,48 @@ CHUNK_CHARS = 600
 SCHEDULE_RE = re.compile(r"розклад|наступн\w* пар|котр\w* (пар|почина|буде)|коли (буде|почина|наступн)|які (в мене |у мене )?пари|"
                          r"скільки (в мене |у мене )?пар|що (в мене |у мене )?(завтра|сьогодні|післязавтра|в понеділ|у вівтор|в серед|"
                          r"в четвер|в п'ятниц)", re.I)
+DIRECT_RE = re.compile(r"\W*(а\s+)?(яка|які|який|коли|котр|о котрій|що (в|у) мене|скільки|розклад|наступн|покажи|дай|кинь|завтра|сьогодні|в понеділ|у вівтор)", re.I)
+EXAM_RE = re.compile(r"контрольн|модульн|залік|екзамен|іспит", re.I)  # «коли контрольна» — розклад цього не знає
 NOW_RE = re.compile(r"\b(зараз|наразі|щойно)\b|ти на парі|що відбувається|скільки (людей|учасник)", re.I)
-TASKS_RE = re.compile(r"задал|завдан|дедлайн|здат|домашк|\bлаб|лаборатор|контрольн|модульн|курсов|до якого|термін", re.I)
-LESSON_RE = re.compile(r"(останн|минул|попередн)\w*\s+пар|вчора|позавчора|сьогодні|на парі з|що було|про що (була|були|йшлося|говорили)|"
-                       r"\d\d?\.\d\d|" + "|".join(WEEKDAYS), re.I)
+# «Що задали», «які дедлайни», «які лаби захистити» — але не «допоможи з завданням з Java» (це прохання, а не питання про записи).
+TASKS_RE = re.compile(r"задал|задав|дедлайн|коли здава|до якого (числа|дня|терміну)|термін\w* здач|"
+                      r"що (ще )?(треба|потрібно|маю|мені) (здати|зробити|захистити|підготувати|доробити)|"
+                      r"як(і|ий|а|е) (в мене |у мене |ще )*(завдання|лаб\w*|домашк\w*|практичн\w*|борг\w*)|домашн\w* завдан|"
+                      r"що (на|по) домашк", re.I)
+# «Що було / про що / що робили» — лише разом із тим, про яку пару питають (інакше «про що ця пісня?» — звичайна розмова).
+LESSON_ASK_RE = re.compile(r"що було|про що|що (там )?(робили|проходили|розповідал\w*|пояснювал\w*|вивчали|розбирали)|"
+                           r"як пройшл\w*|підсумок|конспект|звіт", re.I)
+LESSON_REF_RE = re.compile(r"\bпар(а|и|і|у|ою|ах|ам)?\b|занятт|лекці|практичн|\bлаб|семінар|вчора|позавчора|сьогодні|\d\d?\.\d\d|"
+                           r"понеділ|вівтор|серед|четвер|п'ятниц|субот|неділ", re.I)
 
 SYSTEM = (
-    "Ти — autopara, помічник студента з навчання в Telegram. Програма сама ходить на онлайн-пари, слухає їх і "
-    "зберігає записи. Пиши українською, по-людськи й коротко: 2–4 речення, своїми словами, без вступів, без "
-    "заголовків і без розмітки (жодних ** чи #).\n"
-    "Якщо є уривки з записів пар — відповідай на питання з них, але не переписуй їх. Розшифровка автоматична, з "
-    "помилками розпізнавання: перекручені слова й терміни виправляй за змістом (ОВАСП — OWASP), відомий термін можеш "
-    "пояснити одним реченням. Не вигадуй пар, людей, дат, завдань і дедлайнів; чого в уривках немає — так і скажи.\n"
-    "Якщо уривків немає і питання не про пари — відповідай як розумний співрозмовник.\n"
-    "Ти не можеш нічого робити на парі сам; якщо просять дію — підкажи команду: «екран», «чат», «статус», "
-    "«напиши <текст>», «вийди»."
+    "Ти — autopara, особистий помічник студента в Telegram. З тобою можна говорити про будь-що: порадити, пояснити, "
+    "допомогти з текстом, кодом чи планами, просто поспілкуватися. А ще ти знаєш його навчання: програма сама ходить "
+    "за нього на онлайн-пари, слухає їх і зберігає записи; що відомо — нижче. Ти програма, а не студент: не пиши про "
+    "себе, ніби сам ходиш на пари чи втомився. Звертайся на «ти», без імені. "
+    + UKRAINIAN_ONLY + " Пиши по-людськи й коротко (зазвичай 2–5 речень; довше — лише коли просять лист, код чи план), "
+    "без вступів і без розмітки (жодних ** чи #).\n"
+    "Просять допомогти (лист, план, пояснення, порада) — просто зроби це. Ділиться настроєм — підтримай по-людськи, "
+    "не переказуй пари. Про розклад — лише з рядка «Найближча пара» й розкладу: минулі пари вже були.\n"
+    "Про пари, завдання, дедлайни й слова викладачів — лише з того, що є нижче (розклад, записи пар, уривки). "
+    "Розшифровка автоматична, з помилками розпізнавання: перекручені слова й терміни виправляй за змістом (ОВАСП — "
+    "OWASP), але не вигадуй пар, людей, дат, завдань і дедлайнів; чого там немає — так і скажи.\n"
+    "Сам ти на парі нічого не робиш. Лише якщо просять щось зробити на парі зараз (написати в чат, скріншот, вийти) — "
+    "підкажи команду: «напиши <текст>», «екран», «чат», «статус», «вийди»."
 )
 SECTION_RE = re.compile(r"^\**\s*(Про що|Що робили|Завдання й дедлайни|Важливе|Чат)\s*:?\**\s*:?\s*(.*)$")
 # «Завдання: не було», «Важливе: нічого» — показувати нема чого.
 NOTHING_RE = re.compile(r"^(не було|немає|нема|нічого|не задано|не оголошено|не вказано|—|-)\b", re.I)
-TEACHER_RE = re.compile(r"хто (викладає|веде|читає|викладач)|як\w* (звати|звуть) викладач|викладач\w* (з|по|у|в)\b", re.I)
+TEACHER_RE = re.compile(r"^\W*(а\s+)?(хто (викладає|веде|читає|в нас викладає|у нас викладає)|як\w* (звати|звуть) викладач|хто викладач)", re.I)
 SMALL_TALK_RE = re.compile(r"^\W*(привіт|вітаю|добр(ий|ого|е|ий день|ого ранку)|хай|hello|hi|дякую|дяки|спасибі|як справи|"
                            r"як ти|ти тут|хто ти|що ти вмієш|ок|окей|добре|клас|супер)\b", re.I)
 EXPLAIN_RE = re.compile(r"що так\w*|поясни|як працю|навіщо|чим відрізня|розкажи про|що означа|приклад", re.I)
 PLACEHOLDER_RE = re.compile(r"\[[^\]]{2,40}\]")
 ABSENT_RE = re.compile(r"^(дедлайн|термін)\w*[^.]*\bне (було )?(вказан|встановлен|оголошен|названо|надано)", re.I)
-ABOUT_LESSONS_RE = re.compile(r"казал|казав|сказал|говорил|розповідал|пояснювал|на пар|викладач|в записах|у записах", re.I)
+SAID_RE = re.compile(r"казал|казав|сказал|говорил|розповідал|пояснювал|згадувал", re.I)
+ABOUT_LESSONS_RE = re.compile(r"казал|казав|сказал|говорил|розповідал|пояснювал|на пар|в записах|у записах", re.I)
+# Прохання щось зробити (лист, план, порада) — не пошук у записах, навіть якщо там згадано пару чи викладача.
+REQUEST_RE = re.compile(r"^\W*(а\s+)?(допоможи|напиши|склади|порадь|придумай|переклади|виправ|перевір|зроби|підкажи як)", re.I)
 SEARCH_STRONG = 3.0  # BM25: нижче — у записах про це майже нічого, тож це загальне питання
 WEEKDAY_NAMES = ["понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота", "неділя"]
 
@@ -317,6 +334,41 @@ class Library:
         return [subject for subject, score in scores.items() if best >= 0.99 and score == best]
 
 
+DAY_HEAD_RE = re.compile(r"^📅\s*(?P<day>[^:]+):")
+LESSON_LINE_RE = re.compile(r"^\s+(?P<start>\d\d:\d\d)[–-](?P<end>\d\d:\d\d)\s+(?P<title>.+)$")
+
+
+def next_lesson(table: str, now: datetime) -> str:
+    """Перша пара з розкладу текстом (Runner.schedule_text: «📅 пн 12.10:», «  08:00–09:20 Назва») — словами:
+    «у понеділок 12.10 о 08:00 — Архітектура ПЗ (Лк), через 2 дні»."""
+    day = ""
+    for line in table.splitlines():
+        if m := DAY_HEAD_RE.match(line.strip()):
+            day = m["day"].strip()
+        elif (m := LESSON_LINE_RE.match(line)) and day:
+            when = _when_label(day, now)
+            return f"{when} о {m['start']} — {m['title'].strip()}"
+    return ""
+
+
+def _when_label(day: str, now: datetime) -> str:
+    low = day.lower()
+    if low.startswith("сьогодні"):
+        return "сьогодні"
+    if low.startswith("завтра"):
+        return "завтра"
+    if m := re.search(r"(\d\d?)\.(\d\d)", low):
+        try:
+            target = date(now.year, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return day
+        if target < now.date():
+            target = date(now.year + 1, target.month, target.day)
+        days = (target - now.date()).days
+        return f"{WEEKDAY_NAMES[target.weekday()]} {target:%d.%m} (через {days} дн.)"
+    return day
+
+
 def _day_from(question: str, today: date) -> date | None:
     low = question.lower()
     if "позавчора" in low:
@@ -348,11 +400,12 @@ class Helper:
         self.schedule = schedule
 
     def route(self, question: str) -> str:
-        if SCHEDULE_RE.search(question) and not TASKS_RE.search(question):
-            return "schedule"
+        if (SCHEDULE_RE.search(question) and DIRECT_RE.match(question) and not TASKS_RE.search(question)
+                and not EXAM_RE.search(question)):
+            return "schedule"  # «чи встигну в магазин перед парою?» — це вже розмова (розклад модель і так бачить)
         if TASKS_RE.search(question):
             return "tasks"
-        if LESSON_RE.search(question):
+        if LESSON_ASK_RE.search(question) and (LESSON_REF_RE.search(question) or self.library.subjects_named(question)):
             return "lesson"
         if NOW_RE.search(question):
             return "now"
@@ -360,6 +413,7 @@ class Helper:
 
     def quick(self, question: str, now: datetime) -> str | None:
         """Відповідь без мовної моделі — з розкладу й підсумків пар. None — тут потрібна модель."""
+        self.library.refresh()
         kind = self.route(question)
         if kind == "schedule" and self.schedule is not None:
             return self.schedule(now)
@@ -378,13 +432,17 @@ class Helper:
     def answer(self, question: str, now: datetime, live: str = "", dialog: str = "", events: str = "") -> str:
         if (ready := self.quick(question, now)) is not None:
             return ready
-        kind = self.route(question)
         self.library.refresh()
+        kind = self.route(question)
         talk = bool(SMALL_TALK_RE.search(question)) and len(question) < 60  # «Привіт! Як справи?» — шукати нема чого
         found = self.library.search(question, limit=6) if kind != "now" and not talk else []
-        strong = [item for item in found if item[0] >= SEARCH_STRONG]
+        # Уривки з записів — лише коли питають про пари чи поняття: «сьогодні був важкий день» чи «допоможи написати
+        # лист» теж знаходять збіги в розшифровках, але це звичайна розмова.
+        about = bool(ABOUT_LESSONS_RE.search(question) or EXPLAIN_RE.search(question) or EXAM_RE.search(question))
+        about = about and not REQUEST_RE.search(question)
+        strong = [item for item in found if item[0] >= SEARCH_STRONG] if about else []
         sources = self.sources(question, kind, now, live) if strong or kind == "now" else ""
-        if not sources and ABOUT_LESSONS_RE.search(question) and not talk:
+        if not sources and SAID_RE.search(question) and not talk:  # «що казали про X» — а в записах X немає
             topic = m.group(1) if (m := re.search(r"\bпро\s+(.+?)[?.!]*$", question, re.I)) else "це"
             return (f"У записах пар про {topic[:60]} нічого не знайшов. Можливо, Whisper записав це інакше або цього "
                     "не було на парах, де я був.")
@@ -394,6 +452,8 @@ class Helper:
             return "Мовна модель ще не готова (Ollama) — на таке поки не відповім. Розклад і завдання — питай."
         explain = bool(EXPLAIN_RE.search(question))
         parts = [f"Зараз {now:%d.%m.%Y %H:%M}, {WEEKDAY_NAMES[now.weekday()]}."]
+        if known := self.study_context(now):
+            parts.append(known)
         if events:
             parts.append(events)
         if dialog:
@@ -405,11 +465,38 @@ class Helper:
             parts.append(f"Відповідай на питання «{question}»" + (
                 " простими словами; уривки — лише що про це казали на парі." if explain else
                 " лише з цих уривків, своїми словами, 2–4 речення."))
-        reply = whole_sentences(plain(self.ask(SYSTEM, "\n\n".join(parts))))
+        reply = ukrainian(self.ask, SYSTEM, "\n\n".join(parts))
+        if reply is None:
+            return "Не вийшло нормально відповісти — спитай, будь ласка, ще раз (можна іншими словами)."
+        reply = whole_sentences(plain(reply))
         reply = re.sub(r"^(Уривки з записів пар|Знайдено в записах пар)[^:]*:\s*", "", reply)
         if explain:  # пояснення — загальні знання, а записи лише кажуть, де про це говорили
             return "📚 " + reply + (("\n\n" + self._cite(strong, "На парах про це")) if strong else "")
         return reply + (("\n\n" + self._cite(strong)) if strong else "")
+
+    def study_context(self, now: datetime) -> str:
+        """Коротко, що відомо про навчання, — завжди перед очима моделі: розклад і останні пари одним рядком."""
+        parts = []
+        if self.schedule is not None:
+            try:
+                table = self.schedule(now)
+            except Exception as e:  # noqa: BLE001 — розклад недоступний: розмова однаково можлива
+                log.debug("Розклад для помічника: %s", e)
+                table = ""
+            if table:
+                # Маленька модель плутала «пн 12.10» з «завтра» і минулу пару з наступною — тож найближчу пару
+                # кажемо прямо, з тим, коли вона відносно сьогодні.
+                if upcoming := next_lesson(table, now):
+                    parts.append("Найближча пара: " + upcoming)
+                parts.append("Розклад на найближчі дні (майбутнє):\n" + table)
+        recent = []
+        for doc in self.library.docs[-5:]:
+            about = doc.parts.get("Про що", "")
+            teacher = f", викладач {doc.teacher}" if doc.teacher else ""
+            recent.append(f"• {doc.day:%d.%m} {doc.start} {doc.title}{teacher}" + (f" — {_shorten(about, 120)}" if about else ""))
+        if recent:
+            parts.append("Минулі пари (вже були, з записів):\n" + "\n".join(recent))
+        return ("Що відомо про навчання студента:\n" + "\n".join(parts)) if parts else ""
 
     @staticmethod
     def _cite(found: list[tuple[float, Chunk]], title: str = "Джерела") -> str:

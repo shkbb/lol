@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from .config import MeSettings
+from .lang import looks_russian
 
 log = logging.getLogger(__name__)
 
@@ -110,10 +111,13 @@ ATTENTION_RE = re.compile(
 ME_AUTHOR_RE = re.compile(r"^(you|ви|вы)$", re.I)
 # Мозкове «повідомити» — лише коли від студента щось треба, і судимо за цитатою з пари: переказ лекції
 # («викладач обговорює…») чи порада від себе — не привід, це буде у звіті після пари.
-URGENT_RE = re.compile(
-    r"тебе|тобі|перекличк|відміт|присутн|плюс|камер|мікрофон|завдан|дедлайн|"
-    r"контрольн|модульн|тест(ування)? (буде|зараз)|здати|здайте|до (понеділк|вівтор|серед|четвер|п.ятниц|суботи|неділ)|"
-    r"оцінк|бал(и|ів)|питає|запиту|кличе|звертається|відповісти|залік|екзамен|іспит", re.I)
+# Оголошення для всієї групи, про які варто знати одразу (а не зі звіту): контрольна, дедлайн, камери.
+# Лише за дослівною цитатою з пари — загальні слова («тебе», «плюс», «питає») мозок дописував до будь-чого.
+GROUP_URGENT_RE = re.compile(
+    r"контрольн|модульн|самостійн\w* робот|дедлайн|здати до|здайте до|здаєте до|до (понеділк|вівтор|серед|четвер|"
+    r"п.ятниц|суботи|неділ|кінця тижня)|залік|екзамен|іспит|(увімкн|включ)\w*[^.?!]{0,25}камер|"
+    r"камер\w*[^.?!]{0,25}(увімкн|включ|будь ласка)|перекличк|відмітьтес", re.I)
+EVIDENCE_WINDOW = timedelta(minutes=10)  # цитата мозку має бути серед сказаного за стільки часу
 
 HELP = (
     "Я пишу, коли щось відбувається на парі. Що можна відповісти:\n"
@@ -235,6 +239,10 @@ def _norm(text: str) -> str:
     return "+" if re.fullmatch(r"\++", text) else text
 
 
+def _letters(text: str) -> str:
+    return re.sub(r"[^\w]+", " ", text.casefold().replace("’", "'")).strip()
+
+
 def _snippet(text: str, limit: int = 200) -> str:
     text = " ".join(text.split())
     return text if len(text) <= limit else "…" + text[-limit:]
@@ -251,6 +259,20 @@ def name_patterns(name: str) -> list[tuple[re.Pattern, bool]]:
         stem = word[:-1] if len(word) >= 4 and word[-1] in "аоуеиіїяюєй" else word
         patterns.append((re.compile(rf"(?<!\w){re.escape(stem)}\w*", re.I), index == 0))
     return patterns
+
+
+def first_name_address(name: str) -> re.Pattern | None:
+    """Звертання на ім'я: кличний відмінок («Денисе», «Денисе», «Миколо», «Андрію») чи ім'я окремим звертанням
+    («Денис, …», «…, Денис?»). Просто ім'я посеред речення — ні: наживо «плата Ардуїно» Whisper чув як
+    «плата Денис», а ще в групі буває кілька Денисів."""
+    words = name.split()
+    if len(words) < 2 or len(words[1]) < 3:
+        return None
+    first = words[1].casefold()
+    stem = first[:-1] if first[-1] in "аяйь" else first
+    vocative = rf"{re.escape(stem)}(?:е|у|о|ю)"
+    alone = rf"(?:^|[.!?…,:;—–-]\s*){re.escape(first)}\s*(?:[,.!?…]|$)"
+    return re.compile(rf"(?<!\w){vocative}(?!\w)|{alone}", re.I | re.M)
 
 
 class Assistant:
@@ -277,6 +299,7 @@ class Assistant:
         self._actions: list[Action] = []
         self._lock = threading.RLock()
         self._patterns = name_patterns(me.name)
+        self._address = first_name_address(me.name)
         self._classmates: list[re.Pattern] = []  # прізвища однокурсників — для переклички голосом
         self.ears_on = False  # чи справді слухаємо пару (від цього залежить, чи можна діяти без питань)
         self.can_ask = True  # чи можна спитати тебе: бот приймає відповіді й кнопки
@@ -357,6 +380,7 @@ class Assistant:
         with self._lock:
             self.me = me
             self._patterns = name_patterns(me.name)
+            self._address = first_name_address(me.name)
 
     def set_classmates(self, names: list[str]) -> None:
         """Прізвища однокурсників (з сайту розкладу): по них видно, що викладач читає список групи."""
@@ -438,15 +462,21 @@ class Assistant:
     def _cooled(last: datetime | None, now: datetime, cooldown: timedelta) -> bool:
         return last is None or now - last >= cooldown
 
+    def _addressed(self, text: str) -> str:
+        """"surname" — назвали твоє прізвище, "name" — звертаються на ім'я, "" — ні."""
+        if any(is_surname and pattern.search(text) for pattern, is_surname in self._patterns):
+            return "surname"
+        return "name" if self._address is not None and self._address.search(text) else ""
+
     def _check_mention(self, meeting: Meeting, text: str, now: datetime, where: str) -> bool:
-        hits = [is_surname for pattern, is_surname in self._patterns if pattern.search(text)]
-        if not hits:
+        hit = self._addressed(text)
+        if not hit:
             return False
         meeting.mentions.append((now, text))
         if self._cooled(self._last_mention, now, MENTION_COOLDOWN):
             self._last_mention = now
             if self.alert_mentions:
-                lead = "🚨 Тебе кличуть" if any(hits) else "❗ Можливо, звертаються до тебе"
+                lead = "🚨 Тебе кличуть" if hit == "surname" else "❗ Можливо, звертаються до тебе"
                 self._alert(f"{lead} {where} на «{meeting.title}»: «{_snippet(text)}»", self._quick_buttons(meeting))
                 if self.on_moment:
                     self.on_moment(meeting.key, f"🎬 Момент з «{meeting.title}», {now:%H:%M}", now)
@@ -538,7 +568,8 @@ class Assistant:
         """Імена й назва пари — підказка для розпізнавання мови, щоб не перекручувало прізвища."""
         with self._lock:
             meeting = self.current()
-            parts = [self.me.name]
+            # Лише прізвище: з ім'ям у підказці Whisper «чув» його всюди («плата Ардуїно» → «плата Денис»).
+            parts = self.me.name.split()[:1]
             if meeting is not None:
                 parts += [meeting.teacher, re.sub(r"\s*\(.*?\)", "", meeting.title)]
         return ", ".join(part for part in parts if part)
@@ -840,29 +871,44 @@ class Assistant:
             meeting = self.meetings.get(key)
             if meeting is None or decision.action == "none":
                 return
-            why = decision.reason or decision.message
-            log.info("Мозок: %s — %s", decision.action, why)
+            log.info("Мозок: %s — %s", decision.action, decision.reason or decision.message)
+            # Що показати людині: дослівну цитату з пари, якщо її справді казали, інакше — пояснення мозку, але
+            # лише українською (наживо він раз написав російською); нічого певного — нічого.
+            if decision.reason and self._said_recently(meeting, decision.reason, now):
+                why = f"«{_snippet(decision.reason, 160)}»"
+            else:
+                why = "" if looks_russian(decision.message) else _snippet(decision.message, 160)
+            because = f" ({why})" if why else ""
             waiting = meeting.awaiting
             if waiting is not None:
                 # Мозок відповідав на питання про хвилю «+»/прізвищ.
                 meeting.awaiting = None
                 if decision.action in ("chat_plus", "chat_name"):
-                    self._offer(meeting, waiting.reply, f"{waiting.what} — 🧠 {why}", now, context=waiting.context)
+                    self._offer(meeting, waiting.reply, f"{waiting.what}" + (f" — 🧠 {why}" if why else ""), now, context=waiting.context)
                 elif decision.action == "notify":
                     # Мозок пояснив, що це щось інше (запис, голосування) — без тебе не пишемо.
                     self._offer(
-                        meeting, waiting.reply, f"{waiting.what}. 🧠 {decision.message or why} — сам не пишу", now,
+                        meeting, waiting.reply, f"{waiting.what}." + (f" 🧠 {why}" if why else "") + " — сам не пишу", now,
                         ask=True, context=waiting.context,
                     )
                 else:
                     self._unclear(meeting, waiting.reply, waiting.what, waiting.since, now, waiting.context)
                 return
             if decision.action == "notify":
-                message = decision.message or why
-                if not self._worth_telling(decision.reason):
-                    log.info("Мозок: не турбую — це не стосується тебе особисто (буде у звіті)")
+                evidence = self._evidence(meeting, decision.reason, now)
+                if not evidence:
+                    log.info("Мозок: не турбую — у цитаті ні тебе, ні оголошення для групи (буде у звіті)")
                     return
-                self.notify(f"🧠 {message} («{meeting.title}»)", urgent=True)
+                if evidence == "me" and not self._cooled(self._last_mention, now, MENTION_COOLDOWN * 3):
+                    return  # «тебе кличуть» уже надіслано рефлексом — вдруге не треба
+                # Текст сповіщення — дослівна цитата з пари, а не переказ мозку: переказ вигадував «тебе кличуть»
+                # на пояснення схеми з Arduino і раз навіть вийшов російською.
+                quote = _snippet(decision.reason, 220)
+                if evidence == "me":
+                    self._last_mention = now
+                    self._alert(f"🚨 Тебе кличуть на «{meeting.title}»: «{quote}»", self._quick_buttons(meeting))
+                else:
+                    self.notify(f"📌 На «{meeting.title}» оголосили: «{quote}»", urgent=True)
                 if self.on_moment and self._cooled(self._last_brain_clip, now, MENTION_COOLDOWN):
                     # Як і з «тебе кличуть» — відео моменту, щоб було видно й чутно, що там сталося.
                     self._last_brain_clip = now
@@ -870,7 +916,7 @@ class Assistant:
             elif decision.action in ("chat_plus", "chat_name") and self.me.chat_reply == "off":
                 if meeting.expect_roll_call is None or now - meeting.expect_roll_call > EXPECT_WINDOW:
                     meeting.expect_roll_call = now
-                    self._alert(f"🧠 Схоже, на «{meeting.title}» перекличка ({why}). Сам не пишу — якщо треба, натисни:",
+                    self._alert(f"🧠 Схоже, на «{meeting.title}» перекличка{because}. Сам не пишу — якщо треба, натисни:",
                                 self._quick_buttons(meeting, plus=True))
             elif decision.action in ("chat_plus", "chat_name"):
                 # Мозок спирається лише на розпізнану мову, а вона може помилитись («плюс» з лекції про C++).
@@ -878,11 +924,11 @@ class Assistant:
                 if meeting.expect_roll_call is None or now - meeting.expect_roll_call > EXPECT_WINDOW:
                     meeting.expect_roll_call = now
                     self.notify(
-                        f"🧠 Схоже, на «{meeting.title}» перекличка ({why}). Відмічусь, щойно в чаті відмітяться інші."
+                        f"🧠 Схоже, на «{meeting.title}» перекличка{because}. Відмічусь, щойно в чаті відмітяться інші."
                     )
             elif decision.action == "leave":
                 # Виходить помічник лише за учасниками й розкладом; «на сьогодні все» з розшифровки — лише порада.
-                self.notify(f"🧠 Схоже, пару «{meeting.title}» закінчили ({why}). Напиши «вийди», щоб вийти зараз.")
+                self.notify(f"🧠 Схоже, пару «{meeting.title}» закінчили{because}. Напиши «вийди», щоб вийти зараз.")
 
     # --- Команди з Telegram ------------------------------------------------------
 
@@ -1016,13 +1062,26 @@ class Assistant:
         lines.append("\n↩️ Відповідай на це повідомлення — і я напишу твій текст у чат.")
         return "\n".join(lines)
 
-    def _worth_telling(self, quote: str) -> bool:
-        """Чи варто будити студента мозковим сповіщенням: судимо лише за цитатою з пари (``quote`` — що там справді
-        сказали), а не за словами мозку. Наживо маленька модель дописувала до переказу лекції «Студенту … варто
-        звернути увагу» і читала «Чим займаюся я?» гостя-лектора як «тебе питають, чим ти займаєшся». Тож лише
-        твоє ім'я, камера, перекличка, завдання, дедлайн, контрольна… — інакше мозок не будить."""
-        evidence = quote or ""
-        return any(pattern.search(evidence) for pattern, _ in self._patterns) or bool(URGENT_RE.search(evidence))
+    def _evidence(self, meeting: Meeting, quote: str, now: datetime) -> str:
+        """Чи варто будити студента мозковим сповіщенням — судимо лише за цитатою, яку мозок навів, і лише якщо її
+        справді казали чи писали за останні хвилини (мозок інколи «цитує» те, чого не було).
+        "me" — у цитаті тебе кличуть (прізвище чи звертання на ім'я), "group" — оголошення для всіх (контрольна,
+        дедлайн, камери, перекличка), "" — нічого такого: пояснення матеріалу — у звіт, а не на телефон."""
+        if not quote or not self._said_recently(meeting, quote, now):
+            return ""
+        if self._addressed(quote):
+            return "me"
+        return "group" if GROUP_URGENT_RE.search(quote) else ""
+
+    @staticmethod
+    def _said_recently(meeting: Meeting, quote: str, now: datetime) -> bool:
+        words = [word for word in _letters(quote).split() if len(word) > 2]
+        if not words:
+            return False
+        recent = [said for t, said, _ in meeting.heard if now - t <= EVIDENCE_WINDOW]
+        recent += [m.text for t, m in meeting.chat if now - t <= EVIDENCE_WINDOW]
+        known = set(_letters(" ".join(recent)).split())
+        return sum(word in known for word in words) / len(words) >= 0.7
 
     def chat_memory(self, now: datetime) -> tuple[str, str]:
         """Для помічника: попередня розмова (без щойно поставленого питання) і що сьогодні робила програма."""

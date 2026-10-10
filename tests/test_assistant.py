@@ -168,9 +168,10 @@ def test_brain_alone_never_acts_in_the_meeting():
     assert assistant.take_actions() == []  # група не підтвердила — нічого не пишемо
     assistant.apply_decision(KEY, Decision("leave", reason="почулось «на сьогодні все»"), at("10:40"))
     assert assistant.take_actions() == [] and "Напиши «вийди»" in inbox.text()
+    assistant.on_heard("Будь ласка, увімкніть камери", at("10:40:50"))
     assistant.apply_decision(KEY, Decision("notify", message="Викладач просить увімкнути камери",
                                            reason="увімкніть камери"), at("10:41"))
-    assert "увімкнути камери" in inbox.text()
+    assert "оголосили: «увімкніть камери»" in inbox.text()
 
 
 def test_telegram_commands():
@@ -670,10 +671,15 @@ def test_brain_does_not_retell_the_lecture():
     assistant.apply_decision(KEY, Decision("notify", message=sly, reason="скріншоти для Google Play"), at("10:20"))
     assert inbox.messages == []
     # Те, що справді сказали на парі й стосується тебе, — завжди (судимо за цитатою, а не за словами мозку).
+    assistant.on_heard("Нагадую, у понеділок буде контрольна з цієї теми.", at("10:20:40"))
     assistant.apply_decision(KEY, Decision("notify", message="Оголосили контрольну в понеділок.",
                                            reason="у понеділок буде контрольна"), at("10:21"))
+    assistant.on_heard("Ляшко, ви тут?", at("10:21:50"))  # «тебе кличуть» уже надіслав рефлекс — мозок не дублює
     assistant.apply_decision(KEY, Decision("notify", message="Тебе кличуть.", reason="Ляшко, ви тут?"), at("10:22"))
-    assert len(inbox.messages) == 2 and "контрольну" in inbox.messages[0][0] and "кличуть" in inbox.messages[1][0]
+    assert len(inbox.messages) == 2 and "контрольна" in inbox.messages[0][0] and "кличуть" in inbox.messages[1][0]
+    # Цитата, якої на парі не було, — не доказ.
+    assistant.apply_decision(KEY, Decision("notify", message="Тебе кличуть.", reason="Ляшко, зайдіть у Classroom"), at("10:30"))
+    assert len(inbox.messages) == 2
     # Без доказу з пари — ніколи: «Чим займаюся я?» гостя-лектора мозок прочитав як питання до тебе.
     assistant.apply_decision(KEY, Decision("notify", message="Тебе кличуть, щоб уточнив, чим займаєшся.",
                                            reason="Петро Іванов: Зараз актуальніше Java чи Kotlin?"), at("10:40"))
@@ -681,11 +687,34 @@ def test_brain_does_not_retell_the_lecture():
     assert len(inbox.messages) == 2
 
 
+def test_alerts_are_quotes_not_retellings_and_never_russian():
+    """Наживо: «🧠 Тебе кличуть. Викладач пояснює схему з Arduino…», «Тебе кличут, чтобы подтвердить…» і
+    «Можливо, звертаються до тебе» на «наша плата Денис (Ардуїно) керувалася…». Тепер — лише дослівна цитата."""
+    inbox = Inbox()
+    assistant = Assistant(MeSettings(name="Ляшко Денис"), inbox, lambda key: None)
+    assistant.attach(KEY, "Технології інтернету речей (Пз)", "Петренко П.П.", at("11:10"), at("12:30"))
+    assistant.on_heard("Ми хочемо, щоб наша плата Денис саме керувалася світлодіодом", at("11:34"))
+    assistant.on_heard("Реально отримує плата Денис, ну і саме для цього Serial Monitor", at("11:40"))
+    assert inbox.messages == []  # ім'я посеред речення — не звертання
+    assistant.apply_decision(KEY, Decision("notify", message="Тебе кличут, чтобы подтвердить, что ты на паре.",
+                                           reason="наша плата Денис саме керувалася світлодіодом"), at("11:41"))
+    assistant.apply_decision(KEY, Decision("notify", message="Тебе кличуть. Викладач пояснює схему з Arduino.",
+                                           reason="Реально отримує плата Денис, ну і саме для цього Serial Monitor"),
+                             at("11:42"))
+    assert inbox.messages == []  # у цитатах немає ні звертання, ні оголошення
+    assistant.on_heard("Денисе, покажіть, будь ласка, вашу схему", at("11:45"))
+    assert inbox.messages[-1][0].startswith("❗ Можливо, звертаються до тебе")
+    assistant.on_heard("До понеділка здати звіт з лабораторної", at("11:50"))
+    assistant.apply_decision(KEY, Decision("notify", message="Тебе кличут…", reason="До понеділка здати звіт"), at("11:51"))
+    assert inbox.messages[-1][0] == "📌 На «Технології інтернету речей (Пз)» оголосили: «До понеділка здати звіт»"
+
+
 def test_brain_alert_comes_with_a_video_moment():
     """Наживо всіх просили ввімкнути камери — мозок сповістив, але без відео (вирізки були лише на ім'я)."""
     assistant, inbox, _ = make(brain=True)
     moments = []
     assistant.on_moment = lambda key, title, when: moments.append(when)
+    assistant.on_heard("Так, увімкніть, будь ласка, камери для скріншоту. Камери, будь ласка.", at("10:17:50"))
     assistant.apply_decision(KEY, Decision("notify", message="Просять увімкнути камери для скріншоту.",
                                            reason="увімкніть, будь ласка, камери для скріншоту"), at("10:18"))
     assistant.apply_decision(KEY, Decision("notify", message="Ще раз просять камери.",
