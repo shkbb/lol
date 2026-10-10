@@ -78,7 +78,9 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     brain = worker = None
     if config.brain.enabled:
-        brain = OllamaBrain(config.brain.url, config.brain.model, busy=lambda: not stack.refine_allowed())
+        # [ears] device = "cpu" — відеокарту не використовувати взагалі: і для вух, і для мовної моделі.
+        no_gpu = False if config.ears.device == "cpu" else None
+        brain = OllamaBrain(config.brain.url, config.brain.model, busy=lambda: not stack.refine_allowed(), gpu=no_gpu)
         worker = BrainWorker(brain, clock)
         stoppers.append(worker.stop)
 
@@ -268,7 +270,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     if brain is not None:
         big = None
         if config.brain.chat_model and config.brain.chat_model != config.brain.model:
-            big = OllamaBrain(config.brain.url, config.brain.chat_model, timeout=600, busy=lambda: not stack.refine_allowed())
+            big = OllamaBrain(config.brain.url, config.brain.chat_model, timeout=600, busy=lambda: not stack.refine_allowed(),
+                              gpu=False if config.ears.device == "cpu" else None)
             big.keep_alive = "3m"  # кілька питань поспіль — без перезавантаження, а потім пам'ять назад
         chat_brain = ChatBrain(brain, big, quiet=lambda: stack.refine_allowed(), free_gb=available_ram_gb,
                                need_gb=BIG_CHAT_FREE_GB)

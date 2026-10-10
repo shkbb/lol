@@ -30,7 +30,7 @@ NAMES = (("nvidia", "nvidia"), ("geforce", "nvidia"), ("quadro", "nvidia"), ("rt
          ("amd", "amd"), ("intel", "intel"), ("apple", "apple"))
 DEVICES = ("auto", "cpu", "cuda")
 # Скільки відеопам'яті треба Whisper (ГБ) — з запасом на звук і пошук варіантів (beam).
-VRAM_FLOAT16 = 6.0  # large-v3 у float16 — найточніше
+VRAM_FLOAT16 = 10.0  # large-v3 у float16 — найточніше; на меншій карті поруч ще й мовна модель (Ollama, ~4 ГБ)
 VRAM_INT8 = 3.0  # large-v3 у int8_float16 — майже так само точно, удвічі менше пам'яті
 VRAM_TURBO = 1.8  # large-v3-turbo у int8_float16; менше — на процесорі
 

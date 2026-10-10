@@ -221,3 +221,15 @@ def test_chat_questions_go_to_the_big_model_only_when_free():
     assert chat.summarize("і", "т") == "швидка"
     quiet[0], free[0] = True, 3.0  # пам'яті мало
     assert not chat.will_think_long() and chat.summarize("і", "т") == "швидка"
+
+
+def test_gpu_switched_off_in_settings_keeps_the_brain_on_processor(monkeypatch):
+    """«Відеокарта: не використовувати взагалі» — і мовна модель лише на процесорі, навіть з окремою картою."""
+    from autopara import accel
+
+    monkeypatch.setattr(accel, "brain_on_gpu", lambda: True)  # окрема карта є
+    ollama = FakeOllama("ок")
+    OllamaBrain("http://x", "gemma3:4b", session=ollama, gpu=False).summarize("і", "т")
+    assert ollama.payload["options"]["num_gpu"] == 0
+    OllamaBrain("http://x", "gemma3:4b", session=ollama).summarize("і", "т")
+    assert "num_gpu" not in ollama.payload["options"]  # «auto» — як вирішить Ollama

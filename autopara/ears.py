@@ -539,6 +539,26 @@ class WhisperTranscriber:
                     self.name = model = resolve_model("auto", accel.CPU)
         self.model = self._factory(model, device="cpu", compute_type="int8")
 
+    def _run(self, audio, options: dict) -> list:
+        try:
+            return list(self.model.transcribe(audio, **options)[0])
+        except TypeError:  # стара версія faster-whisper без hotwords
+            self._hotwords = False
+            options.pop("hotwords", None)
+            return list(self.model.transcribe(audio, **options)[0])
+
+    def _gpu_gave_up(self, error: Exception) -> bool:
+        """Відеокарта не впоралась посеред роботи — найчастіше скінчилась її пам'ять (скажімо, частину зайняла
+        Ollama). Тоді переходимо на процесор, щоб вуха не помилялись на кожному шматку. True — перейшли."""
+        text = str(error).lower()
+        if not self.device.gpu or not any(word in text for word in ("out of memory", "cuda", "cublas", "cudnn")):
+            return False
+        log.warning("Відеокарта %s не впоралась (%s) — далі розпізнаю на процесорі", self.device.label, error)
+        self.device = accel.CPU
+        self.model = None  # звільнити пам'ять карти
+        self._load(resolve_model("auto", accel.CPU) if self._auto else self.name)
+        return True
+
     def _try_once(self) -> None:
         """Секунда тиші через усю модель: помилки CUDA (немає cuDNN тощо) вилазять саме на першому розпізнаванні."""
         import numpy as np
@@ -568,11 +588,11 @@ class WhisperTranscriber:
             options["hotwords"] = hint
         with self.gate.live():
             try:
-                segments = list(self.model.transcribe(audio, **options)[0])
-            except TypeError:  # стара версія faster-whisper без hotwords
-                self._hotwords = False
-                options.pop("hotwords", None)
-                segments = list(self.model.transcribe(audio, **options)[0])
+                segments = self._run(audio, options)
+            except RuntimeError as e:
+                if not self._gpu_gave_up(e):
+                    raise
+                segments = self._run(audio, options)  # те саме — уже на процесорі
         return [
             Heard(segment.text.strip(), is_confident(segment.avg_logprob, segment.no_speech_prob))
             for segment in segments
@@ -603,13 +623,23 @@ class WhisperTranscriber:
                 options["hotwords"] = hint
             with self.gate.background(stop):
                 segments = iter(self.model.transcribe(audio, **options)[0])
+            done_until = 0.0  # відеокарта здалася посеред шматка — на процесорі продовжуємо з цього місця
             while True:
                 if allowed is not None and not allowed():
                     raise Paused
                 with self.gate.background(stop):  # кожне вікно в 30 с — окремо: між ними можуть пройти вуха
-                    segment = next(segments, None)
+                    try:
+                        segment = next(segments, None)
+                    except RuntimeError as e:
+                        if not self._gpu_gave_up(e):
+                            raise
+                        segments = iter(self.model.transcribe(audio, **options)[0])
+                        continue
                 if segment is None:
                     break
+                if segment.start < done_until:
+                    continue  # уже записали до того, як відеокарта здалася
+                done_until = segment.end
                 text = clean_text(segment.text)
                 if text and not is_hint_echo(text, hint):
                     lines.append((offset + segment.start, text))

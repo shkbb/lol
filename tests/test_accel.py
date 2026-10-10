@@ -45,8 +45,11 @@ def machine(monkeypatch):
 def test_nvidia_gets_cuda_sized_to_its_memory(machine):
     machine([Gpu("intel", "Iris Xe", True), Gpu("nvidia", "RTX 4060")], cuda_devices=1, memory=("RTX 4060", 8.0, 7.5))
     device = accel.whisper_device()
-    assert device == Device("cuda", "float16", "RTX 4060 (CUDA)", 8.0)
+    # 8 ГБ: стиснутий large-v3 (~2 ГБ) — поруч ще влазить мовна модель; повна точність — від 10 ГБ.
+    assert device == Device("cuda", "int8_float16", "RTX 4060 (CUDA)", 8.0)
     assert accel.live_model(device, 8, 16) == "large-v3"  # на карті найточніша встигає й наживо
+    machine([Gpu("nvidia", "RTX 4070 Ti")], cuda_devices=1, memory=("RTX 4070 Ti", 12.0, 11.0))
+    assert accel.whisper_device().compute_type == "float16"
     machine([Gpu("nvidia", "MX450")], cuda_devices=1, memory=("MX450", 2.0, 1.9))
     small = accel.whisper_device()
     assert small.compute_type == "int8_float16" and accel.live_model(small, 8, 16) == "large-v3-turbo"
@@ -100,3 +103,35 @@ def test_transcriber_falls_back_to_processor_when_cuda_breaks(machine, monkeypat
     loaded.clear()
     ears.WhisperTranscriber("large-v3", "uk")  # явно вибрана модель лишається тією ж і на процесорі
     assert loaded[-1] == ("large-v3", "cpu", "int8")
+
+
+def test_gpu_out_of_memory_mid_lesson_moves_ears_to_processor(machine, monkeypatch):
+    """Карта на 8 ГБ, частину зайняла Ollama — посеред пари Whisper отримує «out of memory». Не мовчки
+    помилятися на кожному шматку, а перейти на процесор і розпізнавати далі."""
+    machine([Gpu("nvidia", "RTX 4060")], cuda_devices=1, memory=("RTX 4060", 8.0, 8.0))
+    monkeypatch.setattr(ears.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(ears, "total_ram_gb", lambda: 16)
+    loaded, full = [], [False]
+
+    class Segment:
+        def __init__(self, text):
+            self.text, self.start, self.end, self.avg_logprob, self.no_speech_prob = text, 0.0, 2.0, -0.2, 0.01
+
+    class WhisperModel:
+        def __init__(self, name, device, compute_type):
+            loaded.append((name, device))
+            self.device = device
+
+        def transcribe(self, audio, **options):
+            if self.device == "cuda" and full[0]:
+                raise RuntimeError("CUDA failed with error out of memory")
+            return iter([Segment("Добрий день")]), None
+
+    module = types.ModuleType("faster_whisper")
+    module.WhisperModel = WhisperModel
+    monkeypatch.setitem(__import__("sys").modules, "faster_whisper", module)
+    transcriber = ears.WhisperTranscriber("auto", "uk")
+    assert transcriber.device.gpu and loaded[-1] == ("large-v3", "cuda")
+    full[0] = True  # Ollama зайняла карту
+    assert [h.text for h in transcriber(b"\x00\x00" * 16000)] == ["Добрий день"]
+    assert transcriber.device == CPU and loaded[-1] == ("large-v3-turbo", "cpu")
