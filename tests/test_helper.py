@@ -161,3 +161,17 @@ def test_context_says_plainly_whether_there_are_lessons_tomorrow(tmp_path):
     assert "Найближча пара: понеділок 12.10 (через 2 дн.) о 08:00" in context
     friday = Helper(library(tmp_path), None, schedule=lambda now: "📅 завтра:\n  08:00–09:20 Архітектура ПЗ (Лк)")
     assert "Завтра (субота 10.10) є пари" in friday.study_context(datetime(2026, 10, 9, 19, 0))
+
+
+def test_questions_about_the_bot_itself_get_the_real_about_card(tmp_path):
+    """«Що ти вмієш?», «чому так довго?» — модель отримує правдиву картку «Про тебе» з налаштувань і стану,
+    а не вигадує (раніше в підказці стояло «gemma3:4b, 30–60 с», хоч поза парами відповідала інша модель)."""
+    prompts = []
+    helper = Helper(library(tmp_path), lambda system, text: prompts.append((system, text)) or "ок")
+    helper.about = lambda now: "Про тебе (програма autopara 0.2.1): поза парами — qwen3.5:9b (розумний режим, 1–3 хв)."
+    for question in ("Що ти вмієш?", "чому ти так довго думаєш?", "Ти пишеш у чат за мене?", "Як ти працюєш?"):
+        helper.answer(question, NOW)
+        assert "Про тебе (програма autopara 0.2.1)" in prompts[-1][1], question
+    helper.answer("Поясни, що таке індекс у базі даних", NOW)
+    assert "Про тебе" not in prompts[-1][1]  # картка — лише коли питають про бота
+    assert "gemma3:4b" not in prompts[-1][0] and "картки «Про тебе»" in prompts[-1][0]

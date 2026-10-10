@@ -737,3 +737,11 @@ def test_question_for_the_model_gets_a_reaction_not_a_thinking_message():
     assistant = Assistant(MeSettings(name="Ляшко Денис"), Inbox())
     assistant.ask_brain = lambda question, context, current: ""
     assert assistant.on_command("Дай рецепт борщу", at("12:00")) == ""
+
+
+def test_help_describes_everything_the_bot_does():
+    assistant = Assistant(MeSettings(name="Ляшко Денис"), Inbox())
+    text = assistant.on_command("допомога", at("12:00"))
+    for part in ("мікрофон і камера вимкнені", "🚨 тебе кличуть", "У чат пари сам не пишу", "звіт", "статус", "напиши <текст>",
+                 "що задали з безпеки", "👀", "🎤 голосові", "🖼 фото", "Як ти працюєш?"):
+        assert part in text, part

@@ -57,6 +57,7 @@ class Stack:
     voice_meter: object | None = None  # ears.VoiceMeter, якщо вуха ввімкнені
     schedule_text: Callable[[datetime], str] = lambda now: ""  # розклад текстом (app.py підставляє з Runner)
     media: Callable[[object], str | None] | None = None  # голосове чи фото з Telegram (telegram.Incoming)
+    helper: object | None = None  # помічник з навчання (helper.Helper) — відповіді в Telegram
 
 
 BIG_CHAT_FREE_GB = 9.0  # стільки вільної пам'яті (без швидкої моделі) — і поза парами відповідає розумна модель
@@ -283,6 +284,54 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
                                                          log.info("Мозок для розмов: %s", big.model)))
             big_connector.start()
             stoppers.append(big_connector.stop)
+
+    def about_me(now: datetime) -> str:
+        """Картка «Про тебе» для мовної моделі — лише правда з налаштувань і стану програми (див. helper.ABOUT_ME_RE)."""
+        from . import __version__
+        from .helper import next_lesson
+
+        transcriber = ears.transcribe if ears is not None else None
+        if transcriber is not None:
+            device = getattr(getattr(transcriber, "device", None), "label", "процесор")
+            ears_text = f"слухаєш пари: розпізнавання мови {getattr(transcriber, 'name', 'Whisper')} на {device}"
+        elif ears is not None:
+            ears_text = "розпізнавання мови ще вантажиться"
+        else:
+            ears_text = "розпізнавання мови вимкнене в налаштуваннях — пари не слухаєш"
+        chat = {"off": "У чат пари сам не пишеш ніколи — лише коли студент скаже («+», «напиши …», кнопки під сповіщенням)",
+                "ask": "У чат пари пишеш лише після «так» від студента",
+                "auto": "На перекличці сам ставиш «+» чи «Так, я тут», коли впевнений; решту — лише за командою студента"}
+        meeting = assistant.current()
+        lines = [
+            f"Про тебе (програма autopara {__version__}, група {config.schedule.group or 'не вибрана'}):",
+            "• Сам заходиш на онлайн-пари за розкладом (Meet, Zoom); мікрофон і камера завжди вимкнені.",
+            f"• Зараз {('на парі «' + meeting.title + '»') if meeting else 'не на парі'}; {ears_text}.",
+            "• Під час пари сповіщаєш лише по ділу, дослівною цитатою: 🚨 студента кличуть (прізвище чи звертання на "
+            "ім'я), 📋 перекличка, 📌 оголосили контрольну, дедлайн чи увімкнути камери.",
+            "• " + chat.get(config.me.chat_reply, chat["off"]) + ".",
+            ("• Після пари ще раз уважно розшифровуєш запис (" + refine_name + "), коли пар найближчим часом немає, і "
+             "тоді надсилаєш звіт — тому він приходить пізніше." if refine_name != "off" and ears is not None else
+             "• Після пари одразу надсилаєш звіт."),
+            "• Записи пар (підсумок, розшифровка, чат) зберігаються на ноутбуці студента: ~/.autopara/Пари.",
+            "• Розклад, «що було на парі», завдання, дедлайни, викладачів — відповідаєш одразу з даних; решту думає мовна "
+            f"модель: під час пар — {config.brain.model} (~30–60 с)"
+            + (f", поза парами, коли вистачає пам'яті, — {config.brain.chat_model} (розумний режим, 1–3 хв)"
+               if config.brain.chat_model and chat_brain is not None and chat_brain.big is not None else "")
+            + ("" if helper.ask is not None else "; зараз мовна модель ще не готова (Ollama)") + ".",
+            "• Голосові розшифровуєш, коли немає пари (на парі просиш текстом); фото розглядаєш (кілька хвилин).",
+            "• Працюєш локально на ноутбуці студента, без інтернету; відеокарта — "
+            + ("не використовується (так у налаштуваннях)" if config.ears.device == "cpu" else "лише якщо вона допомагає (NVIDIA)") + ".",
+            "• Налаштування — у вікні програми autopara: «Налаштування».",
+        ]
+        try:
+            if upcoming := next_lesson(stack.schedule_text(now), now):
+                lines.append(f"• Найближча пара: {upcoming}.")
+        except Exception:  # noqa: BLE001
+            pass
+        return "\n".join(lines)
+
+    helper.about = about_me
+    stack.helper = helper
 
     if worker:
 
