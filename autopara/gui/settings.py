@@ -142,8 +142,8 @@ class SettingsPage(QWidget):
         else:
             more.add(self._zoom_cable())
         more.add(w.text_field(model, "brain.model", "Модель мозку", placeholder="gemma3:4b"))
-        more.add(w.text_field(model, "brain.chat_model", "Розумніша модель для розмов (поза парами)",
-                              placeholder="та сама — напр. gemma3:12b"))
+        more.add(w.text_field(model, "brain.chat_model", "Розумний режим: модель поза парами",
+                              placeholder="вимкнено — напр. qwen3.5:9b (потрібно ~9 ГБ вільної пам'яті)"))
         check = w.button("Перевірити мозок і вуха")
         result = w.label("", "muted")
 

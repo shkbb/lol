@@ -58,6 +58,8 @@ class Reporter:
         self.audio = None  # refine.LessonAudio — звук пари для уточнення після неї
         self.refiner = None  # refine.Refiner — друге, точніше розпізнавання після пари
         self.after_report: Callable[[], object] | None = None  # звіт надіслано (вивантажити мозок, якщо пар не буде)
+        # Хто пише підсумок пари після неї (brain.ChatBrain: розумна модель, коли можна); None — той самий мозок.
+        self.writer = None
         self._notes: dict[str, list[str]] = {}
         self._lock = threading.Lock()
 
@@ -103,9 +105,10 @@ class Reporter:
         record = replace(record, transcript=refined)
         parts = []
         if self.brain is not None:
+            writer = self.writer or self.brain
             for piece in _pieces([text for _, text in refined], CHUNK_CHARS):
                 try:
-                    if note := ukrainian(self.brain.summarize, CHUNK_PROMPT, piece):
+                    if note := ukrainian(writer.summarize, CHUNK_PROMPT, piece):
                         parts.append(note)
                 except BrainError as e:
                     log.warning("Не вдалося законспектувати шматок пари: %s", e)
@@ -159,7 +162,7 @@ class Reporter:
         if others:
             material += "\n\nЧат:\n" + "\n".join(others[-40:])
         try:
-            summary = ukrainian(self.brain.summarize, FINAL_PROMPT, material)
+            summary = ukrainian((self.writer or self.brain).summarize, FINAL_PROMPT, material)
             return summary if summary is not None else "\n".join(parts)
         except BrainError as e:
             log.warning("Не вдалося скласти звіт: %s", e)

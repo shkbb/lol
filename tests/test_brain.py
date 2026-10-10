@@ -208,20 +208,62 @@ def test_model_is_reloaded_every_few_requests_so_ollama_leak_does_not_pile_up():
 
 
 def test_chat_questions_go_to_the_big_model_only_when_free():
-    """Питання в Telegram не термінові: поза парами й з вільною пам'яттю — розумніша (повільніша) модель."""
-    small, big = FakeOllama("швидка"), FakeOllama("розумна")
-    quiet, free = [True], [10.0]
-    chat = ChatBrain(OllamaBrain("http://x", "gemma3:4b", session=small, gpu=False),
-                     OllamaBrain("http://x", "gemma3:12b", session=big, gpu=False),
-                     quiet=lambda: quiet[0], free_gb=lambda: free[0], need_gb=7)
-    assert chat.summarize("і", "т") == "швидка"  # велику ще не завантажено
-    chat.big_ready = True
-    assert chat.will_think_long() and chat.summarize("і", "т") == "розумна"
-    quiet[0] = False  # пара — лише швидка, процесор потрібен вухам
-    assert chat.summarize("і", "т") == "швидка"
-    quiet[0], free[0] = True, 3.0  # пам'яті мало
-    assert not chat.will_think_long() and chat.summarize("і", "т") == "швидка"
+    """Розумний режим: поза парами й коли вистачає пам'яті — велика модель (відповідь у Telegram, підсумок пари).
+    Перед нею вивантажуємо швидку; між шматками звіту велика лишається в пам'яті, а щойно знадобиться швидка —
+    спершу геть велику: дві моделі разом у пам'ять не влізуть."""
+    log = []
 
+    class Model:
+        def __init__(self, name):
+            self.name, self.before = name, None
+
+        def summarize(self, instruction, text, **options):
+            if self.before:
+                self.before()
+            log.append(f"{self.name}: відповідь")
+            return self.name
+
+        def unload(self):
+            log.append(f"{self.name}: вивантажено")
+
+    quiet, free, now = [True], [6.0], [0.0]
+    small, big = Model("швидка"), Model("розумна")
+    chat = ChatBrain(small, big, quiet=lambda: quiet[0], free_gb=lambda: free[0], need_gb=9,
+                     wait=lambda s: free.__setitem__(0, free[0] + 1), clock=lambda: now[0])
+    assert chat.summarize("і", "т") == "швидка"  # розумну ще не завантажено
+    chat.big_ready = True
+    log.clear()
+    assert chat.will_think_long() and chat.summarize("і", "т") == "розумна"
+    now[0] = 20
+    assert chat.summarize("і", "т") == "розумна"  # наступний шматок звіту — велика ще в пам'яті
+    # Спершу геть швидку, дочекались пам'яті (6 → 9 ГБ), далі розумна двічі поспіль без перезавантажень.
+    assert log == ["швидка: вивантажено", "розумна: відповідь", "розумна: відповідь"]
+    log.clear()
+    quiet[0] = False  # пара — лише швидка, а розумну перед тим геть з пам'яті
+    assert chat.summarize("і", "т") == "швидка" and log == ["розумна: вивантажено", "швидка: відповідь"]
+    quiet[0], free[0] = True, 2.0  # пам'яті мало навіть без швидкої
+    assert not chat.will_think_long() and chat.summarize("і", "т") == "швидка"
+    assert chat.summarize("і", "т", images=[b"jpg"]) == "швидка"  # фото — швидка (вона бачить картинки)
+
+
+def test_quick_model_waits_while_the_smart_one_answers():
+    """Спільний замок: поки розумна модель відповідає, запит швидкої (скажімо, звіт після пари) чекає."""
+    import threading
+
+    lock = threading.RLock()
+    slow = FakeOllama("ок")
+    brain = OllamaBrain("http://x", "gemma3:4b", session=slow, gpu=False, lock=lock)
+    big = OllamaBrain("http://x", "qwen3.5:9b", session=FakeOllama("розумно"), gpu=False, lock=lock)
+    big.think = False
+    done = []
+    with lock:  # «розумна думає»
+        worker = threading.Thread(target=lambda: done.append(brain.summarize("і", "т")))
+        worker.start()
+        worker.join(0.2)
+        assert done == []  # швидка чекає
+        assert big.summarize("і", "т") == "розумно" and big.session.payload["think"] is False
+    worker.join(2)
+    assert done == ["ок"] and "think" not in slow.payload
 
 def test_gpu_switched_off_in_settings_keeps_the_brain_on_processor(monkeypatch):
     """«Відеокарта: не використовувати взагалі» — і мовна модель лише на процесорі, навіть з окремою картою."""

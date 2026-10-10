@@ -140,3 +140,27 @@ def test_no_report_for_a_blink(tmp_path):
     assistant.attach("pair", "Бази даних (Лк)", "Петренко П.П.", at("09:30"), at("10:50"), now=at("10:00:33"))
     assistant.detach("pair", at("10:00:36"))
     assert list(inbox) == [] and not list(tmp_path.iterdir())
+
+
+def test_refined_report_is_written_by_the_writer_brain(tmp_path):
+    """Підсумок після пари (з уточненої розшифровки) пише «writer» — розумна модель, коли пари поруч немає й є
+    пам'ять (brain.ChatBrain); конспект наживо — далі швидкий мозок."""
+    inbox, live, smart = Inbox(), FakeBrain(), FakeBrain()
+    reporter = Reporter(inbox, live, InlineWorker(), tmp_path)
+    reporter.writer = smart
+    assistant = lesson_assistant(reporter)
+    assistant.on_heard("Розглядаємо індекси і B-дерева, " * 5, at("09:40"))
+    assistant.detach("pair", at("10:52"))
+    refined = [(at("09:40"), "Розглядаємо індекси, B-дерева й нормальні форми. " * 10)]
+    live_calls = len(live.calls)
+    reporter.complete(reporter_last_record(assistant, tmp_path), None, refined)
+    assert smart.calls and any(instruction == FINAL_PROMPT for instruction, _ in smart.calls)
+    assert len(live.calls) == live_calls  # швидкий мозок після пари більше не кликали
+
+
+def reporter_last_record(assistant, folder):
+    """Запис щойно завершеної пари — як його передає програма в звіт."""
+    return LessonRecord(report_id="pair#1", title="Бази даних (Лк)", teacher="Петренко П.П.", start=at("09:30"),
+                        end=at("10:50"), joined=at("09:28"), left=at("10:52"),
+                        transcript=[(at("09:40"), "Розглядаємо індекси.")], chat=[], mentions=[], sent=[], peak=24,
+                        rest="")

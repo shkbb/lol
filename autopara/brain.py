@@ -15,6 +15,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from datetime import datetime
 from time import monotonic
 from typing import Callable
@@ -104,7 +105,8 @@ class OllamaBrain:
     рахує процесор, і поки йде пара (``busy``), бере лише половину ядер — решта лишається вухам."""
 
     def __init__(self, url: str, model: str, session: requests.Session | None = None, timeout: float = 180,
-                 gpu: bool | None = None, busy: Callable[[], bool] = lambda: False):
+                 gpu: bool | None = None, busy: Callable[[], bool] = lambda: False,
+                 lock: threading.RLock | None = None):
         self.url = url.rstrip("/")
         self.model = model
         self.session = session or requests.Session()
@@ -112,6 +114,10 @@ class OllamaBrain:
         self.gpu = accel.brain_on_gpu() if gpu is None else gpu
         self.busy = busy
         self.keep_alive = KEEP_ALIVE
+        self.think: bool | None = None  # False — без «роздумів уголос» (Qwen думає за замовчуванням, це хвилини)
+        # Спільний замок кількох моделей: поки відповідає велика модель для розмов, швидка чекає (дві разом не влізуть).
+        self.lock = lock
+        self.before: Callable[[], None] | None = None  # перед кожним запитом (ChatBrain: прибрати велику з пам'яті)
         self._requests = 0
         self._count_lock = threading.Lock()
 
@@ -128,6 +134,16 @@ class OllamaBrain:
     def _ask(self, payload: dict, timeout: float) -> dict:
         """Запит до Ollama; після кожних REQUESTS_PER_LOAD — вивантажити модель (див. REQUESTS_PER_LOAD)."""
         payload = {**payload, "options": self._options(payload.get("options", {}))}
+        if self.think is not None:
+            payload["think"] = self.think
+        if self.lock is not None:
+            with self.lock:
+                if self.before is not None:
+                    self.before()
+                return self._post(payload, timeout)
+        return self._post(payload, timeout)
+
+    def _post(self, payload: dict, timeout: float) -> dict:
         try:
             response = self.session.post(f"{self.url}/api/chat", json=payload, timeout=timeout)
             response.raise_for_status()
@@ -395,29 +411,77 @@ class BrainWorker:
 
 
 class ChatBrain:
-    """Хто відповідає на вільні питання в Telegram. Вони не термінові — тож поза парами, коли вистачає пам'яті,
-    відповідає більша й розумніша модель (``big``; повільніше, до кількох хвилин: Ollama читає її з диска, якщо не
-    влазить у пам'ять), а під час пар чи коли пам'яті мало — швидка (``small``)."""
+    """Хто пише неспішні тексти: відповіді на вільні питання в Telegram і підсумки пар після них. Поза парами,
+    коли вистачає пам'яті, — більша й розумніша модель (``big``, «розумний режим»; повільніше), а під час пар чи
+    коли пам'яті мало — швидка (``small``).
+
+    Дві моделі разом у пам'ять не влазять, тож: перед великою вивантажуємо швидку й чекаємо, поки звільниться
+    ``need_gb``; велику тримаємо хвилину між запитами (звіт — це десяток шматків поспіль), а щойно знадобиться
+    швидка (рішення мозку, конспект) — спершу прибираємо велику. Увесь час, поки думає велика, швидка чекає на
+    спільному замку (``lock``)."""
+
+    SMALL_GB = 3.5  # стільки звільниться, коли вивантажимо швидку
+    WARM_SECONDS = 75  # велика тримається між запитами стільки (keep_alive 60 с + запас)
 
     def __init__(self, small: OllamaBrain, big: OllamaBrain | None, quiet: Callable[[], bool],
-                 free_gb: Callable[[], float | None], need_gb: float):
+                 free_gb: Callable[[], float | None], need_gb: float, lock: threading.RLock | None = None,
+                 wait: Callable[[float], None] = time.sleep, clock: Callable[[], float] = monotonic):
         self.small = small
         self.big = big
         self.quiet = quiet
         self.free_gb = free_gb
         self.need_gb = need_gb
+        self.lock = lock or threading.RLock()
+        self.wait = wait
+        self.clock = clock
         self.big_ready = False  # велику модель уже завантажено (див. BrainConnector)
+        self._big_used: float | None = None
+        if big is not None and hasattr(small, "before"):
+            small.before = self._evict_big  # будь-хто кличе швидку — спершу геть велику
 
     def will_think_long(self) -> bool:
         if self.big is None or not self.big_ready or not self.quiet():
             return False
         free = self.free_gb()
-        return free is None or free >= self.need_gb
+        warm = self._big_used is not None
+        return free is None or warm or free + self.SMALL_GB >= self.need_gb
+
+    def _evict_big(self) -> None:
+        if self._big_used is None or self.big is None:
+            return
+        self._big_used = None
+        try:
+            self.big.unload()
+        except Exception as e:  # noqa: BLE001
+            log.debug("Велика модель не вивантажилась: %s", e)
+
+    def _room(self) -> bool:
+        """Вивантажити швидку й дочекатися, поки звільниться пам'ять для великої (до ~10 с)."""
+        if self._big_used is not None and self.clock() - self._big_used < self.WARM_SECONDS:
+            return True  # велика ще в пам'яті з попереднього шматка
+        try:
+            self.small.unload()
+        except Exception as e:  # noqa: BLE001 — не вивантажилась: тоді просто не буде місця
+            log.debug("Швидка модель не вивантажилась: %s", e)
+        free = self.free_gb()
+        for _ in range(10):
+            free = self.free_gb()
+            if free is None or free >= self.need_gb:
+                return True
+            self.wait(1)
+        log.info("Розумний режим: вільно лише %.1f ГБ (треба %.1f) — пише швидка модель", free, self.need_gb)
+        return False
 
     def summarize(self, instruction: str, text: str, **options) -> str:
         if self.will_think_long() and not options.get("images"):
-            try:
-                return self.big.summarize(instruction, text, **options)
-            except BrainError as e:
-                log.warning("Велика модель не відповіла (%s) — відповідає швидка", e)
+            with self.lock:
+                if self.quiet() and self._room():
+                    try:
+                        answer = self.big.summarize(instruction, text, **options)
+                        self._big_used = self.clock()
+                        return answer
+                    except BrainError as e:
+                        log.warning("Велика модель не відповіла (%s) — пише швидка", e)
+                        self._evict_big()
+                        self._big_used = None
         return self.small.summarize(instruction, text, **options)

@@ -59,7 +59,7 @@ class Stack:
     media: Callable[[object], str | None] | None = None  # голосове чи фото з Telegram (telegram.Incoming)
 
 
-BIG_CHAT_FREE_GB = 7.0  # стільки вільної пам'яті — і поза парами відповідає велика модель для розмов
+BIG_CHAT_FREE_GB = 9.0  # стільки вільної пам'яті (без швидкої моделі) — і поза парами відповідає розумна модель
 
 
 @contextmanager
@@ -80,7 +80,9 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     if config.brain.enabled:
         # [ears] device = "cpu" — відеокарту не використовувати взагалі: і для вух, і для мовної моделі.
         no_gpu = False if config.ears.device == "cpu" else None
-        brain = OllamaBrain(config.brain.url, config.brain.model, busy=lambda: not stack.refine_allowed(), gpu=no_gpu)
+        models_lock = threading.RLock()  # швидка й розумна моделі — по черзі (див. ChatBrain)
+        brain = OllamaBrain(config.brain.url, config.brain.model, busy=lambda: not stack.refine_allowed(), gpu=no_gpu,
+                            lock=models_lock)
         worker = BrainWorker(brain, clock)
         stoppers.append(worker.stop)
 
@@ -271,10 +273,11 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         big = None
         if config.brain.chat_model and config.brain.chat_model != config.brain.model:
             big = OllamaBrain(config.brain.url, config.brain.chat_model, timeout=600, busy=lambda: not stack.refine_allowed(),
-                              gpu=False if config.ears.device == "cpu" else None)
-            big.keep_alive = "3m"  # кілька питань поспіль — без перезавантаження, а потім пам'ять назад
+                              gpu=False if config.ears.device == "cpu" else None, lock=models_lock)
+            big.keep_alive = "60s"  # звіт — десяток шматків поспіль; далі сама геть з пам'яті (і швидку не пустить разом)
+            big.think = False  # Qwen за замовчуванням «думає вголос» — це ще хвилини; відповідь і без того добра
         chat_brain = ChatBrain(brain, big, quiet=lambda: stack.refine_allowed(), free_gb=available_ram_gb,
-                               need_gb=BIG_CHAT_FREE_GB)
+                               need_gb=BIG_CHAT_FREE_GB, lock=models_lock)
         if big is not None:
             big_connector = BrainConnector(big, lambda: (setattr(chat_brain, "big_ready", True),
                                                          log.info("Мозок для розмов: %s", big.model)))
@@ -288,6 +291,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             helper.ask = lambda system, text: chat_brain.summarize(system, text, num_predict=900)
             helper.see = lambda system, text, image: brain.summarize(system, text, num_predict=700, images=[image])
             reporter.brain, reporter.worker = brain, worker
+            reporter.writer = chat_brain  # підсумок після пари — розумною моделлю, коли пари поруч немає й є пам'ять
             log.info("Мозок: модель %s", config.brain.model)
 
         connector = BrainConnector(brain, brain_ready)
