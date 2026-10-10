@@ -1035,6 +1035,22 @@ def decode_file(path: Path, seconds: float) -> bytes:
     return result.stdout
 
 
+def voice_pcm(data: bytes, seconds: float = 300) -> bytes:
+    """Голосове з Telegram (ogg/opus, mp3 — будь-що, що читає ffmpeg) → звук для Whisper (16 кГц, моно), до 5 хв."""
+    from .media import ffmpeg_path
+
+    ffmpeg = ffmpeg_path()
+    if ffmpeg is None:
+        raise EarsError("щоб розшифрувати голосове, потрібен ffmpeg")
+    result = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", "pipe:0", "-t", str(seconds), "-f", "s16le", "-ac", "1", "-ar", str(RATE), "-"],
+        input=data, capture_output=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise EarsError(f"ffmpeg не прочитав голосове: {result.stderr.decode(errors='replace').strip()[:200]}")
+    return result.stdout
+
+
 def record(source: str, seconds: float) -> bytes:
     """Записати кілька секунд з аудіоджерела (для listen-test)."""
     process = record_process(source)

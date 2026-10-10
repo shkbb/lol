@@ -122,7 +122,7 @@ def test_any_conversation_knows_schedule_and_recent_lessons_but_does_not_dump_re
     assert helper.route("Чи встигну в магазин перед наступною парою?") == "search"  # це розмова, не розклад
     assert helper.answer("Чи встигну в магазин перед наступною парою?", NOW) == "Встигнеш: пара о 08:00."
     system, text = prompts[-1]
-    assert "про будь-що" in system and "лише українською" in system
+    assert "з чим завгодно" in system and "лише українською" in system and "Інтернету в тебе немає" in system
     assert "08:00–09:20 Архітектура ПЗ" in text and "09.10 12:40 Безпека розробки" in text  # розклад і останні пари
     for chat in ("сьогодні був важкий день", "Допоможи написати лист викладачу, що я захворів", "Про що ця пісня?"):
         assert not helper.answer(chat, NOW).startswith(("📖", "📝"))  # не вивалює підсумки пар

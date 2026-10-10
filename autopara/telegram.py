@@ -27,6 +27,11 @@ class TelegramError(Exception):
     pass
 
 
+FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
+TEXT_LIMIT = 4000  # Telegram приймає до 4096 знаків в одному повідомленні
+THINKING = "👀"  # реакція на твоє повідомлення: «прочитав, думаю» — замість окремого «Думаю…»
+
+
 @dataclass(frozen=True)
 class Incoming:
     chat_id: int
@@ -34,6 +39,24 @@ class Incoming:
     is_reply: bool  # відповідь на якесь повідомлення бота
     callback_id: str = ""  # натиснута кнопка під повідомленням бота
     replied: str = ""  # текст повідомлення бота, на яке відповіли
+    message_id: int = 0  # твоє повідомлення — на нього бот відповідає реплаєм
+    voice: str = ""  # file_id голосового повідомлення
+    photo: str = ""  # file_id фото (найбільший розмір, що не завеликий)
+
+
+def split_text(text: str, limit: int = TEXT_LIMIT) -> list[str]:
+    """Довгу відповідь — кількома повідомленнями, розрізаючи між абзацами чи рядками, а не посеред слова."""
+    parts: list[str] = []
+    rest = text.strip()
+    while len(rest) > limit:
+        cut = max(rest.rfind("\n\n", 0, limit), rest.rfind("\n", 0, limit))
+        if cut < limit // 2:
+            cut = rest.rfind(" ", 0, limit)
+        if cut <= 0:
+            cut = limit
+        parts.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    return parts + ([rest] if rest else [])
 
 
 Buttons = list[list[tuple[str, str]]]  # рядки кнопок: (підпис, що «написати» боту при натисканні)
@@ -47,6 +70,7 @@ class TelegramBot:
         self._offset = 0
         # Чи йде відповідь на це повідомлення бота в чат пари (решта відповідей — розмова з ботом).
         self.reply_goes_to_chat: Callable[[str], bool] = lambda replied: True
+        self.current: Incoming | None = None  # повідомлення, яке зараз обробляємо
 
     def _call(self, method: str, http_timeout: float = 20, files: dict | None = None, **params) -> object:
         url = API.format(token=self.token, method=method)
@@ -71,13 +95,39 @@ class TelegramBot:
         """Підтвердити Telegram, що вже прочитані оновлення оброблено, щоб вони не прийшли знову."""
         self._call("getUpdates", offset=self._offset, timeout=0, limit=1)
 
-    def send(self, text: str, buttons: Buttons | None = None) -> None:
-        params = {"chat_id": self.chat_id, "text": text[:4000]}
-        if buttons:
-            params["reply_markup"] = {
-                "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]
-            }
-        self._call("sendMessage", **params)
+    def send(self, text: str, buttons: Buttons | None = None, reply_to: int = 0) -> None:
+        """Повідомлення (довге — кількома). ``reply_to`` — відповісти реплаєм на твоє повідомлення: так відповідь
+        не сплутаєш зі звітом про пару, що прийшов саме тоді."""
+        parts = split_text(text) or [""]
+        for index, part in enumerate(parts):
+            params: dict = {"chat_id": self.chat_id, "text": part}
+            if reply_to and index == 0:
+                params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
+            if buttons and index == len(parts) - 1:
+                params["reply_markup"] = {
+                    "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]
+                }
+            self._call("sendMessage", **params)
+
+    def react(self, message_id: int, emoji: str = THINKING) -> None:
+        """Реакція на твоє повідомлення (👀 — «прочитав, думаю»); "" — прибрати. Не вийшло — не біда."""
+        try:
+            self._call("setMessageReaction", chat_id=self.chat_id, message_id=message_id,
+                       reaction=[{"type": "emoji", "emoji": emoji}] if emoji else [])
+        except TelegramError as e:
+            log.debug("Реакція не поставилась: %s", e)
+
+    def download(self, file_id: str, limit: int = 20 * 2**20) -> bytes:
+        """Файл, який ти надіслав боту (голосове, фото). Більше ``limit`` — не тягнемо."""
+        info = self._call("getFile", file_id=file_id)
+        if int(info.get("file_size") or 0) > limit:
+            raise TelegramError("файл завеликий")
+        try:
+            response = self.session.get(FILE_API.format(token=self.token, path=info["file_path"]), timeout=120)
+            response.raise_for_status()
+        except (requests.RequestException, KeyError) as e:
+            raise TelegramError(f"не вдалося завантажити файл: {e}") from e
+        return response.content
 
     def _send_file(self, method: str, field: str, filename: str, content: bytes, caption: str) -> None:
         self._call(method, files={field: (filename, content)}, chat_id=self.chat_id, caption=caption[:CAPTION_LIMIT])
@@ -107,18 +157,23 @@ class TelegramBot:
         for update in result:
             self._offset = max(self._offset, update["update_id"] + 1)
             message = update.get("message") or {}
-            if "text" in message:
+            voice = (message.get("voice") or message.get("audio") or message.get("video_note") or {}).get("file_id", "")
+            photo = _photo_id(message)
+            if "text" in message or voice or photo:
                 original = message.get("reply_to_message") or {}
                 replied = original.get("text") or original.get("caption") or ""
-                messages.append(Incoming(message["chat"]["id"], message["text"], "reply_to_message" in message,
-                                         replied=replied))
+                text = message.get("text") or message.get("caption") or ""
+                messages.append(Incoming(message["chat"]["id"], text, "reply_to_message" in message, replied=replied,
+                                         message_id=message.get("message_id", 0), voice=voice, photo=photo))
             if callback := update.get("callback_query"):
                 chat_id = (callback.get("message") or {}).get("chat", {}).get("id", 0)
                 messages.append(Incoming(chat_id, callback.get("data", ""), False, callback["id"]))
         return messages
 
-    def listen(self, handle: Callable[[str, bool], str | None], stop: threading.Event) -> None:
-        """Приймає команди лише з твого чату й відповідає на них. Блокує — запускай у потоці."""
+    def listen(self, handle: Callable[[str, bool], str | None], stop: threading.Event,
+               media: Callable[[Incoming], str | None] | None = None) -> None:
+        """Приймає команди лише з твого чату й відповідає на них (реплаєм на твоє повідомлення). Голосові й фото —
+        у ``media``. Блокує — запускай у потоці."""
         while not stop.is_set():
             try:
                 for incoming in self.updates():
@@ -130,16 +185,33 @@ class TelegramBot:
                     # Відповідь іде в чат пари лише на сповіщення, що чекає відповіді («тебе кличуть»); відповідь
                     # на будь-що інше (скажімо, на відповідь мозку) — це просто продовження розмови з ботом.
                     is_reply = incoming.is_reply and self.reply_goes_to_chat(incoming.replied)
+                    self.current = incoming  # хто питає — щоб відповідь, яка прийде пізніше, була реплаєм на нього
                     try:
-                        reply = handle(incoming.text, is_reply)
+                        if incoming.voice or incoming.photo:
+                            reply = media(incoming) if media else "Голосові й фото я поки не вмію — напиши текстом."
+                        else:
+                            reply = handle(incoming.text, is_reply)
                     except Exception:  # noqa: BLE001 — одна зламана команда не має глушити бота
                         log.exception("Команда «%s» з Telegram не вдалася", incoming.text[:40])
                         reply = "⚠️ Не вийшло — подробиці в журналі програми."
                     if reply:
-                        self.send(reply)
+                        self.send(reply, reply_to=incoming.message_id)
             except TelegramError as e:
                 log.warning("%s — повторю за хвилину", e)
                 stop.wait(60)
+
+
+def _photo_id(message: dict) -> str:
+    """Фото з повідомлення: найбільший розмір до ~1280 пікселів (більше мовній моделі не треба). Картинка,
+    надіслана файлом, — теж."""
+    sizes = message.get("photo") or []
+    if sizes:
+        fitting = [size for size in sizes if max(size.get("width", 0), size.get("height", 0)) <= 1280] or sizes[:1]
+        return fitting[-1].get("file_id", "")
+    document = message.get("document") or {}
+    if str(document.get("mime_type", "")).startswith("image/"):
+        return document.get("file_id", "")
+    return ""
 
 
 def wait_for_code(token: str, code: str, wait_seconds: int = 180, session: requests.Session | None = None) -> int | None:
@@ -249,6 +321,16 @@ class Notifier:
                 self.bot.send(text, buttons)
 
         self._queue.put(job)
+
+    def reply(self, text: str, reply_to: int = 0) -> None:
+        """Відповідь у розмові з ботом — реплаєм на твоє повідомлення (лише в Telegram, без сповіщення на столі)."""
+        log.info("💬 %s", text.splitlines()[0][:200] if text else "")
+        if self.bot:
+            self._queue.put(lambda: self.bot.send(text, reply_to=reply_to))
+
+    def react(self, message_id: int, emoji: str = THINKING) -> None:
+        if self.bot and message_id:
+            self._queue.put(lambda: self.bot.react(message_id, emoji))
 
     def _media(self, send: Callable[[TelegramBot], None], caption: str, what: str) -> None:
         log.info("🔔 [%s] %s", what, caption.splitlines()[0] if caption else "")

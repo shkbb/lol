@@ -730,3 +730,10 @@ def test_brain_knows_why_the_app_left():
     assistant.note_event(at("13:26"), "👋 Вийшов з «Програмування мобільних пристроїв (Лк)»: зустріч завершилась")
     assistant.on_command("чому вийшов раніше?", at("13:27"))
     assert "13:26 👋 Вийшов з «Програмування мобільних пристроїв (Лк)»: зустріч завершилась" in asked[0]
+
+
+def test_question_for_the_model_gets_a_reaction_not_a_thinking_message():
+    """Замість «🧠 Думаю…» — 👀 на питання, а відповідь потім реплаєм: ask_brain повертає "" — нічого не писати."""
+    assistant = Assistant(MeSettings(name="Ляшко Денис"), Inbox())
+    assistant.ask_brain = lambda question, context, current: ""
+    assert assistant.on_command("Дай рецепт борщу", at("12:00")) == ""

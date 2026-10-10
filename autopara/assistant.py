@@ -950,8 +950,9 @@ class Assistant:
                 if self.dialog:
                     context += "\n\nРозмова перед цим:\n" + "\n".join(f"{who}: {said}" for who, said in self.dialog)
                 self.dialog.append(("Студент", command[:500]))
+                # Готова відповідь — одразу; "" — відповідь прийде пізніше реплаєм (бот уже поставив 👀).
                 ready = self.ask_brain(command[:500], context, meeting.title if meeting else "")
-                return ready or "🧠 Думаю… відповім за хвилину."  # з даних — одразу, мовній моделі треба час
+                return ready if ready is not None else "🧠 Думаю… відповім за хвилину."
             if meeting is None:
                 return "Зараз я не на парі."
             if not meeting.can_chat and (

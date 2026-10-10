@@ -29,6 +29,7 @@ from .ears import (
     pick_source,
     pulse_available,
     resolve_refine_model,
+    voice_pcm,
     whisper_available,
 )
 from .media import AudioBuffer, Clipper, FrameBuffer
@@ -55,6 +56,7 @@ class Stack:
     refine_allowed: Callable[[], bool] = lambda: True
     voice_meter: object | None = None  # ears.VoiceMeter, якщо вуха ввімкнені
     schedule_text: Callable[[datetime], str] = lambda now: ""  # розклад текстом (app.py підставляє з Runner)
+    media: Callable[[object], str | None] | None = None  # голосове чи фото з Telegram (telegram.Incoming)
 
 
 BIG_CHAT_FREE_GB = 7.0  # стільки вільної пам'яті — і поза парами відповідає велика модель для розмов
@@ -98,7 +100,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         stop = threading.Event()
         listener = threading.Thread(
             target=bot.listen,
-            args=(lambda text, is_reply: assistant.on_command(text, clock(), is_reply), stop),
+            args=(lambda text, is_reply: assistant.on_command(text, clock(), is_reply), stop,
+                  lambda incoming: stack.media(incoming) if stack.media else "Голосові й фото я ще не вмію — напиши текстом."),
             name="telegram",
             daemon=True,
         )
@@ -168,8 +171,15 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     # пошук у записах і розмова — коли модель готова (helper.ask). Див. helper.py.
     helper = Helper(Library(lessons_folder), None, schedule=lambda now: stack.schedule_text(now))
 
-    def answer(question: str, context: str, current: str) -> None:
-        """Відповідь, якій потрібна мовна модель (окремим потоком — це до хвилини)."""
+    asking = threading.local()  # на яке повідомлення відповідаємо (голосове розшифровується в іншому потоці)
+
+    def reply_to() -> int:
+        explicit = getattr(asking, "message_id", 0)
+        current = bot.current if bot is not None else None
+        return explicit or (current.message_id if current is not None else 0)
+
+    def answer(question: str, context: str, current: str, to: int) -> None:
+        """Відповідь, якій потрібна мовна модель (окремим потоком — це до хвилини), — реплаєм на питання."""
         now = clock()
         dialog, events = assistant.chat_memory(now)
         try:
@@ -178,10 +188,11 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             reply = f"не вийшло відповісти: {e}"
         else:
             assistant.remember_reply(reply)
-        notifier(reply if reply.startswith(("📅", "📖", "📝", "👤", "У записах")) else f"🧠 {reply}")
+        notifier.reply(reply if reply.startswith(("📅", "📖", "📝", "👤", "У записах")) else f"🧠 {reply}", to)
 
     def ask(question: str, context: str, current: str) -> str | None:
-        """Питання з Telegram: відповідь з даних — одразу (рядок), інакше думаємо у фоні (None)."""
+        """Питання з Telegram: відповідь з даних — одразу (рядок); інакше 👀 на питання, а відповідь — реплаєм
+        пізніше ("" — нічого не писати зараз)."""
         try:
             ready = helper.quick(question, clock())
         except Exception as e:  # noqa: BLE001 — зіпсований запис пари не має ламати розмову
@@ -192,13 +203,63 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             return ready
         if helper.ask is None:
             return "🧠 Мовна модель ще не готова (Ollama) — на таке відповім, щойно вона запуститься. Розклад, завдання й «що було на парі» — питай уже."
-        threading.Thread(target=answer, args=(question, context, current), name="brain-question", daemon=True).start()
-        if chat_brain is not None and chat_brain.will_think_long():
-            return "🧠 Думаю — розумнішою моделлю, це до кількох хвилин…"
-        return None
+        to = reply_to()
+        notifier.react(to)
+        threading.Thread(target=answer, args=(question, context, current, to), name="brain-question", daemon=True).start()
+        return ""
+
+    def media(incoming) -> str | None:
+        """Голосове — розшифрувати (поза парами) й відповісти як на текст; фото — показати мовній моделі."""
+        if incoming.voice:
+            if not stack.refine_allowed():
+                return "🎧 Я зараз на парі — вуха зайняті нею. Напиши, будь ласка, текстом."
+            transcriber = ears.transcribe if ears is not None else None
+            if transcriber is None:
+                return "Розпізнавання мови вимкнене чи ще вантажиться — напиши, будь ласка, текстом."
+            notifier.react(incoming.message_id)
+            threading.Thread(target=hear_voice, args=(incoming, transcriber), name="voice-question", daemon=True).start()
+            return ""
+        if helper.see is None:
+            return "Мовна модель ще не готова (Ollama) — фото подивлюся, щойно вона запуститься."
+        notifier.react(incoming.message_id)
+        threading.Thread(target=see_photo, args=(incoming,), name="photo-question", daemon=True).start()
+        return ""
+
+    def hear_voice(incoming, transcriber) -> None:
+        to = incoming.message_id
+        try:
+            text = " ".join(item.text for item in transcriber(voice_pcm(bot.download(incoming.voice)))).strip()
+        except Exception as e:  # noqa: BLE001 — не вийшло розшифрувати: так і сказати
+            log.warning("Голосове: %s", e)
+            notifier.reply("Не вийшло розшифрувати голосове — напиши, будь ласка, текстом.", to)
+            return
+        if not text:
+            notifier.reply("Не розчув — спробуй ще раз або напиши текстом.", to)
+            return
+        notifier.reply(f"🎤 «{text}»", to)
+        asking.message_id = to
+        try:
+            reply = assistant.on_command(text, clock(), False)
+        finally:
+            asking.message_id = 0
+        if reply:
+            notifier.reply(reply, to)
+
+    def see_photo(incoming) -> None:
+        to = incoming.message_id
+        now = clock()
+        dialog, events = assistant.chat_memory(now)
+        try:
+            reply = helper.look(incoming.text, bot.download(incoming.photo), now, dialog=dialog, events=events)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Фото: %s", e)
+            reply = "Не вийшло подивитися фото — надішли, будь ласка, ще раз."
+        assistant.remember_reply(reply)
+        notifier.reply(f"🧠 {reply}", to)
 
     if listening:
         assistant.ask_brain = ask
+        stack.media = media
 
     chat_brain = None
     if brain is not None:
@@ -218,7 +279,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
         def brain_ready() -> None:
             assistant.wake_brain = worker.wake
-            helper.ask = chat_brain.summarize
+            helper.ask = lambda system, text: chat_brain.summarize(system, text, num_predict=900)
+            helper.see = lambda system, text, image: brain.summarize(system, text, num_predict=700, images=[image])
             reporter.brain, reporter.worker = brain, worker
             log.info("Мозок: модель %s", config.brain.model)
 

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -168,18 +169,23 @@ class OllamaBrain:
             log.debug("Не вдалося вивантажити модель мозку: %s", e)
             return False
 
-    def summarize(self, instruction: str, text: str, num_ctx: int | None = None) -> str:
+    def summarize(self, instruction: str, text: str, num_ctx: int | None = None, num_predict: int = 400,
+                  images: list[bytes] | None = None) -> str:
         """Вільний текст (конспект, звіт, відповідь помічника) — без JSON і без дій. ``num_ctx`` — інший розмір
-        контексту, ніж CONTEXT (лише якщо справді треба: зміна розміру — це перезавантаження моделі)."""
-        options: dict = {"temperature": 0.2, "num_predict": 400}
+        контексту, ніж CONTEXT (лише якщо справді треба: зміна розміру — це перезавантаження моделі).
+        ``images`` — фото до питання (gemma3 бачить картинки)."""
+        options: dict = {"temperature": 0.2, "num_predict": num_predict}
         if num_ctx:
             options["num_ctx"] = num_ctx
+        user: dict = {"role": "user", "content": text}
+        if images:
+            user["images"] = [base64.b64encode(image).decode("ascii") for image in images]
         payload = {
             "model": self.model,
             "stream": False,
             "keep_alive": self.keep_alive,
             "options": options,
-            "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": text}],
+            "messages": [{"role": "system", "content": instruction}, user],
         }
         try:
             return self._ask(payload, self.timeout * 2)["message"]["content"].strip()
@@ -408,10 +414,10 @@ class ChatBrain:
         free = self.free_gb()
         return free is None or free >= self.need_gb
 
-    def summarize(self, instruction: str, text: str) -> str:
-        if self.will_think_long():
+    def summarize(self, instruction: str, text: str, **options) -> str:
+        if self.will_think_long() and not options.get("images"):
             try:
-                return self.big.summarize(instruction, text)
+                return self.big.summarize(instruction, text, **options)
             except BrainError as e:
                 log.warning("Велика модель не відповіла (%s) — відповідає швидка", e)
-        return self.small.summarize(instruction, text)
+        return self.small.summarize(instruction, text, **options)

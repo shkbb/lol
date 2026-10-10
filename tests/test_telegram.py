@@ -167,3 +167,34 @@ def test_reply_goes_to_the_meeting_only_when_it_answers_an_alert():
 
     bot.listen(handle, stop)
     assert heard == [("Так, я тут", True), ("а що ще?", False)]
+
+
+def test_answers_are_replies_long_ones_split_and_media_goes_to_its_handler():
+    """Відповідь — реплаєм на твоє повідомлення (не сплутаєш зі звітом), довга — кількома повідомленнями;
+    голосові й фото — окремому обробнику."""
+    voice = {"update_id": 5, "message": {"message_id": 70, "chat": {"id": 42}, "voice": {"file_id": "v1", "duration": 4}}}
+    photo = {"update_id": 6, "message": {"message_id": 71, "chat": {"id": 42}, "caption": "що це?", "photo": [
+        {"file_id": "small", "width": 320, "height": 240}, {"file_id": "mid", "width": 1280, "height": 960},
+        {"file_id": "huge", "width": 4000, "height": 3000}]}}
+    text = update(7, 42, "рецепт борщу")
+    text["message"]["message_id"] = 72
+    api = FakeApi([voice, photo, text])
+    bot = TelegramBot("123:abc", chat_id=42, session=api)
+    stop = threading.Event()
+    got = []
+
+    def media(incoming):
+        got.append((incoming.voice, incoming.photo, incoming.text, incoming.message_id))
+        return ""  # відповість пізніше реплаєм (бот уже поставив 👀)
+
+    def handle(text, is_reply):
+        stop.set()
+        return "Інгредієнти:\n" + "• буряк\n" * 900  # ~7 тис. знаків — два повідомлення
+
+    bot.listen(handle, stop, media)
+    assert got == [("v1", "", "", 70), ("", "mid", "що це?", 71)]  # фото — найбільше до 1280 пікселів
+    sent = [params for method, params, _ in api.calls if method == "sendMessage"]
+    assert len(sent) == 2 and all(len(params["text"]) <= 4000 for params in sent)
+    assert sent[0]["reply_parameters"]["message_id"] == 72 and "reply_parameters" not in sent[1]
+    bot.react(72)
+    assert api.calls[-1][0] == "setMessageReaction" and api.calls[-1][1]["reaction"] == [{"type": "emoji", "emoji": "👀"}]
