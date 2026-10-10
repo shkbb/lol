@@ -35,7 +35,7 @@ from .ears import (
 from .media import AudioBuffer, Clipper, FrameBuffer
 from . import notes
 from .refine import LessonAudio, Refiner
-from .helper import Helper, Library
+from .helper import Helper, Library, subject_terms
 from .report import Reporter
 from .telegram import Notifier, TelegramBot
 
@@ -150,6 +150,15 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     # Кожна пара — запис у теку її предмета (завжди); звіт у Telegram — якщо ввімкнено.
     lessons_folder = config.data_dir / notes.FOLDER
+    def refine_hint(record) -> str:
+        """Підказка для уточнення після пари: прізвище, викладач, пара · терміни предмета (див. ears.split_hint)."""
+        names = ", ".join(part for part in (config.me.name.split()[:1] + [record.teacher, record.title]) if part)
+        try:
+            terms = assistant.terms_for(record.title) if assistant.terms_for else []
+        except Exception:  # noqa: BLE001 — без словника однаково розпізнаємо
+            terms = []
+        return names + (" · " + ", ".join(terms) if terms else "")
+
     reporter = Reporter(notifier, None, None, lessons_folder, send=config.telegram.reports)
     assistant.on_chunk = reporter.chunk
     assistant.on_finished = reporter.finish
@@ -160,7 +169,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             config.data_dir / "audio",
             refine_name,
             config.ears.language,
-            lambda record: ", ".join(part for part in (config.me.name, record.teacher, record.title) if part),
+            lambda record: refine_hint(record),
             reporter.complete,
             reporter.fallback,
             allowed=lambda: stack.refine_allowed(),
@@ -332,6 +341,14 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
 
     helper.about = about_me
     stack.helper = helper
+
+    def terms_for(title: str) -> list[str]:
+        """Словник предмета з його записів (helper.subject_terms) — для Whisper наживо й після пари."""
+        subject = notes.split_title(title)[0]
+        helper.library.refresh()
+        return subject_terms([doc for doc in helper.library.docs if doc.subject == subject])
+
+    assistant.terms_for = terms_for
 
     # Сторож: мовчазні проблеми (диск, Ollama, застрягле уточнення, старий розклад) — у Telegram, з порадою.
     checks = [health.disk_check(config.data_dir), health.refine_check(config.data_dir / "audio"),

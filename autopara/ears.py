@@ -585,7 +585,8 @@ class WhisperTranscriber:
                        temperature=0.0)
         hint = self.hints() if self.hints else ""
         if hint and self._hotwords:
-            options["hotwords"] = hint
+            options["hotwords"] = hotwords(hint)
+        hint = split_hint(hint)[0]
         with self.gate.live():
             try:
                 segments = self._run(audio, options)
@@ -614,13 +615,15 @@ class WhisperTranscriber:
 
         lines: list[tuple[float, str]] = []
         previous = ""
+        hot = hotwords(hint)
+        hint = split_hint(hint)[0]
         for offset, piece in split_quietly(pcm, piece_seconds):
             audio = np.frombuffer(piece, dtype=np.int16).astype(np.float32) / 32768.0
             prompt = " ".join(part for part in (hint, previous[-200:]) if part)
             options = dict(language=self.language, vad_filter=True, beam_size=beam_size, best_of=beam_size,
                            condition_on_previous_text=True, temperature=[0.0, 0.2, 0.4], initial_prompt=prompt or None)
-            if hint and self._hotwords:
-                options["hotwords"] = hint
+            if hot and self._hotwords:
+                options["hotwords"] = hot
             with self.gate.background(stop):
                 segments = iter(self.model.transcribe(audio, **options)[0])
             done_until = 0.0  # відеокарта здалася посеред шматка — на процесорі продовжуємо з цього місця
@@ -645,6 +648,21 @@ class WhisperTranscriber:
                     lines.append((offset + segment.start, text))
                     previous = (previous + " " + text)[-400:]
         return lines
+
+
+TERMS_MARK = " · "  # підказка Whisper: «імена, викладач, пара · терміни предмета»
+
+
+def split_hint(hint: str) -> tuple[str, str]:
+    """(імена й назва пари, терміни предмета). Терміни — лише як «гарячі слова»: фільтр «модель повторила
+    підказку» дивиться тільки на імена, тож справжнє речення «SQL-ін'єкції й OWASP» не загубиться."""
+    names, _, terms = hint.partition(TERMS_MARK)
+    return names, terms
+
+
+def hotwords(hint: str) -> str:
+    names, terms = split_hint(hint)
+    return ", ".join(part for part in (names, terms) if part)
 
 
 def is_hint_echo(text: str, hint: str) -> bool:

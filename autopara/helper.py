@@ -395,6 +395,38 @@ def _when_label(day: str, now: datetime) -> str:
     return day
 
 
+TERM_RE = re.compile(r"(?<![\w-])[A-Za-z][A-Za-z0-9+#]*(?:[-.][A-Za-z0-9+#]+)*(?![\w-])")
+ENGLISH_STOP = set("""the a an and or of to in on at is are be it this that then than true false with for from by as not no yes
+you we they he she i my your our their his her its if else do does did so but all any some one two three what when where
+which who how why can will would should could may might must here there out up down over under into about just also very
+white black ok okay hello hi bye select void loop setup print""".split())
+
+
+def subject_terms(docs: list[LessonDoc], limit: int = 12) -> list[str]:
+    """Словник предмета — терміни латиницею (OWASP, PCI DSS, Arduino, Serial Monitor), які Whisper інакше перекручує.
+    Збирається сам із записів пар цього предмета: терміни з підсумків, що прозвучали щонайменше на двох парах (тож
+    на початку семестру словник малий і росте). Імен людей тут немає — лише латиниця."""
+    in_summary, in_lessons, total, spelled = Counter(), Counter(), Counter(), {}
+    for doc in docs:
+        summary = {t.lower(): t for t in TERM_RE.findall(doc.summary)}
+        heard = Counter(t for t in TERM_RE.findall(" ".join(text for _, text in doc.lines)))
+        for key, term in summary.items():
+            in_summary[key] += 1
+            spelled.setdefault(key, term)
+        for term, count in heard.items():
+            key = term.lower()
+            total[key] += count
+            spelled.setdefault(key, term)
+        for key in {term.lower() for term in heard}:
+            in_lessons[key] += 1
+    # Помилки самого Whisper («DUST» замість DAST) трапляються й у розшифровках, і в підсумках (мовна модель їх
+    # переписує), а як підказка вони б їх лише закріпили. Справжній термін курсу повторюється з пари в пару, а
+    # випадкова помилка — рідко: тож лише те, що є в підсумку й прозвучало щонайменше на двох парах.
+    keys = [key for key in in_summary if key not in ENGLISH_STOP and len(key) >= 3 and in_lessons[key] >= 2]
+    keys.sort(key=lambda key: (-(in_summary[key] * 2 + in_lessons[key]), -total[key], key))
+    return [spelled[key] for key in keys[:limit]]
+
+
 def _day_from(question: str, today: date) -> date | None:
     low = question.lower()
     if "позавчора" in low:

@@ -28,6 +28,8 @@ from typing import Callable
 from .config import MeSettings
 from .lang import looks_russian
 
+TERMS_MARK = " · "  # як ears.TERMS_MARK: «імена, викладач, пара · терміни предмета»
+
 log = logging.getLogger(__name__)
 
 BURST_WINDOW = timedelta(minutes=3)
@@ -306,6 +308,8 @@ class Assistant:
         self._patterns = name_patterns(me.name)
         self._address = first_name_address(me.name)
         self._classmates: list[re.Pattern] = []  # прізвища однокурсників — для переклички голосом
+        # Словник предмета для Whisper (назва пари → терміни латиницею з попередніх записів). None — без нього.
+        self.terms_for: Callable[[str], list[str]] | None = None
         self.ears_on = False  # чи справді слухаємо пару (від цього залежить, чи можна діяти без питань)
         self.can_ask = True  # чи можна спитати тебе: бот приймає відповіді й кнопки
         self.alert_mentions = True  # сповіщати, коли тебе кличуть
@@ -577,7 +581,10 @@ class Assistant:
             parts = self.me.name.split()[:1]
             if meeting is not None:
                 parts += [meeting.teacher, re.sub(r"\s*\(.*?\)", "", meeting.title)]
-        return ", ".join(part for part in parts if part)
+            title = meeting.title if meeting is not None else ""
+        hint = ", ".join(part for part in parts if part)
+        terms = self.terms_for(title) if title and self.terms_for is not None else []
+        return hint + (TERMS_MARK + ", ".join(terms) if terms else "")
 
     def quote(self, key: str, start: datetime, end: datetime, limit: int = 1500) -> str:
         """Що казали й писали між start і end — детальна цитата для вирізки."""

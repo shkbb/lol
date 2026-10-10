@@ -745,3 +745,9 @@ def test_help_describes_everything_the_bot_does():
     for part in ("мікрофон і камера вимкнені", "🚨 тебе кличуть", "У чат пари сам не пишу", "звіт", "статус", "напиши <текст>",
                  "що задали з безпеки", "👀", "🎤 голосові", "🖼 фото", "Як ти працюєш?"):
         assert part in text, part
+
+
+def test_whisper_hint_carries_subject_terms_of_the_current_lesson():
+    assistant, _, _ = make()
+    assistant.terms_for = lambda title: ["B-tree", "SQL"] if title.startswith("Бази даних") else []
+    assert assistant.whisper_hints() == "Ляшко, Петренко П.П., Бази даних · B-tree, SQL"

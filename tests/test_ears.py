@@ -413,3 +413,14 @@ def test_cable_is_found_without_asking(monkeypatch):
     assert ears.find_cable() == "BlackHole 2ch"
     devices.pop()
     assert ears.find_cable() == ""
+
+
+def test_subject_terms_are_hotwords_but_not_part_of_the_echo_filter(monkeypatch):
+    """«Ляшко, Петренко, Безпека · PCI, DSS»: терміни — лише «гарячі слова»; справжнє речення з ними не відкидається
+    як «модель повторила підказку»."""
+    calls = fake_whisper(monkeypatch, [Segment("PCI DSS, SQL")])
+    hint = "Ляшко, Петренко П.П., Безпека розробки" + ears.TERMS_MARK + "PCI, DSS, SQL"
+    transcriber = WhisperTranscriber("small", "uk", hints=lambda: hint)
+    assert transcriber(tone(1, 3000)) == [Heard("PCI DSS, SQL", True)]
+    assert calls[0]["hotwords"] == "Ляшко, Петренко П.П., Безпека розробки, PCI, DSS, SQL"
+    assert ears.split_hint(hint) == ("Ляшко, Петренко П.П., Безпека розробки", "PCI, DSS, SQL")

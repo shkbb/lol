@@ -175,3 +175,21 @@ def test_questions_about_the_bot_itself_get_the_real_about_card(tmp_path):
     helper.answer("Поясни, що таке індекс у базі даних", NOW)
     assert "Про тебе" not in prompts[-1][1]  # картка — лише коли питають про бота
     assert "gemma3:4b" not in prompts[-1][0] and "картки «Про тебе»" in prompts[-1][0]
+
+
+def test_subject_terms_come_from_this_subjects_records_and_repeat(tmp_path):
+    """Словник предмета для Whisper — без хардкоду: терміни з підсумків цього предмета, що звучали на ≥2 парах;
+    разова помилка розпізнавання («DUST» замість DAST) туди не потрапляє."""
+    from autopara.helper import subject_terms
+
+    record(tmp_path, "Безпека розробки програмного забезпечення (Лк)", "2026-10-05T11:10", "Петренко П.П.",
+           "**Про що:** SSDLC, PCI DSS і DUST.", ["[11:20:00] Стандарт PCI DSS і SQL ін'єкції, DUST"])
+    record(tmp_path, "Безпека розробки програмного забезпечення (Пз)", "2026-10-09T12:40", "Петренко П.П.",
+           "**Про що:** лабораторна з PCI DSS.", ["[12:55:00] Ви посилались на PCI DSS, а ще SQL"])
+    record(tmp_path, "Технології інтернету речей (Пз)", "2026-10-09T11:10", "Мельник О.В.",
+           "**Про що:** Arduino.", ["[11:20:00] Arduino Uno"])
+    lib = Library(tmp_path)
+    lib.refresh()
+    security = [doc for doc in lib.docs if doc.subject.startswith("Безпека")]
+    assert subject_terms(security) == ["DSS", "PCI"]  # SQL є лише в розшифровках, DUST — лише на одній парі
+    assert subject_terms([doc for doc in lib.docs if doc.subject.startswith("Технології")]) == []  # одна пара — ще рано
