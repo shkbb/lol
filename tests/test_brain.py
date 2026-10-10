@@ -3,7 +3,7 @@ import json
 import pytest
 
 from autopara.assistant import Decision
-from autopara.brain import BrainError, BrainWorker, OllamaBrain, parse_decision
+from autopara.brain import BrainError, BrainWorker, ChatBrain, OllamaBrain, parse_decision
 
 
 class FakeOllama:
@@ -205,3 +205,19 @@ def test_model_is_reloaded_every_few_requests_so_ollama_leak_does_not_pile_up():
     for _ in range(REQUESTS_PER_LOAD * 2 + 1):
         assert brain.summarize("конспектуй", "текст") == "конспект"
     assert session.chats == REQUESTS_PER_LOAD * 2 + 1 and session.unloads == 2
+
+
+def test_chat_questions_go_to_the_big_model_only_when_free():
+    """Питання в Telegram не термінові: поза парами й з вільною пам'яттю — розумніша (повільніша) модель."""
+    small, big = FakeOllama("швидка"), FakeOllama("розумна")
+    quiet, free = [True], [10.0]
+    chat = ChatBrain(OllamaBrain("http://x", "gemma3:4b", session=small, gpu=False),
+                     OllamaBrain("http://x", "gemma3:12b", session=big, gpu=False),
+                     quiet=lambda: quiet[0], free_gb=lambda: free[0], need_gb=7)
+    assert chat.summarize("і", "т") == "швидка"  # велику ще не завантажено
+    chat.big_ready = True
+    assert chat.will_think_long() and chat.summarize("і", "т") == "розумна"
+    quiet[0] = False  # пара — лише швидка, процесор потрібен вухам
+    assert chat.summarize("і", "т") == "швидка"
+    quiet[0], free[0] = True, 3.0  # пам'яті мало
+    assert not chat.will_think_long() and chat.summarize("і", "т") == "швидка"

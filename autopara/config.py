@@ -116,6 +116,8 @@ class BrainSettings:
     enabled: bool = True  # працює, щойно встановлена Ollama; модель програма завантажить сама
     model: str = "gemma3:4b"
     url: str = "http://127.0.0.1:11434"
+    # Більша модель для розмов у Telegram поза парами (розумніша, повільніша; "" — та сама, що й model).
+    chat_model: str = ""
 
 
 @dataclass

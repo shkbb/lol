@@ -141,6 +141,8 @@ class SettingsPage(QWidget):
         else:
             more.add(self._zoom_cable())
         more.add(w.text_field(model, "brain.model", "Модель мозку", placeholder="gemma3:4b"))
+        more.add(w.text_field(model, "brain.chat_model", "Розумніша модель для розмов (поза парами)",
+                              placeholder="та сама — напр. gemma3:12b"))
         check = w.button("Перевірити мозок і вуха")
         result = w.label("", "muted")
 

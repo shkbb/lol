@@ -11,7 +11,7 @@ from typing import Callable, Iterator
 
 from . import accel
 from .assistant import Assistant
-from .brain import BrainConnector, BrainError, BrainMemoryGuard, BrainWorker, OllamaBrain
+from .brain import BrainConnector, BrainError, BrainMemoryGuard, BrainWorker, ChatBrain, OllamaBrain
 from .config import Config
 from .ears import (
     AudioQueue,
@@ -55,6 +55,9 @@ class Stack:
     refine_allowed: Callable[[], bool] = lambda: True
     voice_meter: object | None = None  # ears.VoiceMeter, якщо вуха ввімкнені
     schedule_text: Callable[[datetime], str] = lambda now: ""  # розклад текстом (app.py підставляє з Runner)
+
+
+BIG_CHAT_FREE_GB = 7.0  # стільки вільної пам'яті — і поза парами відповідає велика модель для розмов
 
 
 @contextmanager
@@ -190,16 +193,32 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         if helper.ask is None:
             return "🧠 Мовна модель ще не готова (Ollama) — на таке відповім, щойно вона запуститься. Розклад, завдання й «що було на парі» — питай уже."
         threading.Thread(target=answer, args=(question, context, current), name="brain-question", daemon=True).start()
+        if chat_brain is not None and chat_brain.will_think_long():
+            return "🧠 Думаю — розумнішою моделлю, це до кількох хвилин…"
         return None
 
     if listening:
         assistant.ask_brain = ask
 
+    chat_brain = None
+    if brain is not None:
+        big = None
+        if config.brain.chat_model and config.brain.chat_model != config.brain.model:
+            big = OllamaBrain(config.brain.url, config.brain.chat_model, timeout=600, busy=lambda: not stack.refine_allowed())
+            big.keep_alive = "3m"  # кілька питань поспіль — без перезавантаження, а потім пам'ять назад
+        chat_brain = ChatBrain(brain, big, quiet=lambda: stack.refine_allowed(), free_gb=available_ram_gb,
+                               need_gb=BIG_CHAT_FREE_GB)
+        if big is not None:
+            big_connector = BrainConnector(big, lambda: (setattr(chat_brain, "big_ready", True),
+                                                         log.info("Мозок для розмов: %s", big.model)))
+            big_connector.start()
+            stoppers.append(big_connector.stop)
+
     if worker:
 
         def brain_ready() -> None:
             assistant.wake_brain = worker.wake
-            helper.ask = brain.summarize
+            helper.ask = chat_brain.summarize
             reporter.brain, reporter.worker = brain, worker
             log.info("Мозок: модель %s", config.brain.model)
 

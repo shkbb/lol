@@ -110,6 +110,7 @@ class OllamaBrain:
         self.timeout = timeout
         self.gpu = accel.brain_on_gpu() if gpu is None else gpu
         self.busy = busy
+        self.keep_alive = KEEP_ALIVE
         self._requests = 0
         self._count_lock = threading.Lock()
 
@@ -142,7 +143,7 @@ class OllamaBrain:
             "model": self.model,
             "stream": False,
             "format": SCHEMA,
-            "keep_alive": KEEP_ALIVE,
+            "keep_alive": self.keep_alive,
             "options": {"temperature": 0},
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -176,7 +177,7 @@ class OllamaBrain:
         payload = {
             "model": self.model,
             "stream": False,
-            "keep_alive": KEEP_ALIVE,
+            "keep_alive": self.keep_alive,
             "options": options,
             "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": text}],
         }
@@ -193,7 +194,7 @@ class OllamaBrain:
             "model": self.model,
             "stream": False,
             "format": {"type": "object", "properties": {"number": {"type": "integer"}}, "required": ["number"]},
-            "keep_alive": KEEP_ALIVE,
+            "keep_alive": self.keep_alive,
             "options": {"temperature": 0, "num_predict": 20},
             "messages": [
                 {"role": "system", "content": "Ти обираєш один варіант зі списку. Відповідай JSON {\"number\": N}, "
@@ -385,3 +386,32 @@ class BrainWorker:
             return
         log.debug("Мозок думав %.0f с: %s", monotonic() - started, decision)
         self.assistant.apply_decision(key, decision, self.clock())
+
+
+class ChatBrain:
+    """Хто відповідає на вільні питання в Telegram. Вони не термінові — тож поза парами, коли вистачає пам'яті,
+    відповідає більша й розумніша модель (``big``; повільніше, до кількох хвилин: Ollama читає її з диска, якщо не
+    влазить у пам'ять), а під час пар чи коли пам'яті мало — швидка (``small``)."""
+
+    def __init__(self, small: OllamaBrain, big: OllamaBrain | None, quiet: Callable[[], bool],
+                 free_gb: Callable[[], float | None], need_gb: float):
+        self.small = small
+        self.big = big
+        self.quiet = quiet
+        self.free_gb = free_gb
+        self.need_gb = need_gb
+        self.big_ready = False  # велику модель уже завантажено (див. BrainConnector)
+
+    def will_think_long(self) -> bool:
+        if self.big is None or not self.big_ready or not self.quiet():
+            return False
+        free = self.free_gb()
+        return free is None or free >= self.need_gb
+
+    def summarize(self, instruction: str, text: str) -> str:
+        if self.will_think_long():
+            try:
+                return self.big.summarize(instruction, text)
+            except BrainError as e:
+                log.warning("Велика модель не відповіла (%s) — відповідає швидка", e)
+        return self.small.summarize(instruction, text)
