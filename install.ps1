@@ -41,7 +41,7 @@ if (-not $python) {
     }
 }
 
-Say "1/5 Окреме середовище Python (.venv)"
+Say "1/6 Окреме середовище Python (.venv)"
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
     $exe, $prefix = $python
     & $exe @prefix -m venv .venv
@@ -49,7 +49,7 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 $venv = (Resolve-Path ".venv\Scripts\python.exe").Path
 & $venv -m pip install -q --upgrade pip
 
-Say "2/5 autopara з розпізнаванням мови (кілька хвилин)"
+Say "2/6 autopara з розпізнаванням мови (кілька хвилин)"
 # З відеокартою NVIDIA — ще й бібліотеки CUDA (~1,5 ГБ): розпізнавання на ній у рази швидше (див. autopara\accel.py).
 $extras = & $venv -c "import sys; sys.path.insert(0, '.'); from autopara.accel import pip_extras; print(pip_extras())"
 if (-not $extras) { $extras = "ears" }
@@ -62,12 +62,12 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { throw "не вдалося встановити autopara" }
 }
 
-Say "3/5 Браузер програми (у ньому вона заходить на пари; ~150 МБ)"
+Say "3/6 Браузер програми (у ньому вона заходить на пари; ~150 МБ)"
 & $venv -m playwright install chromium --no-shell
 if ($LASTEXITCODE -ne 0) { Write-Host "Не вийшло — не страшно: програма завантажить браузер сама при першому запуску." -ForegroundColor Yellow }
 
-Say "4/5 Мозок програми — Ollama (сповіщення про оголошення, звіти після пар, відповіді бота)"
-# Мовні моделі (~4 ГБ) програма докачає сама, коли Ollama запрацює; без неї працюють вхід на пари, вуха й команди.
+Say "4/6 Мозок програми — Ollama (сповіщення про оголошення, звіти після пар, відповіді бота)"
+# Без Ollama працюють вхід на пари, вуха й команди; мовні моделі для неї завантажує крок 6.
 if (Get-Command ollama -ErrorAction SilentlyContinue) {
     Write-Host "Ollama вже є."
 } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -75,11 +75,17 @@ if (Get-Command ollama -ErrorAction SilentlyContinue) {
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Не вийшло — встанови з https://ollama.com/download, мозок програма підключить сама." -ForegroundColor Yellow
     }
+    Refresh-Path
 } else {
     Write-Host "Встанови Ollama з https://ollama.com/download — мозок програма підключить сама." -ForegroundColor Yellow
 }
+# Тихе встановлення Ollama не запускає її — запускаємо (значок біля годинника), щоб крок 6 завантажив моделі.
+$ollamaApp = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama app.exe"
+if ((Test-Path $ollamaApp) -and -not (Get-Process "ollama app", "ollama" -ErrorAction SilentlyContinue)) {
+    Start-Process $ollamaApp
+}
 
-Say "5/5 Ярлики на робочому столі й у меню «Пуск»"
+Say "5/6 Ярлики на робочому столі й у меню «Пуск»"
 $target = (Resolve-Path ".venv\Scripts\autopara-window.exe").Path
 $icon = Join-Path (Get-Location).Path "autopara.ico"
 & $venv -c "import sys; from PySide6.QtGui import QGuiApplication, QIcon; app = QGuiApplication(['x', '-platform', 'offscreen']); QIcon(sys.argv[1]).pixmap(256, 256).save(sys.argv[2])" "autopara\gui\icon.svg" $icon
@@ -92,6 +98,11 @@ foreach ($folder in @([Environment]::GetFolderPath("Desktop"), [Environment]::Ge
     if (Test-Path $icon) { $link.IconLocation = $icon }
     $link.Save()
 }
+
+Say "6/6 Моделі розпізнавання мови й мозку (кілька ГБ — один раз, щоб перша пара не чекала)"
+$autopara = (Resolve-Path ".venv\Scripts\autopara.exe").Path
+& $autopara models
+if ($LASTEXITCODE -ne 0) { Write-Host "Не все вийшло — програма докачає сама, коли знадобиться." -ForegroundColor Yellow }
 
 Say "Готово! Відкриваю програму — далі простий майстер."
 Start-Process $target

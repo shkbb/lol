@@ -21,11 +21,11 @@ if [ -z "$python" ]; then
   exit 1
 fi
 
-say "1/5 Окреме середовище Python (.venv)"
+say "1/6 Окреме середовище Python (.venv)"
 [ -d .venv ] || "$python" -m venv .venv
 .venv/bin/python -m pip install -q --upgrade pip
 
-say "2/5 autopara з розпізнаванням мови"
+say "2/6 autopara з розпізнаванням мови"
 # З відеокартою NVIDIA — ще й бібліотеки CUDA (~1,5 ГБ): розпізнавання на ній у рази швидше (див. autopara/accel.py).
 extras=$(.venv/bin/python -c "import sys; sys.path.insert(0, '.'); from autopara.accel import pip_extras; print(pip_extras())" 2>/dev/null || echo ears)
 [ "$extras" = "ears" ] || echo "Бачу відеокарту NVIDIA — розпізнаватиму на ній (докачаю бібліотеки CUDA, ~1,5 ГБ)."
@@ -34,12 +34,12 @@ if ! .venv/bin/python -m pip install -q -e ".[$extras]" && ! .venv/bin/python -m
   .venv/bin/python -m pip install -q -e .
 fi
 
-say "3/5 Браузер програми (у ньому вона заходить на пари; ~150 МБ)"
+say "3/6 Браузер програми (у ньому вона заходить на пари; ~150 МБ)"
 .venv/bin/python -m playwright install chromium --no-shell \
   || echo "Не вийшло — не страшно: програма завантажить браузер сама при першому запуску."
 
-say "4/5 Мозок програми — Ollama (сповіщення про оголошення, звіти після пар, відповіді бота)"
-# Мовні моделі (~4 ГБ) програма докачає сама, коли Ollama запрацює; без неї працюють вхід на пари, вуха й команди.
+say "4/6 Мозок програми — Ollama (сповіщення про оголошення, звіти після пар, відповіді бота)"
+# Без Ollama працюють вхід на пари, вуха й команди; мовні моделі для неї завантажує крок 6.
 if command -v ollama >/dev/null 2>&1; then
   echo "Ollama вже є."
 elif [ ! -t 0 ]; then
@@ -68,7 +68,7 @@ else
   fi
 fi
 
-say "5/5 Ярлик"
+say "5/6 Ярлик"
 app="$PWD/.venv/bin/autopara"
 if [ "$(uname)" = "Darwin" ]; then
   mkdir -p "$HOME/Applications"
@@ -95,6 +95,13 @@ EOF
   if ! command -v pactl >/dev/null 2>&1; then
     echo "Порада: щоб вуха чули Zoom-клієнт, встанови pactl (Arch: sudo pacman -S libpulse; Ubuntu: sudo apt install pulseaudio-utils)."
   fi
+fi
+
+say "6/6 Моделі розпізнавання мови й мозку (кілька ГБ — один раз, щоб перша пара не чекала)"
+if [ "${AUTOPARA_NO_MODELS:-}" = 1 ]; then
+  echo "Пропускаю (AUTOPARA_NO_MODELS=1) — програма докачає сама."
+else
+  .venv/bin/autopara models || echo "Не все вийшло — програма докачає сама, коли знадобиться."
 fi
 
 say "Готово! Відкриваю програму — далі простий майстер."

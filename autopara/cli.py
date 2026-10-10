@@ -349,6 +349,15 @@ def cmd_listen_test(args, config: Config) -> None:
     )
 
 
+def cmd_models(args) -> None:
+    """Завантажити моделі заздалегідь (інсталятор кличе це в кінці), щоб перша пара не чекала на гігабайти."""
+    from .prefetch import run
+
+    config, _ = _app_config(args.config)
+    print("Завантажую моделі заздалегідь, щоб перша пара не чекала (Ctrl+C — пропустити, програма докачає сама).")
+    run(config)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autopara",
@@ -398,6 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--file", help="узяти звук з файла (mp3, m4a, wav, відео…) — працює на будь-якій ОС")
     listen.add_argument("--models", help="моделі через кому, наприклад small,large-v3-turbo")
     listen.set_defaults(func=cmd_listen_test)
+    models = sub.add_parser("models", help="завантажити моделі розпізнавання мови й мозку заздалегідь")
+    models.set_defaults(func=cmd_models, needs_config=False)
     return parser
 
 

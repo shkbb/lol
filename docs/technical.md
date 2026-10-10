@@ -238,7 +238,7 @@ yay -S zoom                                   # Zoom-клієнт, якщо па
 sudo pacman -S ollama && sudo systemctl enable --now ollama   # мозок (за бажанням; на Iris Xe є ollama-vulkan)
 
 git clone https://github.com/shkbb/lol.git ~/autopara
-cd ~/autopara && ./install.sh                 # venv (PEP 668), браузер програми, ярлик у меню
+cd ~/autopara && ./install.sh                 # venv (PEP 668), браузер програми, ярлик у меню, моделі
 ```
 
 Браузер ставити не треба — у програми свій. Перевір, що посилання `zoommtg://` відкриваються в Zoom:
@@ -386,7 +386,11 @@ xdg-mime default Zoom.desktop x-scheme-handler/zoommtg   # якщо вивело
 
 ### Вуха
 
-Ставить їх `install.sh` / `install.bat` (або кнопка «Встановити розпізнавання мови» у вікні).
+Ставить їх `install.sh` / `install.bat` (або кнопка «Встановити розпізнавання мови» у вікні). Наприкінці
+інсталятор кличе `autopara models` (`autopara/prefetch.py`): завантажує ті моделі Whisper, які програма вибере на
+цьому комп'ютері (наживо й для уточнення), і мовні моделі Ollama (мозок, пошук за змістом, розумний режим, якщо
+ввімкнений). Що вже є — пропускає; без інтернету, Ollama чи місця — програма докачає сама. `AUTOPARA_NO_MODELS=1
+./install.sh` — без цього кроку.
 Щоб на Linux вуха чули Zoom-клієнт, потрібен `pactl` (на Arch: `sudo pacman -S --needed libpulse`,
 зазвичай він уже є).
 
