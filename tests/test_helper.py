@@ -150,3 +150,14 @@ def test_reply_does_not_start_with_date_unless_asked():
     assert drop_leading_date("Доброго ранку! Сьогодні субота, 10 жовтня, 09:51. Найближча пара – понеділок.", "привіт") == \
         "Доброго ранку! Найближча пара – понеділок."
     assert drop_leading_date("Субота, 10 жовтня, 09:48. Все гаразд?", "котра година?").startswith("Субота")
+
+
+def test_context_says_plainly_whether_there_are_lessons_tomorrow(tmp_path):
+    """Наживо в суботу бот казав «Завтра у тебе пара о 08:00» — а вона в понеділок."""
+    table = "📅 пн 12.10:\n  08:00–09:20 Архітектура ПЗ (Лк)"
+    saturday = datetime(2026, 10, 10, 11, 5)
+    context = Helper(library(tmp_path), None, schedule=lambda now: table).study_context(saturday)
+    assert "Завтра (неділя 11.10) пар немає." in context
+    assert "Найближча пара: понеділок 12.10 (через 2 дн.) о 08:00" in context
+    friday = Helper(library(tmp_path), None, schedule=lambda now: "📅 завтра:\n  08:00–09:20 Архітектура ПЗ (Лк)")
+    assert "Завтра (субота 10.10) є пари" in friday.study_context(datetime(2026, 10, 9, 19, 0))

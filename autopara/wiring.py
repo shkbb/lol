@@ -193,6 +193,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     def ask(question: str, context: str, current: str) -> str | None:
         """Питання з Telegram: відповідь з даних — одразу (рядок); інакше 👀 на питання, а відповідь — реплаєм
         пізніше ("" — нічого не писати зараз)."""
+        log.info("❓ %s", question[:200])
         try:
             ready = helper.quick(question, clock())
         except Exception as e:  # noqa: BLE001 — зіпсований запис пари не має ламати розмову
@@ -228,7 +229,9 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     def hear_voice(incoming, transcriber) -> None:
         to = incoming.message_id
         try:
-            text = " ".join(item.text for item in transcriber(voice_pcm(bot.download(incoming.voice)))).strip()
+            pcm = voice_pcm(bot.download(incoming.voice))
+            # Голосове коротке, а пари зараз немає — тож уважніше, ніж наживо (beam 5): так точніше за секунди.
+            text = " ".join(line for _, line in transcriber.transcribe_long(pcm, beam_size=5)).strip()
         except Exception as e:  # noqa: BLE001 — не вийшло розшифрувати: так і сказати
             log.warning("Голосове: %s", e)
             notifier.reply("Не вийшло розшифрувати голосове — напиши, будь ласка, текстом.", to)
