@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from autopara import notes
-from autopara.helper import Helper, Library, next_lesson, sections, sound, tokens
+from autopara.helper import Helper, Library, drop_leading_date, next_lesson, sections, sound, tokens
 
 
 def record(root, title, start, teacher, summary, lines, chat=()):
@@ -143,3 +143,10 @@ def test_next_lesson_is_said_in_words_and_requests_are_not_lookups(tmp_path):
     letter = helper.answer("Допоможи написати лист викладачу з баз даних, що я захворів", NOW)
     assert letter == "Шановна …" and "викладач Мельник О.В." in asked[-1]  # пише лист, знаючи викладача
     assert "Найближча пара: понеділок 12.10 (через 3 дн.) о 08:00" in asked[-1]
+
+
+def test_reply_does_not_start_with_date_unless_asked():
+    assert drop_leading_date("Субота, 10.10.2026 09:51.\n\nТут видно розмову з ботом.", "що на фото?") == "Тут видно розмову з ботом."
+    assert drop_leading_date("Доброго ранку! Сьогодні субота, 10 жовтня, 09:51. Найближча пара – понеділок.", "привіт") == \
+        "Доброго ранку! Найближча пара – понеділок."
+    assert drop_leading_date("Субота, 10 жовтня, 09:48. Все гаразд?", "котра година?").startswith("Субота")

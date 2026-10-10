@@ -131,6 +131,24 @@ def plain(text: str) -> str:
     return text.strip()
 
 
+LEADING_DATE_RE = re.compile(
+    r"^\W*((доброго \w+|добрий \w+|привіт)[!,.]?\s*)?(сьогодні\s+|зараз\s+)?[^\n.!?]{0,30}?"
+    r"(\d{1,2}[.\s]\s*(\d\d|\w+)(\.\d{4}|\s+\d{4})?)[^\n.!?]{0,12}?\d{1,2}:\d\d[.!]?\s*", re.I)
+ASKS_TIME_RE = re.compile(r"котр\w* (година|годин)|скільки час|яке сьогодні|який сьогодні|яка дата|число|день тижня|дат[аиу]", re.I)
+
+
+def drop_leading_date(reply: str, question: str) -> str:
+    """Маленька модель любить починати з «Субота, 10.10.2026 09:51.» — це шум, якщо про час не питали."""
+    if ASKS_TIME_RE.search(question):
+        return reply
+    match = LEADING_DATE_RE.match(reply)
+    if match and len(match.group(0)) <= 70 and len(reply) > len(match.group(0)) + 10:
+        greeting = (match.group(2) or "").strip()
+        rest = reply[match.end():].lstrip()
+        return (greeting.capitalize() + "! " if greeting else "") + rest[:1].upper() + rest[1:]
+    return reply
+
+
 def whole_sentences(text: str) -> str:
     """Модель обірвалась на ліміті слів — лишити лише повні речення."""
     text = text.strip()
@@ -420,7 +438,7 @@ class Helper:
         reply = ukrainian(lambda system, text: see(system, text, image), SYSTEM, "\n\n".join(parts))
         if reply is None:
             return "Не вийшло нормально відповісти — надішли, будь ласка, ще раз."
-        return whole_sentences(plain(reply))
+        return drop_leading_date(whole_sentences(plain(reply)), question)
 
     def route(self, question: str) -> str:
         if (SCHEDULE_RE.search(question) and DIRECT_RE.match(question) and not TASKS_RE.search(question)
@@ -491,7 +509,7 @@ class Helper:
         reply = ukrainian(self.ask, SYSTEM, "\n\n".join(parts))
         if reply is None:
             return "Не вийшло нормально відповісти — спитай, будь ласка, ще раз (можна іншими словами)."
-        reply = whole_sentences(plain(reply))
+        reply = drop_leading_date(whole_sentences(plain(reply)), question)
         reply = re.sub(r"^(Уривки з записів пар|Знайдено в записах пар)[^:]*:\s*", "", reply)
         if explain:  # пояснення — загальні знання, а записи лише кажуть, де про це говорили
             return "📚 " + reply + (("\n\n" + self._cite(strong, "На парах про це")) if strong else "")
