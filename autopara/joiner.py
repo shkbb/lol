@@ -367,6 +367,66 @@ def send_meet_chat(page: Page, text: str) -> bool:
     return True
 
 
+# Хто говорить у Meet. Meet підсвічує плитку того, хто говорить; спостерігач у сторінці раз на 0,3 с записує, чиї
+# плитки світяться (відомі класи підсвітки — їх же бере відкритий бот Vexa), а раз на 2 с — які класи з'являлися
+# в кожній плитці: коли Meet перейменує класи, за цим знайдемо нову ознаку. Лише читає сторінку, нічого не натискає.
+# Себе (data-self-name) не рахуємо. Повертає накопичене з минулого разу (і ставить спостерігача, якщо його ще немає).
+MEET_SPEAKERS_JS = """() => {
+  if (window.__autoparaSpeakers) return window.__autoparaSpeakers.drain();
+  const LIT = ['Oaajhc', 'HX2H7', 'wEsLMd', 'OgVli'];
+  const events = [];
+  const push = (event) => { events.push(event); if (events.length > 20000) events.shift(); };
+  const names = new Map();
+  const nameOf = (tile) => {
+    const span = tile.querySelector('span.notranslate');
+    const text = ((span && span.textContent) || '').trim();
+    return text.length >= 2 && text.length <= 60 ? text : '';
+  };
+  const isSelf = (tile) => tile.hasAttribute('data-self-name') || !!tile.querySelector('[data-self-name]');
+  let lit = null;
+  const poll = () => {
+    const now = [];
+    for (const tile of document.querySelectorAll('[data-participant-id]')) {
+      const id = tile.getAttribute('data-participant-id');
+      const name = nameOf(tile);
+      if (name) names.set(id, name);
+      if (isSelf(tile)) continue;
+      if (LIT.some((c) => tile.classList.contains(c) || tile.querySelector('.' + c))) now.push(names.get(id) || id);
+    }
+    const key = [...new Set(now)].sort().join('\\n');
+    if (key !== lit) { lit = key; push({t: Date.now(), lit: key ? key.split('\\n') : []}); }
+  };
+  const moves = new Map();
+  new MutationObserver((records) => {
+    for (const r of records) {
+      const tile = r.target.closest ? r.target.closest('[data-participant-id]') : null;
+      if (!tile) continue;
+      const id = tile.getAttribute('data-participant-id');
+      const move = moves.get(id) || {n: 0, added: {}};
+      moves.set(id, move);
+      move.n++;
+      const before = (r.oldValue || '').split(/\\s+/);
+      for (const c of (typeof r.target.className === 'string' ? r.target.className : '').split(/\\s+/))
+        if (c && !before.includes(c)) move.added[c] = (move.added[c] || 0) + 1;
+    }
+  }).observe(document.body, {subtree: true, attributes: true, attributeFilter: ['class'], attributeOldValue: true});
+  const flush = () => {
+    if (!moves.size) return;
+    push({t: Date.now(), moves: [...moves].map(([id, m]) => [names.get(id) || id, m.n,
+      Object.entries(m.added).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([c]) => c)])});
+    moves.clear();
+  };
+  setInterval(() => { try { poll(); } catch (e) {} }, 300);
+  setInterval(() => { try { flush(); } catch (e) {} }, 2000);
+  window.__autoparaSpeakers = {drain: () => events.splice(0, events.length)};
+  return [];
+}"""
+
+
+def watch_meet_speakers(page: Page) -> list[dict]:
+    return page.evaluate(MEET_SPEAKERS_JS) or []
+
+
 class ButtonHelper:
     """Знайомої кнопки «Приєднатися» немає (інша мова, Google перейменував) — мозок обирає її зі списку кнопок
     на сторінці. Мікрофон, камеру, чат і подібне він не бачить зовсім, а перед натисканням програма однаково
@@ -831,6 +891,7 @@ class Joiner:
         # не пустив, запам'ятовуємо — туди надалі одразу клієнтом.
         self.zoom_app_heard = zoom_app_heard
         self._app_links_file = profile_dir.parent / "zoom-app-links.json"
+        self.speakers_dir = profile_dir.parent / "speakers"  # хто коли говорив на парах у Meet (див. MEET_SPEAKERS_JS)
         self.browser = Browser(profile_dir, settings.mute_sound, headless, audio_sink, audio_tap, screen)
         # Мозок — запасний вихід, коли знайомої кнопки входу немає (див. ButtonHelper).
         self.helper = ButtonHelper(chooser, profile_dir.parent / "learned-buttons.json") if chooser else None
@@ -1005,12 +1066,42 @@ class Joiner:
         try:
             if session.visit.platform == "meet":
                 _dismiss_popups(page)  # підказки Meet закривають зустріч у вирізках і заважають чату
+                self._note_speakers(session)
                 return observe_meet(page)
             if session.visit.platform == "zoom":
                 return observe_zoom(page)
         except PlaywrightError as e:
             log.debug("Не вдалося роздивитись зустріч: %s", e)
         return Observation()
+
+    def _note_speakers(self, session: Session) -> None:
+        """Дописати, хто говорив з минулого разу, у файл цієї пари. Не вийшло — не біда: це лише для міток у розшифровці."""
+        try:
+            events = watch_meet_speakers(session.page)
+        except PlaywrightError as e:
+            log.debug("Не вдалося подивитись, хто говорить: %s", e)
+            return
+        if not events:
+            return
+        title = re.sub(r'[\\/:*?"<>|]+', "_", session.visit.title)[:80]
+        path = self.speakers_dir / f"{session.visit.join_at:%Y-%m-%d %H-%M} {title}.jsonl"
+        try:
+            if not path.exists():
+                self._prune_speakers()
+                if any(event.get("lit") for event in events):
+                    log.info("👥 Meet показує, хто говорить, — записую (для міток «викладач / студент»)")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                for event in events:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except OSError as e:
+            log.debug("Не вдалося записати, хто говорить: %s", e)
+
+    def _prune_speakers(self, days: int = 30) -> None:
+        old = time.time() - days * 86400
+        for path in self.speakers_dir.glob("*.jsonl") if self.speakers_dir.is_dir() else []:
+            if path.stat().st_mtime < old:
+                path.unlink(missing_ok=True)
 
     def read_chat(self, session: Session) -> list[ChatMessage]:
         if session.page is None or session.visit.platform != "meet":

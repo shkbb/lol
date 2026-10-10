@@ -1,5 +1,6 @@
 """Логіка входу в Meet на фейковій сторінці, що імітує розмітку Meet, у справжньому Chromium."""
 
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,11 @@ FAKE_MEET = """<!doctype html>
   <button aria-label="People"><i>people</i><div class="badge">7</div></button>
   <button id="chatbtn" aria-label="Chat with everyone"><i>chat</i></button>
   <button aria-label="Leave call"><i>call_end</i></button>
+  <div id="tiles">
+    <div data-participant-id="p1"><div class="bars"></div><span class="notranslate">Ляшко Денис</span></div>
+    <div data-participant-id="p2"><div class="bars"></div><span class="notranslate">Іван Коваль</span></div>
+    <div data-participant-id="me"><div class="bars"></div><span class="notranslate" data-self-name="Тест Тестович">Тест Тестович</span></div>
+  </div>
   <div id="chatpanel" hidden>
     <div id="messages">
       <div><div>Іван Коваль <span>10:23</span></div>
@@ -111,6 +117,8 @@ window.incoming = (author, text) => {
   group.querySelector("[data-message-id]").textContent = text;
   $("messages").appendChild(group);
 };
+// Як Meet: плитка того, хто говорить, отримує клас підсвітки.
+window.speak = (id, on) => document.querySelector(`[data-participant-id="${id}"] .bars`).classList.toggle("Oaajhc", on);
 window.endCall = () => { $("call").hidden = true; $("ended").hidden = false; };
 $("join").onclick = () => {
   window.joinedWith = {
@@ -219,6 +227,28 @@ def test_observe_counts_people_and_sees_the_end(joiner):
         assert joiner.observe(session).mic_on
         session.page.evaluate("endCall()")
         assert joiner.observe(session) == Observation(ended=True)
+    finally:
+        joiner.leave(session)
+
+
+def test_who_is_speaking_is_written_down(joiner):
+    """Meet підсвічує плитку того, хто говорить, — програма записує, хто й коли (для міток у розшифровці)."""
+    for old in joiner.speakers_dir.glob("*.jsonl"):
+        old.unlink()
+    session = joiner.join(visit("normal"))
+    try:
+        joiner.observe(session)  # спостерігач стає в сторінку
+        session.page.evaluate("speak('p2', true); speak('me', true)")  # себе не рахуємо
+        session.page.wait_for_timeout(700)
+        session.page.evaluate("speak('p2', false); speak('p1', true)")
+        session.page.wait_for_timeout(2300)
+        joiner.observe(session)
+        events = [json.loads(line) for path in joiner.speakers_dir.glob("*.jsonl")
+                  for line in path.read_text(encoding="utf-8").splitlines()]
+        assert [event["lit"] for event in events if "lit" in event][-2:] == [["Іван Коваль"], ["Ляшко Денис"]]
+        # Що змінювалось у плитках — щоб знайти нову ознаку, коли Meet перейменує класи.
+        moved = {name: added for event in events for name, _, added in event.get("moves", [])}
+        assert "Oaajhc" in moved["Іван Коваль"]
     finally:
         joiner.leave(session)
 
