@@ -11,7 +11,7 @@ from typing import Callable, Iterator
 
 from . import accel, health
 from .assistant import Assistant
-from .brain import BrainConnector, BrainError, BrainMemoryGuard, BrainWorker, ChatBrain, OllamaBrain
+from .brain import BrainConnector, BrainError, BrainMemoryGuard, BrainWorker, ChatBrain, Embedder, OllamaBrain
 from .config import Config
 from .ears import (
     AudioQueue,
@@ -350,6 +350,27 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         return subject_terms([doc for doc in helper.library.docs if doc.subject == subject])
 
     assistant.terms_for = terms_for
+
+    if brain is not None and config.brain.embed_model:
+        # Пошук у записах за змістом: вектори уривків рахуємо у фоні й лише поза парами (процесор — вухам).
+        embedder = Embedder(config.brain.url, config.brain.embed_model, gpu=bool(brain.gpu))
+        helper.library.embed, helper.library.cache = embedder, config.data_dir / "embeddings.json"
+        index_stop = threading.Event()
+
+        def index_loop() -> None:
+            index_stop.wait(120)
+            ready = False
+            while not index_stop.is_set():
+                if stack.refine_allowed():
+                    ready = ready or embedder.ensure()
+                    if ready:
+                        helper.library.refresh()
+                        if added := helper.library.index():
+                            log.info("Пошук за змістом: проіндексовано ще %d уривків записів пар", added)
+                index_stop.wait(600)
+
+        threading.Thread(target=index_loop, name="semantic-index", daemon=True).start()
+        stoppers.append(index_stop.set)
 
     if bot is not None and config.telegram.weekly:
         def upcoming(now: datetime) -> str:

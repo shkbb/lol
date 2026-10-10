@@ -193,3 +193,37 @@ def test_subject_terms_come_from_this_subjects_records_and_repeat(tmp_path):
     security = [doc for doc in lib.docs if doc.subject.startswith("Безпека")]
     assert subject_terms(security) == ["DSS", "PCI"]  # SQL є лише в розшифровках, DUST — лише на одній парі
     assert subject_terms([doc for doc in lib.docs if doc.subject.startswith("Технології")]) == []  # одна пара — ще рано
+
+
+def fake_embed(texts):
+    """Вектори «змісту» для тестів: світло/фоторезистор — одне, ключі в БД — інше."""
+    def vector(text):
+        low = text.lower()
+        return [1.0 if ("фоторезистор" in low or "датчик світла" in low or "освітлен" in low) else 0.0,
+                1.0 if ("ключ" in low or "ідентифікатор" in low) else 0.0, 0.05]
+    return [vector(text) for text in texts]
+
+
+def test_meaning_search_finds_what_words_miss_and_caches_vectors(tmp_path):
+    """«Що розповідали про датчик світла» — у записах слово «фоторезистор»: за словами не знайти, за змістом — так."""
+    record(tmp_path, "Технології інтернету речей (Пз)", "2026-10-09T11:10", "Мельник О.В.", "**Про що:** Arduino.",
+           ["[11:20:00] Сьогодні під'єднаємо фоторезистор до аналогового входу"])
+    calls = []
+    lib = Library(tmp_path, embed=lambda texts: calls.append(len(texts)) or fake_embed(texts), cache=tmp_path / "vectors.json")
+    lib.refresh()
+    assert lib.search("що розповідали про датчик світла") == [] or lib.search("що розповідали про датчик світла")[0][0] < 3
+    assert lib.index() > 0 and lib.index() == 0  # нові уривки — один раз
+    found = lib.find("що розповідали про датчик світла")
+    assert found and "фоторезистор" in found[0][1].text
+    again = Library(tmp_path, embed=lambda texts: calls.append(len(texts)) or fake_embed(texts), cache=tmp_path / "vectors.json")
+    again.refresh()
+    before = len(calls)
+    assert again.index() == 0 and len(calls) == before  # вектори взялися з диска
+    plain = Library(tmp_path)
+    plain.refresh()
+    assert plain.find("що розповідали про датчик світла") == []  # без моделі змісту — лише за словами
+
+    prompts = []
+    helper = Helper(lib, lambda system, text: prompts.append(text) or "Під'єднували фоторезистор.")
+    reply = helper.answer("Що розповідали про датчик світла?", NOW)
+    assert "фоторезистор до аналогового входу" in prompts[-1] and "Джерела: Технології інтернету, 09.10 11:20" in reply

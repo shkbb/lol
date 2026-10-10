@@ -275,3 +275,26 @@ def test_gpu_switched_off_in_settings_keeps_the_brain_on_processor(monkeypatch):
     assert ollama.payload["options"]["num_gpu"] == 0
     OllamaBrain("http://x", "gemma3:4b", session=ollama).summarize("і", "т")
     assert "num_gpu" not in ollama.payload["options"]  # «auto» — як вирішить Ollama
+
+
+def test_embedder_batches_texts_and_stays_on_processor():
+    from autopara.brain import Embedder
+
+    sent = []
+
+    class Session:
+        def post(self, url, json=None, timeout=None):
+            sent.append(json)
+
+            class Response:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"embeddings": [[0.1, 0.2] for _ in json["input"]]}
+
+            return Response()
+
+    vectors = Embedder("http://x", session=Session(), batch=2)(["а", "б", "в"])
+    assert len(vectors) == 3 and [len(p["input"]) for p in sent] == [2, 1]
+    assert sent[0]["model"] == "embeddinggemma" and sent[0]["options"] == {"num_gpu": 0}

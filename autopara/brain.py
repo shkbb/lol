@@ -485,3 +485,42 @@ class ChatBrain:
                         self._evict_big()
                         self._big_used = None
         return self.small.summarize(instruction, text, **options)
+
+
+class Embedder:
+    """Вектори змісту тексту (Ollama /api/embed, маленька модель embeddinggemma ~0,6 ГБ) — для пошуку в записах пар
+    за змістом, а не лише за словами. Модель докачується сама (ensure)."""
+
+    def __init__(self, url: str, model: str = "embeddinggemma", session: requests.Session | None = None,
+                 gpu: bool = False, batch: int = 16):
+        self.url = url.rstrip("/")
+        self.model = model
+        self.session = session or requests.Session()
+        self.gpu = gpu
+        self.batch = batch
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        options = {} if self.gpu else {"num_gpu": 0}
+        for start in range(0, len(texts), self.batch):
+            payload = {"model": self.model, "input": texts[start:start + self.batch], "keep_alive": "5m", "options": options}
+            try:
+                response = self.session.post(f"{self.url}/api/embed", json=payload, timeout=300)
+                response.raise_for_status()
+                vectors += response.json()["embeddings"]
+            except (requests.RequestException, KeyError, ValueError) as e:
+                raise BrainError(f"вектори змісту недоступні ({self.model}): {e}") from e
+        return vectors
+
+    def ensure(self) -> bool:
+        """Модель є (або щойно докачали). False — Ollama недоступна чи не вийшло."""
+        try:
+            names = {model.get("name") for model in self.session.get(f"{self.url}/api/tags", timeout=10).json().get("models", [])}
+            if self.model in names or f"{self.model}:latest" in names:
+                return True
+            log.info("Пошук за змістом: завантажую модель %s (~0,6 ГБ)...", self.model)
+            response = self.session.post(f"{self.url}/api/pull", json={"model": self.model, "stream": False}, timeout=3600)
+            return response.ok
+        except (requests.RequestException, ValueError) as e:
+            log.debug("Пошук за змістом: %s", e)
+            return False

@@ -12,9 +12,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import re
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -93,10 +96,15 @@ ABOUT_ME_RE = re.compile(r"хто ти|що ти (таке|за)|про себе
 PLACEHOLDER_RE = re.compile(r"\[[^\]]{2,40}\]")
 ABSENT_RE = re.compile(r"^(дедлайн|термін)\w*[^.]*\bне (було )?(вказан|встановлен|оголошен|названо|надано)", re.I)
 SAID_RE = re.compile(r"казал|казав|сказал|говорил|розповідал|пояснювал|згадувал", re.I)
-ABOUT_LESSONS_RE = re.compile(r"казал|казав|сказал|говорил|розповідал|пояснювал|на пар|в записах|у записах", re.I)
+ABOUT_LESSONS_RE = re.compile(r"казал|казав|сказал|говорил|розповідал|пояснювал|обговорювал|згадувал|проходил|вивчал|"
+                              r"розбирал|на пар|в записах|у записах", re.I)
 # Прохання щось зробити (лист, план, порада) — не пошук у записах, навіть якщо там згадано пару чи викладача.
 REQUEST_RE = re.compile(r"^\W*(а\s+)?(допоможи|напиши|склади|порадь|придумай|переклади|виправ|перевір|зроби|підкажи як)", re.I)
-SEARCH_STRONG = 3.0  # BM25: нижче — у записах про це майже нічого, тож це загальне питання
+SEARCH_STRONG = 3.0
+# Близькість за змістом (embeddinggemma, косинус): питання про пари, сформульовані іншими словами, — 0,47–0,56,
+# сторонні — до 0,45. Сам поріг не вирішує, чи питання про пари (це роблять правила вище), лише що додати до знайденого.
+SEMANTIC_CLOSE = 0.45
+EMBED_CHARS = 1500  # BM25: нижче — у записах про це майже нічого, тож це загальне питання
 WEEKDAY_NAMES = ["понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота", "неділя"]
 
 
@@ -288,10 +296,17 @@ class Chunk:
 class Library:
     """Усі записи пар з теки «Пари» і пошук у них (BM25 за лемами). Перечитує, коли з'являються нові записи."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, embed: Callable[[list[str]], list[list[float]]] | None = None,
+                 cache: Path | None = None):
         self.root = root
         self.docs: list[LessonDoc] = []
         self.chunks: list[Chunk] = []
+        # Пошук за змістом: embed(тексти) → вектори (brain.Embedder); cache — де зберігати вектори уривків.
+        self.embed = embed
+        self.cache = cache
+        self._vectors: dict[str, list[float]] = {}
+        self._loaded = False
+        self._index_lock = threading.Lock()
         self._seen: tuple = ()
         self._df: Counter = Counter()
         self._avg = 1.0
@@ -324,6 +339,81 @@ class Library:
             chunk.terms = Counter(tokens(chunk.text))
             self._df.update(chunk.terms.keys())
         self._avg = sum(sum(c.terms.values()) for c in self.chunks) / max(1, len(self.chunks))
+
+    @staticmethod
+    def _key(chunk: Chunk) -> str:
+        return hashlib.sha1(chunk.text[:EMBED_CHARS].encode("utf-8")).hexdigest()
+
+    def _load_vectors(self) -> None:
+        if self._loaded or self.cache is None:
+            self._loaded = True
+            return
+        self._loaded = True
+        try:
+            self._vectors = json.loads(self.cache.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self._vectors = {}
+
+    def index(self, limit: int = 400) -> int:
+        """Порахувати вектори змісту для нових уривків (у фоні, поза парами). Повертає, скільки додано."""
+        if self.embed is None:
+            return 0
+        with self._index_lock:
+            self._load_vectors()
+            missing = [chunk for chunk in self.chunks if self._key(chunk) not in self._vectors][:limit]
+            if not missing:
+                return 0
+            try:
+                vectors = self.embed([chunk.text[:EMBED_CHARS] for chunk in missing])
+            except Exception as e:  # noqa: BLE001 — немає моделі чи Ollama: пошук за словами однаково працює
+                log.info("Пошук за змістом: не вдалося порахувати вектори (%s)", e)
+                return 0
+            for chunk, vector in zip(missing, vectors):
+                self._vectors[self._key(chunk)] = [round(x, 5) for x in vector]
+            if self.cache is not None:
+                try:
+                    self.cache.parent.mkdir(parents=True, exist_ok=True)
+                    self.cache.write_text(json.dumps(self._vectors), encoding="utf-8")
+                except OSError as e:
+                    log.debug("Не вдалося зберегти вектори: %s", e)
+            return len(missing)
+
+    def semantic(self, query: str, limit: int = 6, docs: list[LessonDoc] | None = None) -> list[tuple[float, Chunk]]:
+        """Уривки, близькі за змістом (а не за словами): «датчик світла» знайде «фоторезистор». Лише вже
+        проіндексовані уривки (див. index); немає моделі — порожньо."""
+        if self.embed is None:
+            return []
+        self._load_vectors()
+        try:
+            query_vector = self.embed([query])[0]
+        except Exception as e:  # noqa: BLE001
+            log.debug("Пошук за змістом: %s", e)
+            return []
+        allowed = {id(doc) for doc in docs} if docs is not None else None
+        norm_q = math.sqrt(sum(x * x for x in query_vector)) or 1.0
+        scored = []
+        for chunk in self.chunks:
+            if allowed is not None and id(chunk.doc) not in allowed:
+                continue
+            vector = self._vectors.get(self._key(chunk))
+            if vector is None:
+                continue
+            dot = sum(a * b for a, b in zip(query_vector, vector))
+            scored.append((dot / (norm_q * (math.sqrt(sum(x * x for x in vector)) or 1.0)), chunk))
+        scored.sort(key=lambda item: -item[0])
+        return scored[:limit]
+
+    def find(self, query: str, limit: int = 6, docs: list[LessonDoc] | None = None) -> list[tuple[float, Chunk]]:
+        """Що знайшлося за словами (BM25, якщо збіг сильний) і за змістом (якщо досить близько) — разом,
+        без повторів, спершу сильні збіги слів. Оцінка — для порядку, а не для порогу."""
+        words = [item for item in self.search(query, limit=limit, docs=docs) if item[0] >= SEARCH_STRONG]
+        meaning = [item for item in self.semantic(query, limit=limit, docs=docs) if item[0] >= SEMANTIC_CLOSE]
+        merged, seen = [], set()
+        for score, chunk in words + meaning:
+            if id(chunk) not in seen:
+                seen.add(id(chunk))
+                merged.append((score, chunk))
+        return merged[:limit]
 
     def search(self, query: str, limit: int = 6, docs: list[LessonDoc] | None = None) -> list[tuple[float, Chunk]]:
         terms = [term for term in tokens(query) if term in self._df]
@@ -517,13 +607,13 @@ class Helper:
         self.library.refresh()
         kind = self.route(question)
         talk = bool(SMALL_TALK_RE.search(question)) and len(question) < 60  # «Привіт! Як справи?» — шукати нема чого
-        found = self.library.search(question, limit=6) if kind != "now" and not talk else []
         # Уривки з записів — лише коли питають про пари чи поняття: «сьогодні був важкий день» чи «допоможи написати
         # лист» теж знаходять збіги в розшифровках, але це звичайна розмова.
         about = bool(ABOUT_LESSONS_RE.search(question) or EXPLAIN_RE.search(question) or EXAM_RE.search(question))
         about = about and not REQUEST_RE.search(question)
-        strong = [item for item in found if item[0] >= SEARCH_STRONG] if about else []
-        sources = self.sources(question, kind, now, live) if strong or kind == "now" else ""
+        # За словами (BM25) і за змістом («датчик світла» → «фоторезистор»).
+        strong = self.library.find(question, limit=6) if about and kind != "now" and not talk else []
+        sources = self.sources(question, kind, now, live, found=strong) if strong or kind == "now" else ""
         if not sources and SAID_RE.search(question) and not talk:  # «що казали про X» — а в записах X немає
             topic = m.group(1) if (m := re.search(r"\bпро\s+(.+?)[?.!]*$", question, re.I)) else "це"
             return (f"У записах пар про {topic[:60]} нічого не знайшов. Можливо, Whisper записав це інакше або цього "
@@ -658,7 +748,8 @@ class Helper:
         return "📝 Завдання з записів пар:\n" + "\n".join(items[-8:]) + (
             "\n\n(з автоматичних підсумків — дати й номери краще звір у Classroom)")
 
-    def sources(self, question: str, kind: str, now: datetime, live: str = "", budget: int = 4000) -> str:
+    def sources(self, question: str, kind: str, now: datetime, live: str = "", budget: int = 4000,
+                found: list[tuple[float, Chunk]] | None = None) -> str:
         library = self.library
         out: list[str] = []
         if kind == "now" or (live and kind in ("lesson", "search") and re.search(r"зараз|на парі|викладач", question, re.I)):
@@ -674,7 +765,8 @@ class Helper:
             out.append(f"{head}\n{body}")
         scope = picked or None
         query = question + " завдання лабораторна здати дедлайн до" if kind == "tasks" else question
-        for _, chunk in library.search(query, limit=6, docs=scope):
+        chunks = found if found is not None and scope is None else library.search(query, limit=6, docs=scope)
+        for _, chunk in chunks:
             out.append(f"[{chunk.doc.label(chunk.time)}] {chunk.text}")
         text = ""
         for piece in out:
