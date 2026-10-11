@@ -79,7 +79,9 @@ SYSTEM = (
     "Сам ти на парі нічого не робиш. Лише якщо просять щось зробити на парі зараз (написати в чат, скріншот, вийти) — "
     "підкажи команду: «напиши <текст>», «екран», «чат», «статус», «вийди».\n"
     "Про себе кажи лише правду — з картки «Про тебе», якщо вона є нижче; чого там немає — не вигадуй, скажи, що не "
-    "знаєш. Розклад і пари згадуй, лише коли про них питають чи це справді доречно."
+    "знаєш. Розклад і пари згадуй, лише коли про них питають чи це справді доречно.\n"
+    "Якщо студент відповідає на твоє повідомлення (звіт, підсумок тижня, сповіщення) — мова саме про нього. На подяку "
+    "чи короткий відгук відповідай коротко, по-людськи, без нових звітів і переказів."
 )
 SECTION_RE = re.compile(r"^\**\s*(Про що|Що робили|Завдання й дедлайни|Важливе|Чат)\s*:?\**\s*:?\s*(.*)$")
 # «Завдання: не було», «Важливе: нічого» — показувати нема чого.
@@ -136,6 +138,17 @@ def _shorten(text: str, limit: int) -> str:
             break
         out = f"{out} {part}".strip()
     return out if len(out) <= limit else out[:limit].rsplit(" ", 1)[0] + "…"
+
+
+REPLIED_LIMIT = 2500  # стільки з повідомлення, на яке відповіли (звіт буває довгим), — решта контексту теж має влізти
+
+
+def replied_part(replied: str) -> str:
+    """Повідомлення бота, на яке студент відповів реплаєм, — щоб модель знала, про що мова."""
+    text = replied.strip()
+    if len(text) > REPLIED_LIMIT:
+        text = text[:REPLIED_LIMIT].rsplit("\n", 1)[0] + "\n…"
+    return f"Студент відповідає (реплаєм) на це твоє повідомлення:\n«{text}»"
 
 
 def plain(text: str) -> str:
@@ -551,7 +564,7 @@ class Helper:
         # Мовна модель, що бачить фото: see(system, text, image). None — ще не готова.
         self.see: Callable[[str, str, bytes], str] | None = None
 
-    def look(self, question: str, image: bytes, now: datetime, dialog: str = "", events: str = "") -> str:
+    def look(self, question: str, image: bytes, now: datetime, dialog: str = "", events: str = "", replied: str = "") -> str:
         """Фото від студента (з підписом-питанням чи без) — що на ньому і чим допомогти."""
         if self.see is None:
             return "Мовна модель ще не готова (Ollama) — фото подивлюся, щойно вона запуститься."
@@ -563,6 +576,8 @@ class Helper:
             parts.append(events)
         if dialog:
             parts.append("Розмова перед цим:\n" + dialog)
+        if replied.strip():
+            parts.append(replied_part(replied))
         parts.append(f"Студент надіслав фото й пише: {question}" if question.strip() else
                      "Студент надіслав фото без підпису: коротко скажи, що на ньому, і чим можеш допомогти.")
         see = self.see
@@ -601,7 +616,8 @@ class Helper:
             return self._lessons(question, now)
         return None
 
-    def answer(self, question: str, now: datetime, live: str = "", dialog: str = "", events: str = "") -> str:
+    def answer(self, question: str, now: datetime, live: str = "", dialog: str = "", events: str = "",
+               replied: str = "") -> str:
         if (ready := self.quick(question, now)) is not None:
             return ready
         self.library.refresh()
@@ -635,6 +651,8 @@ class Helper:
             parts.append(events)
         if dialog:
             parts.append("Розмова перед цим:\n" + dialog)
+        if replied.strip():
+            parts.append(replied_part(replied))
         parts.append(f"Питання студента: {question}")
         if sources:
             # Питання — перед уривками, а вимога — після: інакше маленька модель просто переписує уривки.

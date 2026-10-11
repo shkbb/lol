@@ -71,6 +71,7 @@ class TelegramBot:
         # Чи йде відповідь на це повідомлення бота в чат пари (решта відповідей — розмова з ботом).
         self.reply_goes_to_chat: Callable[[str], bool] = lambda replied: True
         self.current: Incoming | None = None  # повідомлення, яке зараз обробляємо
+        self.on_sent: Callable[[str], None] | None = None  # що бот написав (для пам'яті розмови)
 
     def _call(self, method: str, http_timeout: float = 20, files: dict | None = None, **params) -> object:
         url = API.format(token=self.token, method=method)
@@ -108,6 +109,11 @@ class TelegramBot:
                     "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]
                 }
             self._call("sendMessage", **params)
+        if self.on_sent is not None and text.strip():
+            try:
+                self.on_sent(text)
+            except Exception:  # noqa: BLE001 — пам'ять розмови не має заважати надсиланню
+                log.debug("Не вдалося запам'ятати надіслане", exc_info=True)
 
     def react(self, message_id: int, emoji: str = THINKING) -> None:
         """Реакція на твоє повідомлення (👀 — «прочитав, думаю»); "" — прибрати. Не вийшло — не біда."""
@@ -161,7 +167,9 @@ class TelegramBot:
             photo = _photo_id(message)
             if "text" in message or voice or photo:
                 original = message.get("reply_to_message") or {}
-                replied = original.get("text") or original.get("caption") or ""
+                # Реплай на власне повідомлення студента — не на повідомлення бота: тоді «на що відповіли» немає.
+                from_bot = (original.get("from") or {}).get("is_bot", True)
+                replied = (original.get("text") or original.get("caption") or "") if from_bot else ""
                 text = message.get("text") or message.get("caption") or ""
                 messages.append(Incoming(message["chat"]["id"], text, "reply_to_message" in message, replied=replied,
                                          message_id=message.get("message_id", 0), voice=voice, photo=photo))

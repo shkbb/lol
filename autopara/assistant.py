@@ -145,7 +145,7 @@ SCREEN_ASK_RE = re.compile(r"скр[іи]н|скр[іи]ншот|screenshot|ек
 STATUS_ASK_RE = re.compile(r"^\s*(ти\s+(зараз\s+)?(на\s+парі|в\s+зустрічі|де)|де\s+ти|що\s+з\s+тобою)\W*$", re.I)
 CHAT_ASK_RE = re.compile(r"(покажи|що\s+(пишуть|там)|кинь).{0,20}чат", re.I)
 LEAVE_ASK_RE = re.compile(r"(^|\s)(вийди|вийти|виходь|покинь|покинути)(\s|$|\W)", re.I)
-DIALOG_TURNS = 6  # скільки останніх реплік розмови з ботом пам'ятає мозок
+DIALOG_TURNS = 8  # скільки останніх реплік розмови з ботом пам'ятає мозок (разом зі звітами й сповіщеннями)
 
 COMMANDS = {
     "/start", "/help", "help", "допомога", "?", "/status", "статус", "так", "yes", "ок", "ok", "давай", "+",
@@ -1115,7 +1115,8 @@ class Assistant:
         return bool(head) and any(text.strip()[:80] == head for text in list(self._alerts))
 
     def remember_reply(self, text: str) -> None:
-        """Відповідь мозку на питання з Telegram — щоб наступне питання могло на неї спиратися."""
+        """Що бот написав у Telegram — відповідь чи сам (звіт про пару, підсумок тижня, сповіщення), — щоб наступне
+        питання могло на це спиратися («цікавий звіт, дякую», «а що там за дедлайн?»)."""
         with self._lock:
             self.dialog.append(("autopara", text[:600]))
 

@@ -198,3 +198,21 @@ def test_answers_are_replies_long_ones_split_and_media_goes_to_its_handler():
     assert sent[0]["reply_parameters"]["message_id"] == 72 and "reply_parameters" not in sent[1]
     bot.react(72)
     assert api.calls[-1][0] == "setMessageReaction" and api.calls[-1][1]["reaction"] == [{"type": "emoji", "emoji": "👀"}]
+
+
+def test_everything_the_bot_writes_is_remembered_and_replies_carry_what_they_answer():
+    """Звіт, підсумок тижня, сповіщення — усе, що бот написав, іде в пам'ять розмови (довге — цілим); реплай несе
+    текст повідомлення бота, на яке відповіли, а реплай на власне повідомлення — ні."""
+    digest = update(1, 42, "цікавий звіт, дякую", reply=True)
+    digest["message"]["reply_to_message"].update(text="🗓 Підсумок тижня 05.10–11.10", **{"from": {"is_bot": True}})
+    own = update(2, 42, "і ще одне", reply=True)
+    own["message"]["reply_to_message"].update(text="моє попереднє питання", **{"from": {"is_bot": False}})
+    bot = TelegramBot("123:abc", chat_id=42, session=FakeApi([digest, own]))
+    assert [(m.text, m.replied) for m in bot.updates()] == [
+        ("цікавий звіт, дякую", "🗓 Підсумок тижня 05.10–11.10"), ("і ще одне", "")]
+    sent = []
+    bot.on_sent = sent.append
+    report = "🗓 Підсумок тижня\n" + "рядок про пару\n" * 600  # довше за одне повідомлення Telegram
+    bot.send(report)
+    bot.send("🧠 Радий, що знадобилось!", reply_to=7)
+    assert sent == [report, "🧠 Радий, що знадобилось!"]

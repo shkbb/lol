@@ -129,6 +129,20 @@ def test_any_conversation_knows_schedule_and_recent_lessons_but_does_not_dump_re
         assert "Уривки з записів" not in prompts[-1][1]
 
 
+
+def test_a_reply_to_a_report_is_about_that_report(tmp_path):
+    """«Цікавий звіт, дякую» реплаєм на підсумок тижня — модель бачить, на що відповіли, і знає, що на подяку
+    відповідають коротко, а не новим звітом."""
+    prompts = []
+    helper = Helper(library(tmp_path), lambda system, text: prompts.append((system, text)) or "Радий, що знадобилось!")
+    digest = "🗓 Підсумок тижня 05.10–11.10\n📚 Безпека розробки — 1 пара\n" + "  • рядок\n" * 1000
+    assert helper.answer("цікавий звіт, дякую", NOW, replied=digest) == "Радий, що знадобилось!"
+    system, text = prompts[-1]
+    assert "без нових звітів" in system
+    assert "відповідає (реплаєм) на це твоє повідомлення" in text and "Підсумок тижня 05.10–11.10" in text
+    assert text.index("Підсумок тижня") < text.index("Питання студента: цікавий звіт")
+    assert len(text) < 9000  # довгий звіт — скорочено, щоб решта контексту влізла
+
 def test_russian_answer_is_never_sent(tmp_path):
     replies = iter(["Привет, всё хорошо, что делаешь?", "Привіт, усе добре, що робиш?"])
     helper = Helper(library(tmp_path), lambda system, text: next(replies))

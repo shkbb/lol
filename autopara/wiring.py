@@ -193,16 +193,25 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         current = bot.current if bot is not None else None
         return explicit or (current.message_id if current is not None else 0)
 
-    def answer(question: str, context: str, current: str, to: int) -> None:
+    def replied() -> str:
+        """Повідомлення бота, на яке відповіли реплаєм (звіт, підсумок тижня…), — щоб мозок знав, про що мова."""
+        if (explicit := getattr(asking, "replied", None)) is not None:
+            return explicit
+        current = bot.current if bot is not None else None
+        return current.replied if current is not None and current.is_reply else ""
+
+    if bot is not None:
+        bot.on_sent = assistant.remember_reply  # усе, що бот написав (і звіти, і сповіщення), — у пам'ять розмови
+
+    def answer(question: str, context: str, current: str, to: int, about: str = "") -> None:
         """Відповідь, якій потрібна мовна модель (окремим потоком — це до хвилини), — реплаєм на питання."""
         now = clock()
         dialog, events = assistant.chat_memory(now)
         try:
-            reply = helper.answer(question, now, live=context if current else "", dialog=dialog, events=events)
+            reply = helper.answer(question, now, live=context if current else "", dialog=dialog, events=events,
+                                  replied=about)
         except BrainError as e:
             reply = f"не вийшло відповісти: {e}"
-        else:
-            assistant.remember_reply(reply)
         notifier.reply(reply if reply.startswith(("📅", "📖", "📝", "👤", "У записах")) else f"🧠 {reply}", to)
 
     def ask(question: str, context: str, current: str) -> str | None:
@@ -215,13 +224,13 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             log.warning("Помічник: %s", e)
             ready = None
         if ready is not None:
-            assistant.remember_reply(ready)
             return ready
         if helper.ask is None:
             return "🧠 Мовна модель ще не готова (Ollama) — на таке відповім, щойно вона запуститься. Розклад, завдання й «що було на парі» — питай уже."
         to = reply_to()
         notifier.react(to)
-        threading.Thread(target=answer, args=(question, context, current, to), name="brain-question", daemon=True).start()
+        threading.Thread(target=answer, args=(question, context, current, to, replied()), name="brain-question",
+                         daemon=True).start()
         return ""
 
     def media(incoming) -> str | None:
@@ -255,11 +264,11 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             notifier.reply("Не розчув — спробуй ще раз або напиши текстом.", to)
             return
         notifier.reply(f"🎤 «{text}»", to)
-        asking.message_id = to
+        asking.message_id, asking.replied = to, incoming.replied
         try:
             reply = assistant.on_command(text, clock(), False)
         finally:
-            asking.message_id = 0
+            asking.message_id, asking.replied = 0, None
         if reply:
             notifier.reply(reply, to)
 
@@ -268,11 +277,11 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         now = clock()
         dialog, events = assistant.chat_memory(now)
         try:
-            reply = helper.look(incoming.text, bot.download(incoming.photo), now, dialog=dialog, events=events)
+            reply = helper.look(incoming.text, bot.download(incoming.photo), now, dialog=dialog, events=events,
+                                replied=incoming.replied)
         except Exception as e:  # noqa: BLE001
             log.warning("Фото: %s", e)
             reply = "Не вийшло подивитися фото — надішли, будь ласка, ще раз."
-        assistant.remember_reply(reply)
         notifier.reply(f"🧠 {reply}", to)
 
     if listening:
