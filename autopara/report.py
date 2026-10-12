@@ -207,7 +207,7 @@ def render(record: LessonRecord, summary: str) -> str:
     elif record.transcript:
         lines.append("Мозок вимкнений — підсумку немає, але розшифровка у файлі нижче.")
     else:
-        lines.append("Вуха вимкнені — що було на парі, я не чув.")
+        lines.append("Розшифровки немає: вуха вимкнені або звук з пари до мене не дійшов.")
     if record.mentions:
         lines.append("")
         lines.append("🔔 Тебе згадували:")

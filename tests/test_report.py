@@ -83,7 +83,7 @@ def test_report_without_brain_or_ears():
     record = LessonRecord("pair#1", "Філософія (Лк)", "", at("11:10"), at("12:30"), at("11:08"), at("12:31"),
                           [], [], [], [(at("11:40"), "+")], 0, "")
     report = render(record, "")
-    assert "Вуха вимкнені" in report and "💬 Я писав у чат: «+» о 11:40" in report
+    assert "Розшифровки немає" in report and "💬 Я писав у чат: «+» о 11:40" in report
 
 
 def test_next_pair_in_the_same_meeting_gets_its_own_report():

@@ -60,8 +60,8 @@ class JoinSettings:
     smart_leave: bool = True
     max_overtime_minutes: int = 20
     leave_after_minutes: int = 0
-    # "auto" — Zoom-клієнт, якщо вуха можуть його чути (Linux, віртуальний кабель), інакше Zoom у браузері,
-    # а якщо там не пустять — таки клієнт; "app" — завжди клієнт; "browser" — завжди браузер.
+    # "auto" — спершу Zoom у браузері програми (там вона бачить зустріч, як у Meet: чи впустили, звук, учасники, екран);
+    # куди браузер не пустив — Zoom-клієнт (посилання запам'ятовується); "app" — завжди клієнт; "browser" — завжди браузер.
     zoom_mode: str = "auto"
     display_name: str = ""
     meet_account: str = ""

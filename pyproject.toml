@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autopara"
-version = "0.3.3"
+version = "0.3.4"
 description = "Автоматично заходить на пари (ДУІКТ, КПІ) у Google Meet і Zoom за розкладом групи"
 readme = "README.md"
 requires-python = ">=3.11"

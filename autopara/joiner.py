@@ -86,8 +86,16 @@ ZOOM_ENDED_RE = re.compile(
     r"|встреча завершена|конференция завершена",
     re.I,
 )
+# Вікна Zoom «у зустріч не впустили», хоч кнопка «Leave» уже є: зустріч заповнена, лише для своїх, зачинена.
+ZOOM_REFUSED_RE = re.compile(
+    r"allowed capacity|maximum number of (attendees|participants)|authorized attendees only|meeting (is|has been) locked"
+    r"|максимальної кількості учасників|лише для авторизованих|зустріч заблокован|максимального количества участников",
+    re.I,
+)
+# Звук зустрічі в браузері під'єднується окремо — без «Join Audio» не чути нічого.
+ZOOM_JOIN_AUDIO_RE = re.compile(r"^\s*(join audio|приєднатися до аудіо|під.єднати звук|войти в аудио)", re.I)
+ZOOM_COMPUTER_AUDIO_RE = re.compile(r"computer audio|audio by computer|звук комп.ютера|аудіо комп.ютера|звук компьютера", re.I)
 ZOOM_MIC_RE = re.compile(r"micro|мікрофон|микрофон|\b(un)?mute\b|звук", re.I)
-ZOOM_CAM_RE = re.compile(r"camera|video|камер|відео|видео", re.I)
 # Підпис кнопки описує дію, а не стан: «Увімкнути мікрофон» означає, що зараз він вимкнений.
 CURRENTLY_OFF_RE = re.compile(r"turn on|unmute|start video|увімкн|включ|запуст", re.I)
 CURRENTLY_ON_RE = re.compile(r"turn off|\bmute\b|stop video|вимкн|выключ|отключ|зупин|останов", re.I)
@@ -178,7 +186,7 @@ def _devices_off(page: Page, settings: JoinSettings, mic, cam) -> bool:
     return True
 
 
-def _block_media(context: BrowserContext, page: Page, origin: str) -> None:
+def _block_media(context: BrowserContext, page: Page, origin: str, names: tuple[str, ...] = ("microphone", "camera")) -> None:
     """Забороняє сайту мікрофон і камеру — після перезавантаження він фізично не зможе їх увімкнути.
 
     Заборона діє, поки живе CDP-сесія, тобто поки відкрита вкладка: тому сесію не від'єднуємо.
@@ -186,7 +194,7 @@ def _block_media(context: BrowserContext, page: Page, origin: str) -> None:
     """
     try:
         cdp = context.new_cdp_session(page)
-        for name in ("microphone", "camera"):
+        for name in names:
             cdp.send(
                 "Browser.setPermission",
                 {"origin": origin, "permission": {"name": name}, "setting": "denied"},
@@ -559,7 +567,6 @@ def _zoom_toggle(selector: str, name_re: re.Pattern) -> Callable[[Page], Locator
 
 
 ZOOM_MIC = _zoom_toggle("#preview-audio-control-button", ZOOM_MIC_RE)
-ZOOM_CAM = _zoom_toggle("#preview-video-control-button", ZOOM_CAM_RE)
 
 
 def _zoom_in_call(page: Page) -> bool:
@@ -568,6 +575,35 @@ def _zoom_in_call(page: Page) -> bool:
         or _find(page, lambda f: f.get_by_role("button", name=re.compile(r"^\s*(leave|вийти|выйти)\b", re.I)))
         is not None
     )
+
+
+def _zoom_admitted(page: Page) -> bool:
+    """У зустрічі — і без вікна «не впустили» (зустріч заповнена тощо: кнопка «Leave» тоді теж є)."""
+    if _visible_text(page, ZOOM_REFUSED_RE):
+        raise JoinError("Zoom не впустив: зустріч заповнена чи закрита для гостей")
+    return _zoom_in_call(page)
+
+
+def zoom_join_audio(page: Page) -> bool:
+    """Під'єднати звук зустрічі («Join Audio» → «звук комп'ютера») з вимкненим мікрофоном. Без цього в Zoom не чути
+    нічого — 12.10 так пропала пара в Zoom-клієнті. True — було що під'єднувати."""
+    button = _find(page, lambda f: f.get_by_role("button", name=ZOOM_JOIN_AUDIO_RE))
+    if button is None:
+        return False
+    try:
+        button.click(timeout=3000)
+        page.wait_for_timeout(1500)
+        if computer := _find(page, lambda f: f.get_by_role("button", name=ZOOM_COMPUTER_AUDIO_RE)):
+            computer.click(timeout=3000)
+            page.wait_for_timeout(1500)
+    except PlaywrightError as e:
+        log.debug("Не вдалося під'єднати звук Zoom: %s", e)
+        return True
+    mic = ZOOM_MIC(page)
+    if mic is not None and _is_off(mic) is False and not _ensure_off(page, ZOOM_MIC):
+        log.error("УВАГА: у Zoom після під'єднання звуку мікрофон, схоже, увімкнений — вимкни його вручну!")
+    log.info("🔊 Під'єднав звук зустрічі Zoom (мікрофон вимкнений)")
+    return True
 
 
 def zoom_participants(page: Page) -> int | None:
@@ -608,16 +644,18 @@ def _zoom_prejoin(page: Page, settings: JoinSettings) -> Locator:
 
 
 def join_zoom_web(context: BrowserContext, page: Page, url: str, settings: JoinSettings, deadline: datetime) -> None:
-    context.grant_permissions(["microphone", "camera"], origin=ZOOM_ORIGIN)
+    # Мікрофон і камеру забороняємо Zoom ще до входу: так увімкнути їх неможливо фізично. Перемикачами тут не можна:
+    # справжні пристрої ноутбука Zoom у браузері програми «вантажить» без кінця і натискань не помічає (перевірено
+    # 12.10 на тестовій зустрічі Zoom). Чути зустріч це не заважає — звук під'єднуємо без мікрофона (zoom_join_audio).
+    blocked = tuple(name for name, off in (("microphone", settings.mute_microphone), ("camera", settings.camera_off)) if off)
+    if blocked:
+        _block_media(context, page, ZOOM_ORIGIN, blocked)
+    if allowed := [name for name in ("microphone", "camera") if name not in blocked]:
+        context.grant_permissions(allowed, origin=ZOOM_ORIGIN)
     page.goto(zoom_web_url(url), wait_until="domcontentloaded")
-    join_button = _zoom_prejoin(page, settings)
-    if (settings.mute_microphone or settings.camera_off) and not _devices_off(page, settings, ZOOM_MIC, ZOOM_CAM):
-        log.warning("Не вдалося переконатися, що мікрофон/камера вимкнені — забороняю Zoom доступ до них")
-        _block_media(context, page, ZOOM_ORIGIN)
-        page.reload(wait_until="domcontentloaded")
-        join_button = _zoom_prejoin(page, settings)
-    join_button.click()
-    _wait_in_call(page, deadline, _zoom_in_call)
+    _zoom_prejoin(page, settings).click()
+    _wait_in_call(page, deadline, _zoom_admitted)
+    zoom_join_audio(page)
 
 
 # --- Zoom-клієнт -------------------------------------------------------------
@@ -887,8 +925,8 @@ class Joiner:
     ):
         self.settings = settings
         self.frames = frames  # FrameBuffer для відеовирізок, або None
-        # zoom_mode = "auto": клієнт, якщо вуха його чують; інакше браузер. Посилання, де браузер
-        # не пустив, запам'ятовуємо — туди надалі одразу клієнтом.
+        # zoom_mode = "auto": спершу браузер; посилання, де браузер не пустив, запам'ятовуємо — туди надалі одразу
+        # клієнтом (див. _zoom_in_app). zoom_app_heard — чи чують вуха клієнт (для поради, коли він не чути).
         self.zoom_app_heard = zoom_app_heard
         self._app_links_file = profile_dir.parent / "zoom-app-links.json"
         self.speakers_dir = profile_dir.parent / "speakers"  # хто коли говорив на парах у Meet (див. MEET_SPEAKERS_JS)
@@ -968,7 +1006,10 @@ class Joiner:
     def _zoom_in_app(self, url: str) -> bool:
         if self.settings.zoom_mode != "auto":
             return self.settings.zoom_mode == "app"
-        return self.zoom_app_heard or url in self._app_links()
+        # Браузер — першим: там програма бачить зустріч, як у Meet (чи впустили, мікрофон, учасники, екран, звук самої
+        # вкладки). Zoom-клієнт для неї чорна скринька: 08.10 він упав, 12.10 просидів пару без звуку, і ніхто не знав.
+        # Тож клієнт — лише для посилань, куди браузер не пустив (запам'ятовуємо їх).
+        return url in self._app_links()
 
     def _app_links(self) -> list[str]:
         try:
@@ -1069,6 +1110,7 @@ class Joiner:
                 self._note_speakers(session)
                 return observe_meet(page)
             if session.visit.platform == "zoom":
+                zoom_join_audio(page)  # звук відпав чи ще не під'єднаний — під'єднати знову
                 return observe_zoom(page)
         except PlaywrightError as e:
             log.debug("Не вдалося роздивитись зустріч: %s", e)
