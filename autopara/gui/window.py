@@ -243,6 +243,7 @@ class MainWindow(QMainWindow):
             state = self.bridge.api(app_module.api_state)
         except Exception:  # noqa: BLE001 — програма саме перезапускається
             return
+        self.model.sync(state.get("config_rev"))  # змінили кнопками в Telegram — показати й не затерти
         self.brand_status.setText("● працює" if state.get("running") else "○ вимкнена")
         self.brand_status.setStyleSheet(f"color: {'#16a34a' if state.get('running') else ''};")
         if self.tray is not None:

@@ -353,3 +353,18 @@ def test_wizard_finds_the_student_by_name_alone(qt, tmp_path):
     assert model.get("me.name") == "Ляшко Денис" and "✓ Знайдено: Ляшко Денис Іванович, ТЦР-32, 3 курс" in group.state.text()
     group._pick_university("kpi")
     assert not group.me_box.isVisibleTo(group)  # КПІ студентів за ПІБ не віддає — лише група
+
+
+
+def test_settings_changed_in_telegram_are_shown_and_not_overwritten(running_app, qt, tmp_path):
+    """Змінили кнопкою в Telegram — вікно підтягує це й наступним своїм збереженням не повертає старе."""
+    from autopara import tgsettings
+
+    server, controller, _ = running_app
+    window, model = window_for(server, qt)
+    controller.save_from_telegram(tgsettings.change(controller.latest_config, "cfg:telegram.reports"))
+    assert wait_until(lambda: (window.refresh() or True) and model.get("telegram.reports") is False)
+    model.set("me.name", "Ляшко Денис")
+    model.save_now(wait=True)
+    saved = saved_config(tmp_path / "config.toml")
+    assert saved.me.name == "Ляшко Денис" and saved.telegram.reports is False

@@ -216,3 +216,23 @@ def test_everything_the_bot_writes_is_remembered_and_replies_carry_what_they_ans
     bot.send(report)
     bot.send("🧠 Радий, що знадобилось!", reply_to=7)
     assert sent == [report, "🧠 Радий, що знадобилось!"]
+
+
+
+def test_settings_menu_is_edited_in_place_and_buttons_know_their_message():
+    press = {"update_id": 9, "callback_query": {"id": "cb1", "data": "cfg:telegram.weekly",
+                                                 "message": {"message_id": 77, "chat": {"id": 42}}}}
+    api = FakeApi([press])
+    bot = TelegramBot("123:abc", chat_id=42, session=api)
+    [incoming] = bot.updates()
+    assert (incoming.text, incoming.menu_id, incoming.callback_id) == ("cfg:telegram.weekly", 77, "cb1")
+    bot.edit(77, "⚙️ Налаштування", [[("⬜ Підсумок тижня", "cfg:telegram.weekly")]])
+    method, params, _ = api.calls[-1]
+    assert method == "editMessageText" and params["message_id"] == 77
+    assert params["reply_markup"] == {"inline_keyboard": [[{"text": "⬜ Підсумок тижня", "callback_data": "cfg:telegram.weekly"}]]}
+
+    class Unchanged(FakeApi):
+        def post(self, url, json=None, data=None, files=None, timeout=None):
+            return FakeResponse({"ok": False, "description": "Bad Request: message is not modified"})
+
+    TelegramBot("123:abc", chat_id=42, session=Unchanged()).edit(77, "те саме")  # двічі натиснули — не помилка

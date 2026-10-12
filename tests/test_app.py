@@ -179,6 +179,26 @@ def test_live_reload_without_restart(running_app):
     assert saved["result"] == "applied" and len(joiners) == 1  # браузер не перезапускали
 
 
+def test_telegram_buttons_save_settings_and_apply_them_without_restart(running_app, tmp_path):
+    """Кнопки в Telegram: зберегти у файл, застосувати на льоту (звіти, підсумок тижня); дві поспіль — обидві."""
+    from autopara import tgsettings
+    from autopara.config import read_config
+
+    server, controller, joiners = running_app
+    call(server, "POST", "/api/start")
+    rev = call(server, "GET", "/api/state")[1]["config_rev"]
+    applied = []
+    controller._apply_live = applied.append
+    controller.save_from_telegram(tgsettings.change(controller.latest_config, "cfg:telegram.reports"))
+    controller.save_from_telegram(tgsettings.change(controller.latest_config, "cfg:telegram.weekly"))  # одразу друга
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and (controller.config.telegram.weekly or len(applied) < 2):
+        time.sleep(0.05)
+    assert not controller.config.telegram.reports and not controller.config.telegram.weekly
+    assert not read_config(tmp_path / "config.toml").telegram.reports
+    assert len(joiners) == 1 and applied[-1].telegram.weekly is False  # без перезапуску браузера й помічника
+    assert call(server, "GET", "/api/state")[1]["config_rev"] >= rev + 2
+
 def test_second_copy_finds_the_running_one(running_app, tmp_path, monkeypatch):
     """Два «бігуни» заходили б на пару двічі — тому `autopara run` бачить уже запущену копію."""
     from autopara import cli

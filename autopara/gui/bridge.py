@@ -121,6 +121,7 @@ class ConfigModel(QObject):
     replaced = Signal()  # налаштування замінили цілком (імпорт) — сторінки мають перемалюватись
     autostart_on = Signal()  # уперше налаштували — автозапуск увімкнено
     saved_ok = Signal()  # програма вже працює з новими налаштуваннями (розклад, посилання)
+    changed_elsewhere = Signal()  # налаштування змінили не у вікні (кнопками в Telegram) — перемалювати сторінки
 
     def __init__(self, bridge: Bridge, delay_ms: int = 1000):
         super().__init__()
@@ -128,6 +129,7 @@ class ConfigModel(QObject):
         meta = bridge.api(app_module.api_get_config)
         self.data: dict = meta.pop("config")
         self.meta = meta
+        self.rev = meta.get("rev")  # версія налаштувань у програмі, з якою збігається self.data
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(delay_ms)
@@ -202,6 +204,7 @@ class ConfigModel(QObject):
 
     def _saved(self, result: dict) -> None:
         self._saving = False
+        self.rev = result.get("rev", self.rev)
         if self._dirty:
             self._timer.start()
             return
@@ -221,7 +224,20 @@ class ConfigModel(QObject):
         self._dirty = False
         self.data = data
         self.meta = {**self.meta, **{k: v for k, v in self.bridge.api(app_module.api_get_config).items() if k != "config"}}
+        self.rev = self.meta.get("rev", self.rev)
         self.replaced.emit()
+
+    def sync(self, rev) -> bool:
+        """Програма має новішу версію налаштувань, ніж вікно (змінили кнопками в Telegram), — підтягнути її, якщо тут
+        нічого не чекає на збереження. Інакше наступне збереження з вікна затерло б ті зміни. True — підтягнули."""
+        if rev is None or rev == self.rev or self._dirty or self._saving or self._timer.isActive():
+            return False
+        fresh = self.bridge.api(app_module.api_get_config)
+        self.data = fresh.pop("config")
+        self.rev = fresh.get("rev", rev)
+        self.meta = {**self.meta, **fresh}
+        self.changed_elsewhere.emit()
+        return True
 
     def reload_meta(self) -> None:
         self.meta.update({k: v for k, v in self.bridge.api(app_module.api_get_config).items() if k != "config"})

@@ -92,6 +92,11 @@ class Controller:
         self._user_stopped = False  # вимкнули кнопкою — тоді й після збереження налаштувань не вмикаємо самі
         self._next_tick: datetime | None = None
         self._last_error = ""
+        # Номер версії налаштувань: росте з кожною зміною (вікно, імпорт, Telegram) — вікно бачить, що їх змінили
+        # не в ньому, і підтягує, а не затирає своєю старою копією.
+        self.config_rev = 0
+        self.latest_config = config  # найновіші (збережені, хоч, може, ще не застосовані) — для кнопок у Telegram
+        self._apply_live: Callable[[Config], None] = lambda config: None  # те, що діє на льоту (wiring.Stack.apply)
         self.google_accounts: list[str] = read_accounts(config)  # у які Google-акаунти увійдено (кеш)
         self._login_open = False  # відкрито вхід у Google — стежимо, коли увійдуть
         self._login_pages: list = []
@@ -113,6 +118,17 @@ class Controller:
         self._commands.put((name, args, future))
         self._wake.set()
         return future.result(timeout)
+
+    def submit(self, name: str, *args) -> None:
+        """Як call, але не чекати результату: з потоку, який ця команда сама може перезапустити (бот у Telegram)."""
+        self._commands.put((name, args, Future()))
+        self._wake.set()
+
+    def save_from_telegram(self, config: Config) -> None:
+        """Налаштування змінили кнопкою в Telegram — зберегти у файл і застосувати, як зміну з вікна."""
+        save_config(config, self.config_path)
+        self.latest_config = config  # дві кнопки поспіль: друга — від уже зміненого, а не від старого
+        self.submit("reload", config)
 
     def snapshot(self) -> dict:
         with self._state_lock:
@@ -196,6 +212,9 @@ class Controller:
         info.refine_allowed = lambda: runner.quiet(self.clock())  # уточнення — лише коли пари не скоро
         info.assistant.schedule_note = runner.today_note  # мозок знає, яка пара була, яка йде, яка далі
         info.schedule_text = runner.schedule_text  # «яка наступна пара?» — з розкладу, без мовної моделі
+        info.settings = lambda: self.latest_config  # налаштування з Telegram — завжди найновіші
+        info.save_settings = self.save_from_telegram
+        self._apply_live = info.apply
         return runner, joiner
 
     def _tick_if_due(self) -> None:
@@ -273,6 +292,8 @@ class Controller:
 
     def _do_reload(self, config: Config) -> str:
         old, self.config = self.config, config
+        self.latest_config = config
+        self.config_rev += 1
         runner = self.runner
         if runner is None:
             if self._user_stopped or not configured(config):
@@ -284,7 +305,7 @@ class Controller:
                 log.error("Налаштування збережено, але автоматичний вхід не запустився: %s", e)
                 return "saved"
             return "started"
-        light_telegram = {"mentions": config.telegram.mentions, "joins": config.telegram.joins}  # діють на льоту
+        light_telegram = {name: getattr(config.telegram, name) for name in ("mentions", "joins", "reports", "weekly")}  # на льоту
         heavy = (
             any(getattr(old, section) != getattr(config, section) for section in ("ears", "brain", "timezone", "data_dir"))
             or replace(old.telegram, **light_telegram) != config.telegram
@@ -299,6 +320,7 @@ class Controller:
             return "restarted"
         # Легкі зміни — на льоту.
         runner.config = config
+        self._apply_live(config)
         if runner.assistant is not None:
             runner.assistant.set_me(config.me)
             runner.assistant.alert_mentions = config.telegram.mentions
@@ -441,6 +463,7 @@ class Controller:
         runner = self.runner
         state: dict = {
             "running": runner is not None,
+            "config_rev": self.config_rev,
             "restart_pending": self._restart_pending,
             "now": self.clock().isoformat(),
             "google_accounts": list(self.google_accounts),
@@ -686,6 +709,7 @@ def api_get_config(server: AppServer, query: dict, body: dict):
     controller = server.controller
     return 200, {
         "config": config_to_dict(controller.config),
+        "rev": controller.config_rev,
         "universities": UNIVERSITIES,
         "path": str(controller.config_path),
         "profiles": list_profiles(),
@@ -701,7 +725,8 @@ def api_put_config(server: AppServer, query: dict, body: dict):
     first_time = not configured(server.controller.config) and configured(config)
     save_config(config, server.controller.config_path)
     result = server.controller.call("reload", config)
-    return 200, {"ok": True, "result": result, "config": config_to_dict(config), "autostart": first_time and server.autostart_once()}
+    return 200, {"ok": True, "result": result, "config": config_to_dict(config), "rev": server.controller.config_rev,
+                 "autostart": first_time and server.autostart_once()}
 
 
 def api_import(server: AppServer, query: dict, body: dict):
@@ -721,7 +746,8 @@ def api_import(server: AppServer, query: dict, body: dict):
     first_time = not configured(controller.config) and configured(config)
     save_config(config, controller.config_path)
     result = controller.call("reload", config)
-    return 200, {"ok": True, "result": result, "config": config_to_dict(config), "autostart": first_time and server.autostart_once()}
+    return 200, {"ok": True, "result": result, "config": config_to_dict(config), "rev": controller.config_rev,
+                 "autostart": first_time and server.autostart_once()}
 
 
 def api_groups(server: AppServer, query: dict, body: dict):

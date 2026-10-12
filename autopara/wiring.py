@@ -37,6 +37,7 @@ from . import notes
 from .refine import LessonAudio, Refiner
 from .helper import Helper, Library, subject_terms
 from .weekly import WeeklyDigest
+from . import tgsettings
 from .report import Reporter
 from .telegram import Notifier, TelegramBot
 
@@ -59,6 +60,10 @@ class Stack:
     schedule_text: Callable[[datetime], str] = lambda now: ""  # розклад текстом (app.py підставляє з Runner)
     media: Callable[[object], str | None] | None = None  # голосове чи фото з Telegram (telegram.Incoming)
     helper: object | None = None  # помічник з навчання (helper.Helper) — відповіді в Telegram
+    # Налаштування з Telegram (tgsettings.py): поточні й «зберегти» — підставляє програма (app.py); без неї — None.
+    settings: Callable[[], Config] | None = None
+    save_settings: Callable[[Config], None] | None = None
+    apply: Callable[[Config], None] = lambda config: None  # що з налаштувань діє на льоту, без перезапуску
 
 
 BIG_CHAT_FREE_GB = 9.0  # стільки вільної пам'яті (без швидкої моделі) — і поза парами відповідає розумна модель
@@ -104,9 +109,19 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
     if listening:
         bot.reply_goes_to_chat = assistant.answers_alert  # ↩️ у чат пари — лише на «тебе кличуть» тощо
         stop = threading.Event()
+
+        def command(text: str, is_reply: bool) -> str | None:
+            if tgsettings.wanted(text):
+                return settings_menu(text)
+            return assistant.on_command(text, clock(), is_reply)
+
+        def settings_menu(text: str) -> str:
+            current = stack.settings() if stack.settings is not None else None
+            return tgsettings.respond(text, bot, current, stack.save_settings)
+
         listener = threading.Thread(
             target=bot.listen,
-            args=(lambda text, is_reply: assistant.on_command(text, clock(), is_reply), stop,
+            args=(command, stop,
                   lambda incoming: stack.media(incoming) if stack.media else "Голосові й фото я ще не вмію — напиши текстом."),
             name="telegram",
             daemon=True,
@@ -327,7 +342,7 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             f"• Зараз {('на парі «' + meeting.title + '»') if meeting else 'не на парі'}; {ears_text}.",
             "• Під час пари сповіщаєш лише по ділу, дослівною цитатою: 🚨 студента кличуть (прізвище чи звертання на "
             "ім'я), 📋 перекличка, 📌 оголосили контрольну, дедлайн чи увімкнути камери.",
-            "• " + chat.get(config.me.chat_reply, chat["off"]) + ".",
+            "• " + chat.get((stack.settings() if stack.settings else config).me.chat_reply, chat["off"]) + ".",
             ("• Після пари ще раз уважно розшифровуєш запис (" + refine_name + "), коли пар найближчим часом немає, і "
              "тоді надсилаєш звіт — тому він приходить пізніше." if refine_name != "off" and ears is not None else
              "• Після пари одразу надсилаєш звіт."),
@@ -340,7 +355,8 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
             "• Голосові розшифровуєш, коли немає пари (на парі просиш текстом); фото розглядаєш (кілька хвилин).",
             "• Працюєш локально на ноутбуці студента, без інтернету; відеокарта — "
             + ("не використовується (так у налаштуваннях)" if config.ears.device == "cpu" else "лише якщо вона допомагає (NVIDIA)") + ".",
-            "• Налаштування — у вікні програми autopara: «Налаштування».",
+            "• Налаштування — у вікні програми autopara («Налаштування») або тут, у Telegram: команда «налаштування» — "
+            "кнопки для звітів, підсумку тижня, сповіщень і чату пари.",
         ]
         try:
             if upcoming := next_lesson(stack.schedule_text(now), now):
@@ -381,14 +397,22 @@ def assistant_stack(config: Config, clock: Callable[[], datetime]) -> Iterator[S
         threading.Thread(target=index_loop, name="semantic-index", daemon=True).start()
         stoppers.append(index_stop.set)
 
-    if bot is not None and config.telegram.weekly:
+    weekly_on = [config.telegram.weekly]  # вмикається й вимикається на льоту (налаштування з Telegram чи вікна)
+
+    def apply(new: Config) -> None:
+        reporter.send = new.telegram.reports
+        weekly_on[0] = new.telegram.weekly
+
+    stack.apply = apply
+    if bot is not None:
         def upcoming(now: datetime) -> str:
             try:
                 return stack.schedule_text(now, days=6)
             except TypeError:  # розклад без параметра днів
                 return stack.schedule_text(now)
 
-        weekly = WeeklyDigest(helper.library, notifier, clock, upcoming, config.data_dir / "weekly.json")
+        weekly = WeeklyDigest(helper.library, notifier, clock, upcoming, config.data_dir / "weekly.json",
+                              enabled=lambda: weekly_on[0])
         weekly.start()
         stoppers.append(weekly.stop)
 

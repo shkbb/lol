@@ -31,6 +31,7 @@ class SettingsPage(QWidget):
         self.accounts: AccountsPanel | None = None
         self.build()
         model.replaced.connect(self.build)
+        model.changed_elsewhere.connect(self.build)
 
     def build(self) -> None:
         current = self.tabs.currentIndex()

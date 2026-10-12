@@ -42,6 +42,7 @@ class Incoming:
     message_id: int = 0  # твоє повідомлення — на нього бот відповідає реплаєм
     voice: str = ""  # file_id голосового повідомлення
     photo: str = ""  # file_id фото (найбільший розмір, що не завеликий)
+    menu_id: int = 0  # повідомлення бота, під яким натиснули кнопку (меню налаштувань оновлюємо на місці)
 
 
 def split_text(text: str, limit: int = TEXT_LIMIT) -> list[str]:
@@ -105,15 +106,24 @@ class TelegramBot:
             if reply_to and index == 0:
                 params["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
             if buttons and index == len(parts) - 1:
-                params["reply_markup"] = {
-                    "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]
-                }
+                params["reply_markup"] = _keyboard(buttons)
             self._call("sendMessage", **params)
         if self.on_sent is not None and text.strip():
             try:
                 self.on_sent(text)
             except Exception:  # noqa: BLE001 — пам'ять розмови не має заважати надсиланню
                 log.debug("Не вдалося запам'ятати надіслане", exc_info=True)
+
+    def edit(self, message_id: int, text: str, buttons: Buttons | None = None) -> None:
+        """Змінити вже надіслане повідомлення бота (меню налаштувань після натиснутої кнопки)."""
+        params: dict = {"chat_id": self.chat_id, "message_id": message_id, "text": text[:TEXT_LIMIT]}
+        if buttons:
+            params["reply_markup"] = _keyboard(buttons)
+        try:
+            self._call("editMessageText", **params)
+        except TelegramError as e:
+            if "not modified" not in str(e):  # натиснули двічі — показувати нічого нового
+                raise
 
     def react(self, message_id: int, emoji: str = THINKING) -> None:
         """Реакція на твоє повідомлення (👀 — «прочитав, думаю»); "" — прибрати. Не вийшло — не біда."""
@@ -174,8 +184,9 @@ class TelegramBot:
                 messages.append(Incoming(message["chat"]["id"], text, "reply_to_message" in message, replied=replied,
                                          message_id=message.get("message_id", 0), voice=voice, photo=photo))
             if callback := update.get("callback_query"):
-                chat_id = (callback.get("message") or {}).get("chat", {}).get("id", 0)
-                messages.append(Incoming(chat_id, callback.get("data", ""), False, callback["id"]))
+                under = callback.get("message") or {}
+                messages.append(Incoming(under.get("chat", {}).get("id", 0), callback.get("data", ""), False, callback["id"],
+                                         menu_id=under.get("message_id", 0)))
         return messages
 
     def listen(self, handle: Callable[[str, bool], str | None], stop: threading.Event,
@@ -207,6 +218,10 @@ class TelegramBot:
             except TelegramError as e:
                 log.warning("%s — повторю за хвилину", e)
                 stop.wait(60)
+
+
+def _keyboard(buttons: Buttons) -> dict:
+    return {"inline_keyboard": [[{"text": label, "callback_data": data} for label, data in row] for row in buttons]}
 
 
 def _photo_id(message: dict) -> str:
@@ -335,6 +350,17 @@ class Notifier:
         log.info("💬 %s", text.splitlines()[0][:200] if text else "")
         if self.bot:
             self._queue.put(lambda: self.bot.send(text, reply_to=reply_to))
+
+    def edit(self, message_id: int, text: str, buttons: Buttons | None = None) -> None:
+        """Змінити вже надіслане повідомлення бота (меню налаштувань після натиснутої кнопки)."""
+        params: dict = {"chat_id": self.chat_id, "message_id": message_id, "text": text[:TEXT_LIMIT]}
+        if buttons:
+            params["reply_markup"] = _keyboard(buttons)
+        try:
+            self._call("editMessageText", **params)
+        except TelegramError as e:
+            if "not modified" not in str(e):  # натиснули двічі — показувати нічого нового
+                raise
 
     def react(self, message_id: int, emoji: str = THINKING) -> None:
         if self.bot and message_id:
